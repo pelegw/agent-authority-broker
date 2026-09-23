@@ -8,7 +8,7 @@ RUN CGO_ENABLED=0 go build -o /out/sidecar .
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata
-# Run unprivileged (uid 10001, same as the broker, which reads /data read-only).
+# Run unprivileged (uid 10001, same as plugin-whatsapp, which mounts /data read-only).
 # /data is created and owned BEFORE the VOLUME line: changes after VOLUME are
 # discarded, and a fresh named volume inherits this ownership.
 RUN addgroup -S -g 10001 aab \

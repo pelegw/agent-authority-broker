@@ -95,7 +95,7 @@ func (c *Client) Run(ctx context.Context) error {
 			c.setQR(item.Code)
 			fmt.Println("\n==== Scan this QR with WhatsApp (Settings > Linked devices) ====")
 			qrterminal.GenerateHalfBlock(item.Code, qrterminal.L, os.Stdout)
-			fmt.Println("(also available as PNG via the gateway: GET /v1/admin/qr)")
+			fmt.Println("(also available as PNG via the broker: GET /v1/admin/plugins/whatsapp/connect/qr.png)")
 		case "success":
 			// Track success explicitly. whatsmeow closes this channel the
 			// instant it emits "success", but IsLoggedIn() only flips true a

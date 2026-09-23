@@ -1,6 +1,7 @@
 // Package api is the sidecar's internal HTTP surface. It is reachable only on
 // the Docker-internal network and every route (except /health) requires the
-// shared X-Internal-Token. No policy lives here — that's the gateway's job.
+// shared X-Internal-Token. No policy lives here — that is the broker's job;
+// only plugin-whatsapp (on wa_internal) ever calls this API.
 package api
 
 import (

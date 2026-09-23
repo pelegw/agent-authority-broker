@@ -1,6 +1,6 @@
 // The sidecar: logs into WhatsApp as a linked device (whatsmeow), archives
 // messages into /data/messages.db, and serves a tiny token-guarded HTTP API
-// for the gateway. It holds no policy — it just speaks WhatsApp.
+// for the whatsapp plugin. It holds no policy — it just speaks WhatsApp.
 package main
 
 import (

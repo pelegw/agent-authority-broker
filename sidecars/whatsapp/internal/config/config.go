@@ -11,7 +11,7 @@ type Config struct {
 	DataDir string
 	// ListenAddr is the internal HTTP API address. Never publish this port.
 	ListenAddr string
-	// InternalToken must be presented by the gateway on every API request.
+	// InternalToken must be presented by the plugin on every API request.
 	InternalToken string
 	// DeviceName is shown in WhatsApp > Linked devices (set at pairing time).
 	DeviceName string

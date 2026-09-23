@@ -3,10 +3,13 @@
 #   docker compose -f docker-compose.yml -f docker-compose.public.yml up -d
 #
 # It (1) removes the broker's host port so it is reachable only via the edge
-# proxy on the internal network, (2) turns on origin lockdown (ORIGIN_SECRET),
-# and (3) adds a Caddy origin that terminates TLS and enforces Cloudflare
-# Authenticated Origin Pulls. Put Cloudflare (orange-cloud proxy) in front of
-# SITE_DOMAIN; see deploy/DEPLOY.md.
+# proxy on edge_net, (2) turns on origin lockdown (ORIGIN_SECRET), and (3) adds
+# a Caddy origin that terminates TLS and enforces Cloudflare Authenticated
+# Origin Pulls. Put Cloudflare (orange-cloud proxy) in front of SITE_DOMAIN;
+# see deploy/DEPLOY.md and docs/deployment.md.
+#
+# The edge joins edge_net only: it can reach the broker and nothing else, so a
+# compromised edge cannot call any plugin's /perform (those live on broker_net).
 
 services:
   broker:
@@ -22,9 +25,10 @@ services:
     image: caddy:2-alpine
     restart: unless-stopped
     depends_on: [broker]
-    networks: [internal]
+    networks: [edge_net]
     ports:
       - "443:443"          # the origin port Cloudflare connects to
+    # Only what Caddy needs: the hostname and the origin secret it checks.
     environment:
       SITE_DOMAIN: ${SITE_DOMAIN:?set to your public hostname, e.g. aab.example.com}
       ORIGIN_SECRET: ${ORIGIN_SECRET:?set the same value the broker checks}

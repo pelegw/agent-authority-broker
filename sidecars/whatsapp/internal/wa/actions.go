@@ -67,7 +67,7 @@ type SendResult struct {
 }
 
 // SendText sends a plain text message and archives it, so from-me messages
-// show up in the same history the gateway reads.
+// show up in the same history the plugin reads.
 func (c *Client) SendText(ctx context.Context, to, text string) (SendResult, error) {
 	if !c.WM.IsLoggedIn() {
 		return SendResult{}, ErrNotLinked
@@ -149,7 +149,7 @@ func ParseRecipient(to string) (types.JID, error) {
 			return types.EmptyJID, fmt.Errorf("unsupported JID server %q (want user, group, or lid)", jid.Server)
 		}
 		// Strip device/agent suffixes ("...:12@s.whatsapp.net") so what we send
-		// to is exactly the canonical JID the gateway's allowlist compared.
+		// to is exactly the canonical JID the broker's grant check compared.
 		return jid.ToNonAD(), nil
 	}
 	if !phoneRe.MatchString(to) {

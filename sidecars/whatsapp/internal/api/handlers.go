@@ -20,7 +20,8 @@ func (h *handlers) status(rw http.ResponseWriter, _ *http.Request) {
 }
 
 // qr serves the current pairing code as a PNG so the human can log in from a
-// browser (proxied by the gateway's admin API).
+// browser (served by plugin-whatsapp at /connect/qr.png and proxied by the
+// broker's admin API).
 func (h *handlers) qr(rw http.ResponseWriter, _ *http.Request) {
 	png, err := h.wa.QRPNG()
 	switch {
@@ -57,7 +58,7 @@ func (h *handlers) send(rw http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, wa.ErrNotLinked):
 		writeError(rw, http.StatusServiceUnavailable, err.Error())
 	case err != nil:
-		// Includes bad recipients; the gateway shows the message to the admin.
+		// Includes bad recipients; the plugin relays the message to the owner.
 		writeError(rw, http.StatusBadGateway, err.Error())
 	default:
 		writeJSON(rw, http.StatusOK, res)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate every broker-owned secret into a .env file (stdlib only).
+"""Generate every deployment secret into a .env file (stdlib only).
 
 Run once per deployment, before the first `docker compose up`:
 
@@ -9,9 +9,16 @@ Run once per deployment, before the first `docker compose up`:
     python scripts/init_secrets.py --example        # prints the .env.example template
 
 Why a script instead of "openssl rand" instructions: every secret gets the
-right shape (the Fernet key must be urlsafe base64 of 32 bytes), the file is
+right shape (Fernet keys must be urlsafe base64 of 32 bytes), the file is
 created 0600 from the start, and nothing secret is ever printed, so the
 command is safe to run in a recorded terminal or CI log.
+
+The generated values are the broker's own secrets plus, per plugin service
+(whatsapp, github, google), the token the broker presents to it
+(PLUGIN_TOKEN_<SERVICE>) and the key that encrypts that service's own secret
+volume (PLUGIN_SECRETS_KEY_<SERVICE>). One .env holds them all, but
+docker-compose.yml hands each container only its own values: no service gets
+the whole file.
 
 Third-party values (GitHub App, Google OAuth, Telegram, Cloudflare Access)
 can't be generated; they are written as empty, labelled placeholders and a
@@ -63,49 +70,71 @@ def _setup_token() -> str:
 
 # (section title, entries). Order here is the order in the file.
 SECTIONS: list[tuple[str, list[Entry]]] = [
-    ("Broker-owned secrets (generated; rotate with --rotate NAME)", [
+    ("Broker secrets (generated; rotate with --rotate NAME; broker container only)", [
         Entry("SETUP_TOKEN",
               "One-time token for creating the owner account at /admin. Inert once setup completes.",
               generate=_setup_token),
-        Entry("SIDECAR_TOKEN",
-              "Shared secret between the broker and the WhatsApp sidecar (internal network only).",
-              generate=_hex32),
         Entry("ORIGIN_SECRET",
               "Edge secret a Cloudflare Transform Rule adds as X-AAB-Origin. Used only by the public overlay.",
               generate=_hex32),
         Entry("BROKER_SECRETS_KEY",
-              "Fernet key encrypting plugin credentials at rest. Changing it forces plugins to reconnect.",
+              "Fernet key for broker-side secrets. Reserved: protects nothing in 0.2.0 (no target credentials in the broker).",
               generate=_fernet_key),
         Entry("DECISION_SIGNING_KEY",
               "HMAC key for the hash-chained decision record. Keep it stable: old rows verify under it.",
               generate=_hex32),
     ]),
+    ("Plugin service secrets (generated; each only to the containers named)", [
+        Entry("PLUGIN_TOKEN_WHATSAPP",
+              "Broker <-> plugin-whatsapp token (X-Plugin-Token). Broker and plugin-whatsapp only.",
+              generate=_hex32),
+        Entry("PLUGIN_SECRETS_KEY_WHATSAPP",
+              "Fernet key for plugin-whatsapp's own secret volume. plugin-whatsapp only.",
+              generate=_fernet_key),
+        Entry("SIDECAR_TOKEN",
+              "plugin-whatsapp <-> whatsapp-sidecar token (X-Internal-Token, wa_internal network). Never the broker.",
+              generate=_hex32),
+        Entry("PLUGIN_TOKEN_GITHUB",
+              "Broker <-> plugin-github token (X-Plugin-Token). Broker and plugin-github only.",
+              generate=_hex32),
+        Entry("PLUGIN_SECRETS_KEY_GITHUB",
+              "Fernet key for plugin-github's own secret volume (App key, installation). plugin-github only.",
+              generate=_fernet_key),
+        Entry("PLUGIN_TOKEN_GOOGLE",
+              "Broker <-> plugin-google token (X-Plugin-Token). Broker and plugin-google only.",
+              generate=_hex32),
+        Entry("PLUGIN_SECRETS_KEY_GOOGLE",
+              "Fernet key for plugin-google's own secret volume (OAuth refresh token). plugin-google only.",
+              generate=_fernet_key),
+    ]),
     ("Third-party values (fill in; see the checklist the script prints)", [
         Entry("GITHUB_APP_ID",
-              "GitHub App id for the github plugin.",
+              "GitHub App id for the github plugin (plugin-github only).",
               obtain="GitHub > Settings > Developer settings > GitHub Apps > New GitHub App; "
                      "the App ID is on the app's General page."),
         Entry("GITHUB_APP_PRIVATE_KEY_PATH",
-              "Path (as the broker container sees it) to the GitHub App private key PEM.",
+              "Path (as the github plugin container sees it) to the App private key PEM, e.g. "
+              "/run/secrets/github/app.pem (see docs/deployment.md).",
               obtain="The GitHub App's General page > Private keys > Generate a private key."),
         Entry("GOOGLE_OAUTH_CLIENT_ID",
-              "Google OAuth client id shared by the gmail, gcal and gdrive plugins.",
+              "Google OAuth client id shared by the gmail, gcal and gdrive plugins (plugin-google only).",
               obtain="Google Cloud Console > APIs & Services > Credentials > Create credentials > "
                      "OAuth client ID (Web application)."),
         Entry("GOOGLE_OAUTH_CLIENT_SECRET",
-              "Google OAuth client secret for the client id above.",
+              "Google OAuth client secret for the client id above (plugin-google only).",
               obtain="Shown next to the client id in Google Cloud Console > Credentials."),
         Entry("TELEGRAM_BOT_TOKEN",
-              "Telegram bot token for approval cards on your phone. Blank = Telegram off.",
+              "Telegram bot token for approval cards on your phone (broker only). Blank = Telegram off.",
               obtain="Message @BotFather on Telegram, send /newbot, copy the token."),
         Entry("CF_ACCESS_TEAM_DOMAIN",
               "Cloudflare Access team domain, e.g. myteam.cloudflareaccess.com (public mode only).",
               obtain="Cloudflare Zero Trust dashboard > Settings > Custom Pages > Team domain."),
         Entry("CF_ACCESS_AUD",
-              "Audience (AUD) tag of the Access application protecting /admin (public mode only).",
+              "Audience (AUD) tag of the Access application on the admin plane (public mode only).",
               obtain="Zero Trust > Access > Applications > your app > Overview > Application Audience (AUD) Tag."),
         Entry("SITE_DOMAIN",
-              "Public hostname Cloudflare proxies to this host, e.g. aab.example.com (public mode only).",
+              "Public hostname Cloudflare proxies to this host, e.g. aab.example.com (public mode; "
+              "also the OAuth redirect host).",
               obtain="Your Cloudflare DNS: the proxied (orange-cloud) record pointing at this host."),
     ]),
     ("Settings (defaults are fine for a local run)", [
@@ -113,6 +142,10 @@ SECTIONS: list[tuple[str, list[Entry]]] = [
         Entry("DEVICE_NAME", "Name shown under WhatsApp > Linked devices (applied at pairing).",
               default="AAB"),
         Entry("TZ", "Timezone for logs.", default="UTC"),
+        Entry("GITHUB_APP_KEY_DIR",
+              "Host directory bind-mounted read-only into plugin-github at /run/secrets/github "
+              "(holds app.pem; git-ignored under data/).",
+              default="./data/github-app"),
         Entry("MCP_ALLOWED_HOSTS", "Host headers the /mcp endpoint accepts (DNS-rebinding guard).",
               default="localhost:*,127.0.0.1:*"),
         Entry("CF_ACCESS_ENABLED",
@@ -142,10 +175,21 @@ HEADER_EXAMPLE = [
 # What to do after rotating each generated secret.
 ROTATE_HINTS = {
     "SETUP_TOKEN": "Only matters before the owner account exists.",
-    "SIDECAR_TOKEN": "Restart both containers: docker compose up -d.",
-    "ORIGIN_SECRET": "Update the Cloudflare Transform Rule header value, then restart.",
-    "BROKER_SECRETS_KEY": "Stored plugin credentials no longer decrypt: reconnect each plugin.",
+    "ORIGIN_SECRET": "Update the Cloudflare Transform Rule header value, then restart: "
+                     "docker compose -f docker-compose.yml -f docker-compose.public.yml up -d.",
+    "BROKER_SECRETS_KEY": "Restart the broker: docker compose up -d broker. "
+                          "Nothing is encrypted under it in 0.2.0.",
     "DECISION_SIGNING_KEY": "Existing decision rows will no longer verify under the new key.",
+    "PLUGIN_TOKEN_WHATSAPP": "Restart both ends: docker compose up -d broker plugin-whatsapp.",
+    "PLUGIN_SECRETS_KEY_WHATSAPP": "Restart plugin-whatsapp; its stored config no longer "
+                                   "decrypts, so re-save the WhatsApp plugin settings.",
+    "SIDECAR_TOKEN": "Restart both ends: docker compose up -d plugin-whatsapp whatsapp-sidecar.",
+    "PLUGIN_TOKEN_GITHUB": "Restart both ends: docker compose up -d broker plugin-github.",
+    "PLUGIN_SECRETS_KEY_GITHUB": "Restart plugin-github, then reconnect GitHub from the console "
+                                 "(its stored App key and installation no longer decrypt).",
+    "PLUGIN_TOKEN_GOOGLE": "Restart both ends: docker compose up -d broker plugin-google.",
+    "PLUGIN_SECRETS_KEY_GOOGLE": "Restart plugin-google, then reconnect Google from the console "
+                                 "(its stored refresh token no longer decrypts).",
 }
 
 

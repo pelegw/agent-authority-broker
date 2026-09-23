@@ -108,7 +108,7 @@ func (c *Client) ingestHistorySync(v *events.HistorySync) {
 }
 
 // syncContacts dumps whatsmeow's synced contact list into our archive so the
-// gateway can resolve names → JIDs. Runs on every (re)connect; upserts only.
+// plugin can resolve names → JIDs. Runs on every (re)connect; upserts only.
 func (c *Client) syncContacts() {
 	contacts, err := c.WM.Store.Contacts.GetAllContacts(context.Background())
 	if err != nil {

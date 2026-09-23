@@ -1,6 +1,6 @@
 // Package store owns messages.db — the message/chat/contact archive.
 //
-// The sidecar is the ONLY writer. The Python gateway opens the same file
+// The sidecar is the ONLY writer. The whatsapp plugin opens the same file
 // read-only (SQLite mode=ro); WAL mode below is what makes that safe.
 package store
 
@@ -50,7 +50,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open messages db: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	// WAL lets the gateway read while we write; busy_timeout papers over
+	// WAL lets the plugin read while we write; busy_timeout papers over
 	// the brief lock during checkpoints.
 	for _, pragma := range []string{
 		"PRAGMA journal_mode=WAL",

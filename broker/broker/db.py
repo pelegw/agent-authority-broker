@@ -106,7 +106,12 @@ CREATE TABLE IF NOT EXISTS plugins (
     updated_at  INTEGER NOT NULL
 );
 
--- Encrypted plugin credentials. Written and read only through crypto.py.
+-- RESERVED, unused in 0.2.0 (kept because the schema is additive-only).
+-- Target credentials live in the plugin containers, never here: the Google
+-- refresh token and GitHub App key in each plugin's own secret volume under
+-- its own PLUGIN_SECRETS_KEY_<SERVICE>, the WhatsApp session in wa_data
+-- (sidecar-owned). The broker holds none. If a broker-side secret
+-- ever needs storing, it goes here, only through crypto.py.
 CREATE TABLE IF NOT EXISTS plugin_secrets (
     slot       TEXT NOT NULL,                 -- plugin id, or a shared slot such as 'google'
     name       TEXT NOT NULL,
