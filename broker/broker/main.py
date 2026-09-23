@@ -13,7 +13,7 @@ from . import __version__, db
 from .config import get_settings, validate_exposure
 from .errors import PolicyError
 from .origin import OriginGuardMiddleware
-from .routers import health
+from .routers import admin, auth, health
 
 
 @asynccontextmanager
@@ -38,6 +38,10 @@ api = FastAPI(
 )
 
 api.include_router(health.router)
+# Pre-login owner endpoints (status/setup/login/logout): outside require_admin.
+api.include_router(auth.router)
+# Everything that needs an owner credential, guarded router-wide.
+api.include_router(admin.router)
 
 
 @api.exception_handler(PolicyError)
