@@ -86,7 +86,7 @@ session's attribution trailers.
 
 - [x] 0. Skeleton: repo, VERSION, config, db schema, security ports, compose, CI, secrets script
 - [x] 1. Identity: owner setup/login/sessions, admin tokens, `require_admin` -> `AdminContext`
-- [ ] 2. Authority core: capabilities, grants, `narrow()`, roles, `aab_` keys, hypothesis suite
+- [x] 2. Authority core: capabilities, grants, `narrow()`, roles, `aab_` keys, hypothesis suite
 - [ ] 3. Engine: plugin registry, policy, decisions, ledger, actions, notify, MCP, CLI (against `echo`)
 - [ ] 4. WhatsApp plugin + console v1 (full WA_GW replacement)
 - [ ] 5. Delegation + generated skill doc (+ CI drift check)
