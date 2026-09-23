@@ -20,6 +20,37 @@ jobs:
         working-directory: broker
         run: python -m pytest
 
+  plugin-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # hashFiles is not available in a job-level `if` (nothing is checked out
+      # yet), so each step carries the guard: until plugin-runtime/ exists the
+      # job runs and passes as a no-op.
+      - name: Install plugin-runtime (editable, with dev extras)
+        if: hashFiles('plugin-runtime/pyproject.toml') != ''
+        run: pip install -e "plugin-runtime[dev]"
+      - name: pytest
+        if: hashFiles('plugin-runtime/pyproject.toml') != ''
+        run: pytest plugin-runtime
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Validate both compose shapes against a throwaway .env from the real
+      # secrets script, so a missing variable or bad key fails here.
+      - name: docker compose config (base and base+public)
+        run: |
+          python3 scripts/init_secrets.py --out .env
+          sed -i 's/^SITE_DOMAIN=$/SITE_DOMAIN=aab.example.com/' .env
+          docker compose config -q
+          docker compose -f docker-compose.yml -f docker-compose.public.yml config -q
+          rm -f .env
+
   go:
     runs-on: ubuntu-latest
     steps:

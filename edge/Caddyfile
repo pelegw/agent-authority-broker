@@ -2,7 +2,8 @@
 #
 # Flow: Internet -> Cloudflare (proxy, WAF, edge rate limiting)
 #                -> this Caddy on :443 (origin)
-#                -> broker:8080 (internal Docker network).
+#                -> broker:8080 (edge_net: the edge reaches the broker only,
+#                   never a plugin service).
 #
 # Origin-lockdown layers so nobody who learns the origin IP can bypass CF:
 #   1. Secret header (ORIGIN_SECRET) — the PRIMARY per-deployment gate. A

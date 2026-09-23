@@ -10,9 +10,9 @@ COPY cli ./cli
 # hatch reads __version__ from broker/__init__.py, which walks up to /srv/VERSION.
 RUN pip install --no-cache-dir .
 
-# Run unprivileged. uid 10001 matches the WhatsApp sidecar so the shared
-# wa_data volume (written by the sidecar, read-only here) is readable.
-# /gwdata is created and owned in the image so a fresh named volume mounted
+# Run unprivileged as aab, uid 10001 like every image in the stack (the
+# sidecar and plugin-whatsapp share wa_data under that uid; the broker never
+# mounts it and holds no target credential). /gwdata is created and owned in the image so a fresh named volume mounted
 # there inherits that ownership. /srv stays root-owned: the code is read-only
 # to the running process.
 RUN groupadd --system --gid 10001 aab \

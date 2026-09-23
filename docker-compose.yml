@@ -2,25 +2,24 @@ name: aab
 
 # Local run: python scripts/init_secrets.py && docker compose up -d --build
 # The broker then listens on 127.0.0.1:${BROKER_PORT:-8080} only.
+# Public run: add docker-compose.public.yml on top (see docs/deployment.md).
+#
+# Shape (docs/architecture.md section 2): one container per plugin service.
+# The broker holds NO target credential; each plugin service holds its own,
+# encrypted in its own secret volume under its own PLUGIN_SECRETS_KEY_<SERVICE>.
+#
+#   edge_net     edge <-> broker            (edge exists only in the public overlay)
+#   broker_net   broker <-> plugin services (the edge can never reach a plugin)
+#   wa_internal  plugin-whatsapp <-> whatsapp-sidecar (the broker can't reach the sidecar)
+#
+# Env split: there is deliberately no env_file. .env holds every value, but
+# each service below receives only the variables it names, so no container
+# ever sees another container's token or key.
 
 services:
-  # Speaks the WhatsApp multi-device protocol (whatsmeow). Holds the session.
-  # Deliberately "dumb": no policy, no agent-facing API. Never published to the host.
-  whatsapp-sidecar:
-    build: ./sidecars/whatsapp
-    restart: unless-stopped
-    networks: [internal]
-    volumes:
-      - wa_data:/data
-    # Only what the sidecar needs; it never sees the broker's other secrets.
-    environment:
-      SIDECAR_TOKEN: ${SIDECAR_TOKEN:?run 'python scripts/init_secrets.py' to create .env}
-      # Shown in WhatsApp > Linked devices. Takes effect on the next (re-)link.
-      DEVICE_NAME: ${DEVICE_NAME:-AAB}
-      TZ: ${TZ:-UTC}
-
   # The only thing agents ever talk to: REST + MCP, owner console, grants,
-  # decision record. Holds every target credential; agents hold none.
+  # decision record, Telegram cards. Reaches plugins over broker_net with a
+  # per-service X-Plugin-Token; holds no target credential itself.
   broker:
     build:
       context: ./broker
@@ -29,28 +28,141 @@ services:
       additional_contexts:
         repo: .
     restart: unless-stopped
-    depends_on: [whatsapp-sidecar]
-    networks: [internal]
+    # No depends_on on the plugins: a plugin that is down shows as unhealthy
+    # in the console; it does not keep the broker from starting.
+    networks: [edge_net, broker_net]
     ports:
-      - "127.0.0.1:${BROKER_PORT:-8080}:8080"   # loopback only
+      - "127.0.0.1:${BROKER_PORT:-8080}:8080"   # loopback only; the public overlay removes it
     volumes:
-      - wa_data:/data:ro      # sidecar-owned archive; the broker only ever reads it
       - broker_data:/gwdata   # broker-owned DB (principals, keys, grants, decisions)
-    # Everything init_secrets.py wrote (secrets, third-party values, settings).
-    env_file: .env
     environment:
       BROKER_DB: /gwdata/broker.db
+      TZ: ${TZ:-UTC}
+      SETUP_TOKEN: ${SETUP_TOKEN:?run 'python scripts/init_secrets.py' to create .env}
+      BROKER_SECRETS_KEY: ${BROKER_SECRETS_KEY:?run 'python scripts/init_secrets.py' to create .env}
+      DECISION_SIGNING_KEY: ${DECISION_SIGNING_KEY:?run 'python scripts/init_secrets.py' to create .env}
       # The base file is local-only, so origin lockdown stays OFF here even
       # though .env carries a generated ORIGIN_SECRET (otherwise every local
       # request would 403 and boot would demand Cloudflare Access).
       # docker-compose.public.yml turns it on.
       ORIGIN_SECRET: ""
+      CF_ACCESS_ENABLED: ${CF_ACCESS_ENABLED:-false}
+      CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:-}
+      CF_ACCESS_AUD: ${CF_ACCESS_AUD:-}
+      CF_ACCESS_ALLOWED_EMAILS: ${CF_ACCESS_ALLOWED_EMAILS:-}
+      ALLOW_INSECURE_ADMIN: ${ALLOW_INSECURE_ADMIN:-false}
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-localhost:*,127.0.0.1:*}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      # Where each plugin service answers (broker_net) and the token the
+      # broker presents to it. Keyed by service, not plugin id: plugin-google
+      # hosts gmail, gcal and gdrive behind one URL and one token.
+      PLUGIN_URL_WHATSAPP: http://plugin-whatsapp:8090
+      PLUGIN_URL_GITHUB: http://plugin-github:8090
+      PLUGIN_URL_GOOGLE: http://plugin-google:8090
+      PLUGIN_TOKEN_WHATSAPP: ${PLUGIN_TOKEN_WHATSAPP:?run 'python scripts/init_secrets.py' to create .env}
+      PLUGIN_TOKEN_GITHUB: ${PLUGIN_TOKEN_GITHUB:?run 'python scripts/init_secrets.py' to create .env}
+      PLUGIN_TOKEN_GOOGLE: ${PLUGIN_TOKEN_GOOGLE:?run 'python scripts/init_secrets.py' to create .env}
 
+  # WhatsApp plugin service: the plugin runtime hosting the whatsapp adapter.
+  # Reads the archive (messages.db) read-only and drives the sidecar over
+  # wa_internal. The only container besides the sidecar holding SIDECAR_TOKEN.
+  plugin-whatsapp:
+    build:
+      context: ./plugins/whatsapp
+      additional_contexts:
+        runtime: ./plugin-runtime   # the aab-plugin-runtime package
+        repo: .                     # VERSION and the vendored manifests
+    restart: unless-stopped
+    depends_on: [whatsapp-sidecar]
+    networks: [broker_net, wa_internal]
+    volumes:
+      - wa_data:/data:ro            # sidecar-owned archive + session; read-only here
+      - whatsapp_secrets:/secrets   # this plugin's own encrypted config
+    environment:
+      PLUGIN_TOKEN_WHATSAPP: ${PLUGIN_TOKEN_WHATSAPP:?run 'python scripts/init_secrets.py' to create .env}
+      PLUGIN_SECRETS_KEY_WHATSAPP: ${PLUGIN_SECRETS_KEY_WHATSAPP:?run 'python scripts/init_secrets.py' to create .env}
+      SIDECAR_URL: http://whatsapp-sidecar:8081
+      SIDECAR_TOKEN: ${SIDECAR_TOKEN:?run 'python scripts/init_secrets.py' to create .env}
+      MESSAGES_DB: /data/messages.db
+
+  # Speaks the WhatsApp multi-device protocol (whatsmeow). Holds the session.
+  # Deliberately "dumb": no policy, no agent-facing API. Only plugin-whatsapp
+  # can reach it (wa_internal); never published to the host.
+  whatsapp-sidecar:
+    build: ./sidecars/whatsapp
+    restart: unless-stopped
+    networks: [wa_internal]
+    volumes:
+      - wa_data:/data   # read-write: session.db (plaintext, whatsmeow's store) + messages.db
+    environment:
+      SIDECAR_TOKEN: ${SIDECAR_TOKEN:?run 'python scripts/init_secrets.py' to create .env}
+      # Shown in WhatsApp > Linked devices. Takes effect on the next (re-)link.
+      DEVICE_NAME: ${DEVICE_NAME:-AAB}
+      TZ: ${TZ:-UTC}
+
+  # GitHub plugin service: holds the GitHub App private key and installation,
+  # mints installation tokens narrowed to the repos/permissions of each call.
+  plugin-github:
+    build:
+      context: ./plugins/github
+      additional_contexts:
+        runtime: ./plugin-runtime
+        repo: .
+    restart: unless-stopped
+    networks: [broker_net]
+    volumes:
+      - github_secrets:/secrets
+      # Optional bootstrap for the App private key: put app.pem in
+      # GITHUB_APP_KEY_DIR on the host (default ./data/github-app, git-ignored)
+      # and set GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github/app.pem in .env.
+      # Mounted into this container only, read-only. See docs/deployment.md.
+      - type: bind
+        source: ${GITHUB_APP_KEY_DIR:-./data/github-app}
+        target: /run/secrets/github
+        read_only: true
+        bind:
+          create_host_path: true
+    environment:
+      PLUGIN_TOKEN_GITHUB: ${PLUGIN_TOKEN_GITHUB:?run 'python scripts/init_secrets.py' to create .env}
+      PLUGIN_SECRETS_KEY_GITHUB: ${PLUGIN_SECRETS_KEY_GITHUB:?run 'python scripts/init_secrets.py' to create .env}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY_PATH: ${GITHUB_APP_PRIVATE_KEY_PATH:-}
+
+  # Google plugin service: one container for gmail, gcal and gdrive, because
+  # they share one OAuth credential (the isolation boundary that matters).
+  # Holds the client secret and refresh token; mints per-scope-set tokens.
+  plugin-google:
+    build:
+      context: ./plugins/google
+      additional_contexts:
+        runtime: ./plugin-runtime
+        repo: .
+    restart: unless-stopped
+    networks: [broker_net]
+    volumes:
+      - google_secrets:/secrets
+    environment:
+      PLUGIN_TOKEN_GOOGLE: ${PLUGIN_TOKEN_GOOGLE:?run 'python scripts/init_secrets.py' to create .env}
+      PLUGIN_SECRETS_KEY_GOOGLE: ${PLUGIN_SECRETS_KEY_GOOGLE:?run 'python scripts/init_secrets.py' to create .env}
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      # Builds the redirect URI https://<SITE_DOMAIN>/oauth/callback/google.
+      SITE_DOMAIN: ${SITE_DOMAIN:-}
+
+# None of these is `internal: true`: the broker (Telegram, Cloudflare JWKS),
+# the plugins (GitHub, Google) and the sidecar (WhatsApp) all need egress.
+# Isolation here is about which containers can reach which, not the internet.
 networks:
-  internal: {}
+  edge_net: {}
+  broker_net: {}
+  wa_internal: {}
 
 # Named volumes (not bind mounts): SQLite WAL locking is unreliable over
 # Docker Desktop's NTFS file sharing; named volumes live on ext4 inside WSL2.
+# Each secret volume is mounted by exactly one service.
 volumes:
-  wa_data: {}
   broker_data: {}
+  wa_data: {}
+  whatsapp_secrets: {}
+  github_secrets: {}
+  google_secrets: {}

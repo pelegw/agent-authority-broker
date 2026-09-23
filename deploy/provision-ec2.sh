@@ -78,7 +78,17 @@ echo "==> Creating ${APP_DIR}"
 sudo mkdir -p "${APP_DIR}"
 sudo chown "$USER":"$USER" "${APP_DIR}"
 
+# Host-only directory bind-mounted read-only into plugin-github (and nothing
+# else) at /run/secrets/github, for the optional GitHub App key file. Owned by
+# uid 10001 (the containers' non-root user) and closed to everyone else;
+# deploy/push.sh never syncs or deletes data/.
+echo "==> Creating ${APP_DIR}/data/github-app (GitHub App key, plugin-github only)"
+sudo mkdir -p "${APP_DIR}/data/github-app"
+sudo chown 10001:10001 "${APP_DIR}/data/github-app"
+sudo chmod 0700 "${APP_DIR}/data/github-app"
+
 echo
 echo "Done. Log out and back in (for the docker group) before deploying."
 echo "Next: place edge/certs on the host, then run deploy/push.sh from your laptop."
-echo "The first push generates .env on the host with scripts/init_secrets.py."
+echo "The first push generates .env on the host with scripts/init_secrets.py"
+echo "(broker secrets plus a token and a key per plugin service)."
