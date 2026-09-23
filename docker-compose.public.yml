@@ -1,0 +1,39 @@
+# Public-exposure overlay. Use ON TOP of the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.public.yml up -d
+#
+# It (1) removes the broker's host port so it is reachable only via the edge
+# proxy on the internal network, (2) turns on origin lockdown (ORIGIN_SECRET),
+# and (3) adds a Caddy origin that terminates TLS and enforces Cloudflare
+# Authenticated Origin Pulls. Put Cloudflare (orange-cloud proxy) in front of
+# SITE_DOMAIN; see deploy/DEPLOY.md.
+
+services:
+  broker:
+    # Drop the loopback publish from the base file: only Caddy reaches it now.
+    ports: !reset []
+    environment:
+      ORIGIN_SECRET: ${ORIGIN_SECRET:?run 'python scripts/init_secrets.py' to create .env}
+      # Caddy forwards the original Host header (your public domain), so the
+      # /mcp DNS-rebinding guard must accept it; otherwise MCP clients get 421.
+      MCP_ALLOWED_HOSTS: "localhost:*,127.0.0.1:*,${SITE_DOMAIN:?set SITE_DOMAIN in .env}"
+
+  edge:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [broker]
+    networks: [internal]
+    ports:
+      - "443:443"          # the origin port Cloudflare connects to
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN:?set to your public hostname, e.g. aab.example.com}
+      ORIGIN_SECRET: ${ORIGIN_SECRET:?set the same value the broker checks}
+    volumes:
+      - ./edge/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Mount your Cloudflare Origin Certificate + key and the origin-pull CA:
+      #   certs/origin.pem  certs/origin.key  certs/cloudflare-origin-pull-ca.pem
+      - ./edge/certs:/certs:ro
+      - caddy_data:/data
+
+volumes:
+  caddy_data: {}

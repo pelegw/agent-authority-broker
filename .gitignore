@@ -1,0 +1,29 @@
+# Secrets: never commit. Ignore every .env variant but keep the template.
+.env
+.env.*
+!.env.example
+
+# Databases / session credentials
+*.db
+*.db-wal
+*.db-shm
+data/
+gwdata/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.hypothesis/
+*.egg-info/
+build/
+dist/
+
+# Go
+sidecars/whatsapp/sidecar
+*.exe
+
+# Public-exposure secrets: ignore everything under edge/certs except its README.
+edge/certs/*
+!edge/certs/README.md

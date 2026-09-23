@@ -1,0 +1,6 @@
+# Normalize line endings. Scripts and code stay LF so they run on Linux (the
+# deploy .sh files break with CRLF); only Windows batch files use CRLF.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.png binary
+*.jpg binary

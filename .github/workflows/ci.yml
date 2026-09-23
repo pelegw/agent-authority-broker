@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install broker (editable, with dev extras)
+        run: pip install -e "broker[dev]"
+      # Includes tests/test_init_secrets.py, so the secrets script (and its
+      # POSIX 0600 check, skipped on Windows) runs here too.
+      - name: pytest
+        working-directory: broker
+        run: python -m pytest
+
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: sidecars/whatsapp/go.sum
+      - name: go build + test
+        working-directory: sidecars/whatsapp
+        run: |
+          go build ./...
+          go test ./...
+
+  skill-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Phase 5 replaces this with: aab skill build ... && git diff --exit-code integrations/
+      - name: placeholder
+        run: echo "skill drift check added in phase 5"

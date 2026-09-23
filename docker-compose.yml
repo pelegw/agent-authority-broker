@@ -1,0 +1,56 @@
+name: aab
+
+# Local run: python scripts/init_secrets.py && docker compose up -d --build
+# The broker then listens on 127.0.0.1:${BROKER_PORT:-8080} only.
+
+services:
+  # Speaks the WhatsApp multi-device protocol (whatsmeow). Holds the session.
+  # Deliberately "dumb": no policy, no agent-facing API. Never published to the host.
+  whatsapp-sidecar:
+    build: ./sidecars/whatsapp
+    restart: unless-stopped
+    networks: [internal]
+    volumes:
+      - wa_data:/data
+    # Only what the sidecar needs; it never sees the broker's other secrets.
+    environment:
+      SIDECAR_TOKEN: ${SIDECAR_TOKEN:?run 'python scripts/init_secrets.py' to create .env}
+      # Shown in WhatsApp > Linked devices. Takes effect on the next (re-)link.
+      DEVICE_NAME: ${DEVICE_NAME:-AAB}
+      TZ: ${TZ:-UTC}
+
+  # The only thing agents ever talk to: REST + MCP, owner console, grants,
+  # decision record. Holds every target credential; agents hold none.
+  broker:
+    build:
+      context: ./broker
+      # VERSION lives at the repo root (single source); the Dockerfile copies
+      # it from this named context.
+      additional_contexts:
+        repo: .
+    restart: unless-stopped
+    depends_on: [whatsapp-sidecar]
+    networks: [internal]
+    ports:
+      - "127.0.0.1:${BROKER_PORT:-8080}:8080"   # loopback only
+    volumes:
+      - wa_data:/data:ro      # sidecar-owned archive; the broker only ever reads it
+      - broker_data:/gwdata   # broker-owned DB (principals, keys, grants, decisions)
+    # Everything init_secrets.py wrote (secrets, third-party values, settings).
+    env_file: .env
+    environment:
+      BROKER_DB: /gwdata/broker.db
+      # The base file is local-only, so origin lockdown stays OFF here even
+      # though .env carries a generated ORIGIN_SECRET (otherwise every local
+      # request would 403 and boot would demand Cloudflare Access).
+      # docker-compose.public.yml turns it on.
+      ORIGIN_SECRET: ""
+
+networks:
+  internal: {}
+
+# Named volumes (not bind mounts): SQLite WAL locking is unreliable over
+# Docker Desktop's NTFS file sharing; named volumes live on ext4 inside WSL2.
+volumes:
+  wa_data: {}
+  broker_data: {}

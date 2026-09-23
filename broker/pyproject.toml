@@ -1,0 +1,39 @@
+[project]
+name = "agent-authority-broker"
+dynamic = ["version"]   # single source: ../VERSION, read by broker/__init__.py
+description = "Credential-holding authority broker for AI agents (REST + MCP)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
+    "mcp>=1.9,<2",           # official MCP SDK (not the third-party 'fastmcp' package)
+    "httpx>=0.27,<1",
+    "pydantic-settings>=2.4,<3",
+    "pyjwt[crypto]>=2.8,<3", # Cloudflare Access JWTs (RS256), GitHub App JWTs
+    "pyyaml>=6,<7",          # plugin manifests
+    "cryptography>=42",      # Fernet for plugin_secrets (crypto.py)
+]
+
+[project.optional-dependencies]
+# hypothesis is unused until phase 2 (grant algebra properties); listed now so
+# that phase doesn't need to touch this file.
+dev = ["pytest>=8", "hypothesis>=6"]
+
+[project.scripts]
+aab = "cli.aab:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# hatch runs broker/__init__.py (source = "code") and takes __version__, which
+# itself reads ../VERSION. Keeps the number in exactly one file.
+[tool.hatch.version]
+source = "code"
+path = "broker/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["broker", "cli"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

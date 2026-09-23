@@ -1,0 +1,44 @@
+# TLS-terminating reverse proxy for public (Cloudflare-fronted) deployment.
+#
+# Flow: Internet -> Cloudflare (proxy, WAF, edge rate limiting)
+#                -> this Caddy on :443 (origin)
+#                -> broker:8080 (internal Docker network).
+#
+# Origin-lockdown layers so nobody who learns the origin IP can bypass CF:
+#   1. Secret header (ORIGIN_SECRET) — the PRIMARY per-deployment gate. A
+#      Cloudflare Transform Rule injects it on every request; Caddy AND the
+#      broker reject anything without it. Unguessable and unique to you.
+#   2. Authenticated Origin Pulls (mTLS) — defense in depth. NOTE: the default
+#      cloudflare-origin-pull-ca.pem is Cloudflare's GLOBAL CA, so it only
+#      proves the caller is *some* Cloudflare account, not specifically yours.
+#      For strong per-zone mTLS, upload your OWN certificate as a custom
+#      Authenticated Origin Pull cert and pin THAT here instead (see deploy/DEPLOY.md).
+#      Until then, treat layer 1 (the secret) as the real lock.
+#
+# {$SITE_DOMAIN} and {$ORIGIN_SECRET} come from the environment (compose passes
+# them in). For a first bring-up without a domain/cert yet, see the :80 block.
+
+{
+	# No automatic public ACME needed: Cloudflare terminates the public TLS and
+	# we serve the origin with the Cloudflare Origin Certificate mounted below.
+	auto_https disable_redirects
+}
+
+{$SITE_DOMAIN} {
+	tls /certs/origin.pem /certs/origin.key {
+		# Authenticated Origin Pulls: require Cloudflare's client certificate.
+		client_auth {
+			mode require_and_verify
+			trust_pool file /certs/cloudflare-origin-pull-ca.pem
+		}
+	}
+
+	# Defense in depth: reject anything missing the edge secret before it even
+	# reaches the app (the broker enforces this too).
+	@no_secret not header X-AAB-Origin "{$ORIGIN_SECRET}"
+	respond @no_secret "forbidden" 403
+
+	reverse_proxy broker:8080 {
+		header_up X-Real-IP {remote_host}
+	}
+}
