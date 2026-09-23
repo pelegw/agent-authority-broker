@@ -16,3 +16,22 @@ def client_ip(request: Request) -> str:
     if ip:
         return ip
     return request.client.host if request.client else ""
+
+
+# ---- phase 2: agent-key bearer auth ---------------------------------------
+# Kept at the end of the file so the phase 1 (require_admin) and phase 2
+# additions merge without touching each other.
+
+from fastapi import Header, HTTPException  # noqa: E402
+
+from . import auth as _auth  # noqa: E402
+
+
+def current_auth(request: Request,
+                 authorization: str | None = Header(None)) -> "_auth.AuthContext":
+    """The calling agent key, or 401. Admin tokens are not agent keys and are
+    refused here even when valid."""
+    ctx = _auth.authenticate_bearer(authorization, client_ip(request))
+    if ctx is None:
+        raise HTTPException(401, "missing or invalid API key (Authorization: Bearer aab_...)")
+    return ctx
