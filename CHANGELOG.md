@@ -3,6 +3,11 @@
 All notable changes to this project are documented here. The version number
 lives only in `VERSION`.
 
+## [Unreleased]
+
+### Deploy
+- `deploy/push.sh` ships the committed tree with `git archive` over SSH when `rsync` is absent (Git Bash on Windows); the key must be OpenSSH format (`puttygen key.ppk -O private-openssh`). `deploy/DEPLOY.md` gains the Windows notes and a section on reusing the host that runs WA_GW.
+
 ## [0.2.0] - 2026-09-24
 
 ### Operational logging (same day, before the tag)

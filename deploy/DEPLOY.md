@@ -41,6 +41,40 @@ volume.
 - Your `.pem` SSH key, and the AWS CLI configured locally (for the security-group
   script; the console works too).
 
+## 0b. Windows laptops: the SSH key and rsync
+
+`deploy/push.sh` needs an OpenSSH-format private key. A PuTTY `.ppk` converts
+in one line (PuTTYgen is installed with PuTTY):
+
+```bash
+"/c/Program Files/PuTTY/puttygen.exe" key.ppk -O private-openssh -o ~/.ssh/aab-ec2.pem
+chmod 600 ~/.ssh/aab-ec2.pem
+```
+
+Git Bash ships without `rsync`; the script then ships the committed tree with
+`git archive` over SSH instead, so commit before you push and nothing
+untracked (`.env`, a venv, a database) can ever leave the laptop.
+
+## 0c. Reusing the host that runs WA_GW
+
+Only one stack can own port 443. Install the broker beside WA_GW
+(`/opt/aab` next to `/opt/wa-gw`), then stop WA_GW before the deploy that
+starts the broker's edge:
+
+```bash
+cd /opt/wa-gw && docker compose -f docker-compose.yml -f docker-compose.public.yml down   # never -v
+```
+
+WA_GW's volumes stay on disk for rollback (`up -d` there restores it after a
+`down` in `/opt/aab`). Use a new hostname (`aab.<domain>`), a new Transform
+Rule (the header is `X-AAB-Origin`, not `X-WAGW-Origin`) and a new Access
+application with `/oauth*`; the origin certificate can be reused if it is a
+wildcard for the zone (`sudo cp /opt/wa-gw/edge/certs/* /opt/aab/edge/certs/`).
+Nothing from WA_GW's `gateway.db` carries over (keys, drafts, grants are a
+clean break; agents get new `aab_` keys). The WhatsApp pairing is a fresh QR
+scan; the old archive is not migrated unless you copy `messages.db` into the
+`aab_wa_data` volume before the first pairing (chown 10001).
+
 ## 1. Provision the host
 
 ```bash
