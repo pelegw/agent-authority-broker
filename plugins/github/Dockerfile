@@ -43,4 +43,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8090), timeout=3).close()"]
 # One worker: the token cache is per process, and a single process keeps the
 # secret store's writes serialized.
-CMD ["uvicorn", "--factory", "aab_plugin_github.main:create_app", "--host", "0.0.0.0", "--port", "8090", "--workers", "1"]
+# --no-access-log: the runtime writes its own access line with the broker's
+# request id (docs/logging.md).
+CMD ["uvicorn", "--factory", "aab_plugin_github.main:create_app", "--host", "0.0.0.0", "--port", "8090", "--workers", "1", "--no-access-log"]

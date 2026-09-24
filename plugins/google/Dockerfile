@@ -42,4 +42,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8090), timeout=3).close()"]
 # One worker: the per-scope-set token cache and the connect state live in
 # this process, and a second worker would not share them.
-CMD ["uvicorn", "--factory", "aab_plugin_google.main:create_app", "--host", "0.0.0.0", "--port", "8090", "--workers", "1"]
+# --no-access-log: the runtime writes its own access line with the broker's
+# request id (docs/logging.md).
+CMD ["uvicorn", "--factory", "aab_plugin_google.main:create_app", "--host", "0.0.0.0", "--port", "8090", "--workers", "1", "--no-access-log"]

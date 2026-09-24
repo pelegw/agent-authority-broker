@@ -12,8 +12,18 @@
 # compromised edge cannot call any plugin's /perform (each plugin service is on
 # its own network with the broker: net_whatsapp, net_github, net_google).
 
+# Every service logs to stdout; Docker keeps it in json-file logs, rotated so
+# they cannot fill the disk: at most 5 files of 10 MB per container
+# (docs/logging.md, including shipping to a collector with another driver).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   broker:
+    logging: *logging
     # Drop the loopback publish from the base file: only Caddy reaches it now.
     ports: !reset []
     environment:
@@ -28,6 +38,7 @@ services:
   edge:
     image: caddy:2-alpine
     restart: unless-stopped
+    logging: *logging
     depends_on: [broker]
     networks: [edge_net]
     ports:

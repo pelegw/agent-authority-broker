@@ -25,6 +25,7 @@ next request.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -35,6 +36,9 @@ from . import db
 from .audit import audit
 from .config import get_settings
 from .errors import PolicyError
+from .logging_setup import kv
+
+log = logging.getLogger(__name__)
 
 PREFIX = "setting:"
 MAX_EXTRA_HOSTS = 32
@@ -215,6 +219,10 @@ ENV_ONLY: tuple[dict, ...] = (
     {"name": "BROKER_PORT, TZ, DEVICE_NAME, GITHUB_APP_KEY_DIR", "field": None,
      "secret": False, "category": "compose",
      "why": "Read by Docker Compose, the edge or other containers, not by the broker."},
+    {"name": "LOG_LEVEL, LOG_FORMAT", "field": None, "secret": False, "category": "ops",
+     "why": "Process-level: every service (broker, plugin containers, the sidecar) reads "
+            "them once at start, before any database is open, and the plugin containers "
+            "have no console. See docs/logging.md."},
 )
 
 
@@ -329,4 +337,7 @@ def update(ctx, changes: dict) -> dict:
           {"changed": sorted(writes),
            "values": {n: json.loads(v) if v is not None else None for n, v in writes.items()}},
           actor_principal=ctx.principal_id, actor_via=ctx.via)
+    log.info("settings updated %s", kv(changed=sorted(writes),
+                                       reset=sorted(n for n, v in writes.items() if v is None),
+                                       by=ctx.username, via=ctx.via))
     return describe()
