@@ -24,6 +24,48 @@ lives only in `VERSION`.
   `docs/architecture.md` 1.5 carry the new order; `tests/test_policy.py`
   has the rule table (covered or not, connected or not, malformed or
   non-canonical selectors, draft-only authority, an unreachable plugin).
+- The WhatsApp session has a volume of its own. whatsmeow's `session.db`
+  (the account credential, plaintext) sat in `wa_data` beside the archive,
+  so `plugin-whatsapp`, which mounts `wa_data` read-only for archive reads,
+  could read it. The sidecar now opens the session store in `SESSION_DIR`
+  (default `/session`; when unset it falls back to an explicitly set
+  `DATA_DIR`, so dev runs and tests that keep one directory still work),
+  and `messages.db` stays in `DATA_DIR`. Compose adds the named volume
+  `wa_session`, mounted read-write at `/session` by `whatsapp-sidecar`
+  alone and set as `SESSION_DIR` there; the image creates `/session` owned
+  by uid 10001 with mode 0700 and sets `SESSION_DIR=/session` itself.
+  `wa_data` stays read-write for the sidecar and read-only for
+  `plugin-whatsapp`, which now sees only `messages.db` and its `-wal` and
+  `-shm`. The sidecar logs where each lives and warns when the two
+  directories are the same. Go tests: the config precedence, `session.db`
+  created in the session directory and never in the data directory, a new
+  session directory created 0700, and an uncreatable one returning an exit
+  code; `tests/test_config_files.py` asserts that only the sidecar mounts
+  `wa_session` and that `wa_data` is read-only everywhere else.
+
+### Upgrade notes
+- **WhatsApp session volume.** An existing `wa_data` volume keeps its
+  `session.db`, but the sidecar now opens the session in the new
+  `wa_session` volume, so on its first start with this layout it asks to
+  pair again. To keep the current pairing, copy the session across before
+  that first start (add `-f docker-compose.yml -f docker-compose.public.yml`
+  to each compose command in public mode):
+
+  ```bash
+  docker compose build && docker compose stop
+  docker compose create whatsapp-sidecar      # creates aab_wa_session (uid 10001, 0700)
+  docker run --rm -v aab_wa_data:/from -v aab_wa_session:/to alpine sh -c 'cp -p /from/session.db* /to/ && chown 10001:10001 /to && chmod 700 /to'
+  docker compose up -d
+  ```
+
+  The `docker run` line is the copy; `session.db*` includes the `-wal` and
+  `-shm` a crash may have left. The sidecar logs `session store in
+  /session, archive in /data` and opens the copied session (verified with
+  an unpaired one; as for 0.2.0, no real phone was paired).
+  Then delete the old copy, which `plugin-whatsapp` can still read in
+  `wa_data`: `docker run --rm -v aab_wa_data:/d alpine sh -c 'rm -f
+  /d/session.db*'`. Backups now include `wa_session` (`deploy/DEPLOY.md` >
+  Backups): it, not `wa_data`, is the live account.
 
 ### Fixed
 - The WhatsApp sidecar never closed its databases on a graceful stop: its

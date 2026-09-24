@@ -20,7 +20,8 @@ RUN pip install --no-cache-dir ./plugin-runtime ./plugin-whatsapp \
  && rm -rf ./plugin-runtime ./plugin-whatsapp
 
 # Run unprivileged as aab (uid 10001, the same uid every image uses, so the
-# sidecar-owned wa_data is readable here). /secrets is created and owned in
+# sidecar-owned archive in wa_data is readable here; the session is in
+# wa_session, which this container never mounts). /secrets is created and owned in
 # the image so a fresh named secret volume mounted there inherits that
 # ownership; only this plugin mounts it.
 RUN groupadd --system --gid 10001 aab \

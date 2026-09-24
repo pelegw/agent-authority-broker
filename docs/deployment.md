@@ -23,7 +23,7 @@ every console setting with its bounds, is `docs/configuration.md`.
 | `edge` (public overlay only) | `caddy:2-alpine` | `edge_net` | `443` | `caddy_data`, `edge/Caddyfile` (ro), `edge/certs` (ro) |
 | `broker` | `./broker` | `edge_net`, `broker_net` | `127.0.0.1:${BROKER_PORT:-8080}` in the base file only; none in public mode | `broker_data` |
 | `plugin-whatsapp` | `./plugins/whatsapp` | `broker_net`, `wa_internal` | none | `wa_data` (ro), `whatsapp_secrets` |
-| `whatsapp-sidecar` | `./sidecars/whatsapp` | `wa_internal` | none | `wa_data` (rw) |
+| `whatsapp-sidecar` | `./sidecars/whatsapp` | `wa_internal` | none | `wa_data` (rw), `wa_session` (rw, this service only) |
 | `plugin-github` | `./plugins/github` | `broker_net` | none | `github_secrets`, `${GITHUB_APP_KEY_DIR}` bind at `/run/secrets/github` (ro) |
 | `plugin-google` | `./plugins/google` | `broker_net` | none | `google_secrets` |
 
@@ -179,9 +179,13 @@ gateway, for example), set `BROKER_PORT` in `.env`.
      paired.
 7. **The read-only `wa_data` mount.** The sidecar creates the archive when it
    starts, before pairing:
-   - `docker compose exec plugin-whatsapp ls -l /data` lists `messages.db`,
-     `messages.db-wal` and `messages.db-shm` (and whatsmeow's `session.db`
-     with its own `-wal` and `-shm`).
+   - `docker compose exec plugin-whatsapp ls -l /data` lists only
+     `messages.db`, `messages.db-wal` and `messages.db-shm`. whatsmeow's
+     `session.db` (with its own `-wal` and `-shm`) is in the sidecar's
+     `/session` (`docker compose exec whatsapp-sidecar ls -l /session`), a
+     volume `plugin-whatsapp` does not mount:
+     `docker compose exec plugin-whatsapp ls /session` fails with
+     `ls: cannot access '/session': No such file or directory`.
      `docker compose exec plugin-whatsapp touch /data/probe` fails with
      `touch: cannot touch '/data/probe': Read-only file system`, and `mount`
      inside the container shows `/data` as `ext4 (ro,relatime)`.
@@ -224,9 +228,9 @@ one token and one key.
 
 | Container | Receives | Must never receive |
 |---|---|---|
-| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `SITE_DOMAIN` (public overlay only: builds the OAuth redirect URI `https://<SITE_DOMAIN>/oauth/callback/<service>`), `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE`, `BROKER_DB`, `TZ` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, the `wa_data` volume |
-| `plugin-whatsapp` | `PLUGIN_TOKEN_WHATSAPP`, `PLUGIN_SECRETS_KEY_WHATSAPP`, `SIDECAR_URL` (`http://whatsapp-sidecar:8081`), `SIDECAR_TOKEN`, `MESSAGES_DB` (`/data/messages.db`), `wa_data` (ro) | Other services' tokens/keys, broker secrets (`DECISION_SIGNING_KEY`, `BROKER_SECRETS_KEY`, `SETUP_TOKEN`, `ORIGIN_SECRET`) |
-| `whatsapp-sidecar` | `SIDECAR_TOKEN`, `DEVICE_NAME`, `TZ`, `wa_data` (rw) | Everything else |
+| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `SITE_DOMAIN` (public overlay only: builds the OAuth redirect URI `https://<SITE_DOMAIN>/oauth/callback/<service>`), `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE`, `BROKER_DB`, `TZ` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, the `wa_data` and `wa_session` volumes |
+| `plugin-whatsapp` | `PLUGIN_TOKEN_WHATSAPP`, `PLUGIN_SECRETS_KEY_WHATSAPP`, `SIDECAR_URL` (`http://whatsapp-sidecar:8081`), `SIDECAR_TOKEN`, `MESSAGES_DB` (`/data/messages.db`), `wa_data` (ro) | Other services' tokens/keys, broker secrets (`DECISION_SIGNING_KEY`, `BROKER_SECRETS_KEY`, `SETUP_TOKEN`, `ORIGIN_SECRET`), the `wa_session` volume |
+| `whatsapp-sidecar` | `SIDECAR_TOKEN`, `DEVICE_NAME`, `TZ`, `SESSION_DIR` (`/session`), `wa_data` (rw), `wa_session` (rw; the only container that mounts it) | Everything else |
 | `plugin-github` | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_GITHUB` / `PLUGIN_SECRETS_KEY_GITHUB`); the App id, slug and private key are console config, not env (+ the optional read-only `/run/secrets/github` bind holding the PEM, a file alternative to pasting it) | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN` |
 | `plugin-google` | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_GOOGLE` / `PLUGIN_SECRETS_KEY_GOOGLE`); nothing Google-specific: the OAuth client id and secret are console config, and the broker passes the redirect URI with each connect | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN`, `SITE_DOMAIN` |
 | `edge` | `SITE_DOMAIN`, `ORIGIN_SECRET`, origin certificate + key, Cloudflare origin-pull CA | Every other secret |
@@ -272,7 +276,8 @@ Two ways, pick one:
 | Volume | Mounted by | Holds | Encrypted by |
 |---|---|---|---|
 | `broker_data` | broker (`/gwdata`) | `broker.db`: owner account, sessions, admin-token/key hashes, grants, plugin enable flags and non-secret config, console settings, Telegram link state and bot token, hidden resources, action queue, decision record, capacity ledger, audit log | `BROKER_SECRETS_KEY` for the secrets entered in the console (the Telegram bot token); the rest is hashes or non-secret (the decision chain is HMAC-signed with `DECISION_SIGNING_KEY`) |
-| `wa_data` | whatsapp-sidecar (rw), plugin-whatsapp (ro) | `session.db` (the WhatsApp account session, whatsmeow's own store), `messages.db` (the archive) | **nothing**: the one credential not encrypted at rest, mitigated by volume scoping and non-root containers |
+| `wa_data` | whatsapp-sidecar (rw), plugin-whatsapp (ro) | `messages.db` (the archive) | nothing (the archive is message content, not a credential) |
+| `wa_session` | whatsapp-sidecar (`/session`, rw), nobody else | `session.db` (the WhatsApp account session, whatsmeow's own store) | **nothing**: the one credential not encrypted at rest, mitigated by a volume only the sidecar mounts and non-root containers |
 | `whatsapp_secrets` | plugin-whatsapp (`/secrets`) | Nothing today: the WhatsApp manifest has no config, and the store exists because the runtime provides one | `PLUGIN_SECRETS_KEY_WHATSAPP` |
 | `github_secrets` | plugin-github (`/secrets`) | The GitHub plugin's console config (App id and slug, the private key if pasted, the PAT fallback if used), the installation id, connect `state` nonces | `PLUGIN_SECRETS_KEY_GITHUB` |
 | `google_secrets` | plugin-google (`/secrets`) | OAuth client id and secret, refresh token, granted scopes, connect `state` nonces with their redirect URI | `PLUGIN_SECRETS_KEY_GOOGLE` |
@@ -300,7 +305,7 @@ the new environment (`docker compose up -d <services>`; add
 | `BROKER_SECRETS_KEY` | broker | `up -d broker`. Secrets entered in the console no longer decrypt: Channels > Telegram shows "re-enter required" (Telegram stays off until then); paste the bot token again. |
 | `DECISION_SIGNING_KEY` | broker | `up -d broker`. Existing decision rows no longer verify under the new key (`verify` reports the first old row as bad). Rotate only on suspected compromise. |
 | `PLUGIN_TOKEN_WHATSAPP` / `_GITHUB` / `_GOOGLE` | broker and that plugin service | `up -d broker plugin-<service>`: both ends must restart together, calls fail with 503 in between. |
-| `PLUGIN_SECRETS_KEY_WHATSAPP` | plugin-whatsapp | `up -d plugin-whatsapp`. Its store holds nothing today, so nothing needs re-entering. The WhatsApp session (in `wa_data`) is unaffected. |
+| `PLUGIN_SECRETS_KEY_WHATSAPP` | plugin-whatsapp | `up -d plugin-whatsapp`. Its store holds nothing today, so nothing needs re-entering. The WhatsApp session (in `wa_session`) is unaffected. |
 | `PLUGIN_SECRETS_KEY_GITHUB` | plugin-github | `up -d plugin-github`, then clear the old store (below), re-enter the GitHub plugin's config in the console and connect again. |
 | `PLUGIN_SECRETS_KEY_GOOGLE` | plugin-google | `up -d plugin-google`, then clear the old store (below), re-enter the Google client id and secret in the console and connect again. |
 | `SIDECAR_TOKEN` | plugin-whatsapp, whatsapp-sidecar | `up -d plugin-whatsapp whatsapp-sidecar`. No re-pairing needed. |

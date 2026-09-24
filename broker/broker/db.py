@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS plugins (
 -- Read and written only through crypto.py, Fernet under BROKER_SECRETS_KEY.
 -- Target credentials never live here: the Google refresh token and GitHub App
 -- key stay in each plugin's own secret volume under its own
--- PLUGIN_SECRETS_KEY_<SERVICE>, the WhatsApp session in wa_data (sidecar-owned).
+-- PLUGIN_SECRETS_KEY_<SERVICE>, the WhatsApp session in wa_session (sidecar-only).
 CREATE TABLE IF NOT EXISTS plugin_secrets (
     slot       TEXT NOT NULL,                 -- 'broker' for the broker's own secrets
     name       TEXT NOT NULL,

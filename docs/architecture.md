@@ -321,7 +321,8 @@ flowchart TB
       SC["whatsapp-sidecar<br/>Go whatsmeow :8081<br/>never published"]
     end
     VB[("broker_data<br/>broker.db")]
-    VW[("wa_data<br/>session.db, messages.db")]
+    VW[("wa_data<br/>messages.db")]
+    VSE[("wa_session<br/>session.db")]
     VGH[("github_secrets")]
     VPEM[("GITHUB_APP_KEY_DIR bind<br/>/run/secrets/github (ro)")]
     VGO[("google_secrets")]
@@ -341,6 +342,7 @@ flowchart TB
   PWA -->|"HTTP + X-Internal-Token (wa_internal)"| SC
   BROKER -.- VB
   SC -.-|rw| VW
+  SC -.-|rw| VSE
   PWA -.-|ro| VW
   PWA -.- VWS
   PGH -.- VGH
@@ -366,8 +368,11 @@ Notes:
   cannot call `/perform`; the broker cannot reach the sidecar. None of the
   networks blocks egress: plugins, the sidecar and the broker (Telegram,
   Cloudflare JWKS) need outbound internet.
-- **Volumes.** `broker_data` (broker only); `wa_data` (sidecar read-write,
-  plugin-whatsapp read-only, nobody else; the broker never mounts it); one
+- **Volumes.** `broker_data` (broker only); `wa_data` (the archive,
+  `messages.db`: sidecar read-write, plugin-whatsapp read-only, nobody else;
+  the broker never mounts it); `wa_session` (whatsmeow's `session.db`, the
+  WhatsApp credential: the sidecar alone, read-write, so no other container
+  can read the session); one
   secret volume per plugin service, mounted at `/secrets` by that service only:
   `whatsapp_secrets`, `github_secrets`, `google_secrets`; `caddy_data` and the
   `edge/certs` bind mount (edge only). Compose prefixes each with the project
@@ -395,9 +400,9 @@ token and one key per container, whatever number of plugin ids it hosts.
 
 | Container | Receives | Must never receive |
 |---|---|---|
-| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `SITE_DOMAIN` (public overlay only: builds the OAuth redirect URI `https://<SITE_DOMAIN>/oauth/callback/<service>`), `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE`, `BROKER_DB`, `TZ` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, the `wa_data` volume |
-| `plugin-whatsapp` | `PLUGIN_TOKEN_WHATSAPP`, `PLUGIN_SECRETS_KEY_WHATSAPP`, `SIDECAR_URL` (`http://whatsapp-sidecar:8081`), `SIDECAR_TOKEN`, `MESSAGES_DB` (`/data/messages.db`), `wa_data` (ro) | Other services' tokens/keys, broker secrets (`DECISION_SIGNING_KEY`, `BROKER_SECRETS_KEY`, `SETUP_TOKEN`, `ORIGIN_SECRET`) |
-| `whatsapp-sidecar` | `SIDECAR_TOKEN`, `DEVICE_NAME`, `TZ`, `wa_data` (rw) | Everything else |
+| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `SITE_DOMAIN` (public overlay only: builds the OAuth redirect URI `https://<SITE_DOMAIN>/oauth/callback/<service>`), `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE`, `BROKER_DB`, `TZ` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, the `wa_data` and `wa_session` volumes |
+| `plugin-whatsapp` | `PLUGIN_TOKEN_WHATSAPP`, `PLUGIN_SECRETS_KEY_WHATSAPP`, `SIDECAR_URL` (`http://whatsapp-sidecar:8081`), `SIDECAR_TOKEN`, `MESSAGES_DB` (`/data/messages.db`), `wa_data` (ro) | Other services' tokens/keys, broker secrets (`DECISION_SIGNING_KEY`, `BROKER_SECRETS_KEY`, `SETUP_TOKEN`, `ORIGIN_SECRET`), the `wa_session` volume |
+| `whatsapp-sidecar` | `SIDECAR_TOKEN`, `DEVICE_NAME`, `TZ`, `SESSION_DIR` (`/session`), `wa_data` (rw), `wa_session` (rw; the only container that mounts it) | Everything else |
 | `plugin-github` | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_GITHUB` / `PLUGIN_SECRETS_KEY_GITHUB`); the App id, slug and private key are console config, not env (+ the optional read-only `/run/secrets/github` bind holding the PEM, a file alternative to pasting it) | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN` |
 | `plugin-google` | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_GOOGLE` / `PLUGIN_SECRETS_KEY_GOOGLE`); nothing Google-specific: the OAuth client id and secret are console config, and the broker passes the redirect URI with each connect | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN`, `SITE_DOMAIN` |
 | `edge` | `SITE_DOMAIN`, `ORIGIN_SECRET`, origin certificate + key, Cloudflare origin-pull CA | Every other secret |
@@ -433,8 +438,8 @@ operational view of the same split (volumes, rotation per secret) is
 | **Cloudflare** (public mode) | Public DNS and TLS, WAF and rate limiting, Access SSO on `/admin*`, `/auth*`, `/v1/admin*`, `/oauth*` (the OAuth callback page); injects `X-AAB-Origin` | Origin secret (in the Transform Rule), Access signing keys | Internet-facing; reaches the edge on 443 |
 | **edge** (Caddy, optional) | Terminates origin TLS with the Cloudflare Origin Certificate, requires Cloudflare's client certificate (Authenticated Origin Pulls), rejects requests without `X-AAB-Origin`, reverse-proxies to `broker:8080` | Origin cert + key, `ORIGIN_SECRET` | Inbound 443 from Cloudflare only (security group); outbound only to the broker on `edge_net` |
 | **broker** | REST + MCP agent surface, console + admin API, OAuth callback page (`/oauth/callback/{service}`), owner identity, grants and authority algebra, policy engine, decision record, capacity ledger, action queue + scheduler, Telegram notifier, plugin registry (plugin id → service) and `RemoteAdapter`, connect-flow relay, skill doc generation | Password/key/token *hashes*, `DECISION_SIGNING_KEY`, `BROKER_SECRETS_KEY`, `SETUP_TOKEN`, all `PLUGIN_TOKEN_<SERVICE>`, the Telegram bot token (console-entered, encrypted); an OAuth authorization code in transit only; **no target credentials** | Inbound from the edge on `edge_net` (public) or loopback (local); outbound to every plugin service on `broker_net`, Telegram, Cloudflare JWKS; cannot reach the sidecar |
-| **plugin-whatsapp** | Plugin API for `whatsapp`; archive reads over `messages.db` (opened `mode=ro` with `query_only`) with SQL-level visibility filtering; sends and media via the sidecar; connect = QR relay (`/connect/qr.png`) and status mapped from the sidecar's; disconnect answers 409 (unlink on the phone) | `PLUGIN_TOKEN_WHATSAPP` (read as `PLUGIN_TOKEN`; verifies the broker), `PLUGIN_SECRETS_KEY_WHATSAPP` (read as `PLUGIN_SECRETS_KEY`), `SIDECAR_TOKEN`; a secret store in `whatsapp_secrets` that holds nothing today (the manifest's `config_schema` is empty: sidecar URL, token and archive path are deployment env); read-only access to `wa_data` (which contains `session.db`) | Inbound from the broker on `broker_net`; outbound to the sidecar on `wa_internal` |
-| **whatsapp-sidecar** | Speaks the WhatsApp multi-device protocol (whatsmeow), archives every message into `messages.db`, internal API `/health`, `/status`, `/qr`, `/send`, `/media`; no policy | WhatsApp session (`session.db`, the account credential, plaintext: see 4.3), `SIDECAR_TOKEN` | Inbound only from `wa_internal`; outbound to WhatsApp servers |
+| **plugin-whatsapp** | Plugin API for `whatsapp`; archive reads over `messages.db` (opened `mode=ro` with `query_only`) with SQL-level visibility filtering; sends and media via the sidecar; connect = QR relay (`/connect/qr.png`) and status mapped from the sidecar's; disconnect answers 409 (unlink on the phone) | `PLUGIN_TOKEN_WHATSAPP` (read as `PLUGIN_TOKEN`; verifies the broker), `PLUGIN_SECRETS_KEY_WHATSAPP` (read as `PLUGIN_SECRETS_KEY`), `SIDECAR_TOKEN`; a secret store in `whatsapp_secrets` that holds nothing today (the manifest's `config_schema` is empty: sidecar URL, token and archive path are deployment env); read-only access to `wa_data` (the archive only: the session is in `wa_session`, which this container does not mount) | Inbound from the broker on `broker_net`; outbound to the sidecar on `wa_internal` |
+| **whatsapp-sidecar** | Speaks the WhatsApp multi-device protocol (whatsmeow), archives every message into `messages.db`, internal API `/health`, `/status`, `/qr`, `/send`, `/media`; no policy | WhatsApp session (`session.db` in `wa_session`, which only this container mounts; the account credential, plaintext: see 4.3), `SIDECAR_TOKEN` | Inbound only from `wa_internal`; outbound to WhatsApp servers |
 | **plugin-github** | Plugin API for `github`; `github_app` connection (install URL, installation recorded on `/connect/finish`) mints installation tokens restricted to the requested repos and permissions | App private key (uploaded: encrypted in `github_secrets`; or file: `private_key_path`, confined to the read-only `/run/secrets/github` bind), installation id and connect `state` nonces in `github_secrets`, App id, cached installation tokens (memory, ≤ 50 min), `PLUGIN_TOKEN_GITHUB`, `PLUGIN_SECRETS_KEY_GITHUB` | Inbound from the broker on `broker_net`; outbound to `api.github.com` |
 | **plugin-google** | Plugin API for `gmail`, `gcal`, `gdrive` (one `GET /manifests` returns all three; shared `aab_plugin_google/client.py`); `google_oauth` connection builds the auth URL, owns the state nonce, exchanges the code, mints per-scope-set access tokens by downscoped refresh | OAuth client id/secret, refresh token and connect `state` nonces with the `redirect_uri` the broker passed (encrypted in `google_secrets`), access tokens (memory only, per scope set), `PLUGIN_TOKEN_GOOGLE`, `PLUGIN_SECRETS_KEY_GOOGLE` | Inbound from the broker on `broker_net`; outbound to Google OAuth and API endpoints |
 | **Telegram Bot API** | Delivers approval cards to the owner's phone and returns button taps | (external) | Broker calls it outbound; taps are fetched by the broker's poll loop, no inbound webhook |
@@ -532,7 +537,8 @@ flowchart LR
   end
   subgraph Z5["TZ5: wa_internal, whatsapp-sidecar"]
     P11["P11 Go sidecar"]
-    D6[("D6 wa_data<br/>session.db, messages.db")]
+    D6[("D6 wa_data<br/>messages.db")]
+    D7[("D7 wa_session<br/>session.db")]
   end
   subgraph Z6["TZ6: third-party services"]
     TG(["Telegram Bot API"])
@@ -573,6 +579,7 @@ flowchart LR
   P9 <-->|30| P11
   P11 <-->|31| WS
   P11 -->|32| D6
+  P11 -->|32| D7
   P9 -->|33| D6
   P1 -->|34| AG
   OW -->|35| TK
@@ -623,8 +630,8 @@ return leg carries meaningful data.
 | 29 | P9 ↔ target APIs | Target calls and responses; the plugin filters denied/hidden rows before returning | HTTPS; short-lived token | Yes: short-lived token |
 | 30 | P9 ↔ P11 | `POST /send`, `GET /media`, `GET /status`, `GET /qr` (backs `/connect/qr.png`); results | HTTP :8081 on `wa_internal`; `X-Internal-Token: SIDECAR_TOKEN`, constant-time compare (`/health` tokenless) | Yes: sidecar token |
 | 31 | P11 ↔ WhatsApp | Multi-device protocol: messages in and out, media | WhatsApp E2E protocol; linked-device session from `session.db` | Yes: session keys |
-| 32 | P11 → D6 | Writes `session.db` (session credential, plaintext) and archives every message into `messages.db` | Local SQLite on `wa_data` (rw) | Yes: `session.db` is the account credential |
-| 33 | P9 → D6 | Reads `messages.db` for list/read/search with the visibility clause in SQL | Local SQLite on `wa_data` mounted read-only | No (but the volume also holds `session.db`) |
+| 32 | P11 → D6, D7 | Writes `session.db` (session credential, plaintext) to D7 and archives every message into `messages.db` (D6) | Local SQLite on `wa_session` (rw, mounted by the sidecar alone) and `wa_data` (rw) | Yes: `session.db` is the account credential |
+| 33 | P9 → D6 | Reads `messages.db` for list/read/search with the visibility clause in SQL | Local SQLite on `wa_data` mounted read-only | No (the session is in `wa_session`, which plugin-whatsapp does not mount) |
 | 34 | P1 → Agent | Result, 202 `pending_approval` / `scheduled`, or `{"error","code","hint"}` with 400/401/403/404/429/502/503. REST binary results are attachments with `X-Content-Type-Options: nosniff`; a long-poll bootstrap (no `cursor`) is answered at once whatever `?wait=` says | HTTP(S) response | Only `delegate` returns a child key plaintext, once |
 | 35 | Owner browser → consent endpoints | Google consent screen (scopes = union of the enabled Google manifests' `target_permissions`) or GitHub App install page, opened from the URL of flow 39 | HTTPS in the browser | Yes: owner's Google / GitHub login |
 | 36 | P2 → Cloudflare | JWKS fetch for Access JWT verification (cached, refreshed on unknown `kid`) | HTTPS | No |
@@ -664,7 +671,7 @@ that refreshes health).
 | **Agent key → authority** | 6, 9, 10 | `aab_` key hashed with sha256; previous hash accepted during the rotation grace (`key_rotation_grace_seconds`, 24h); key and every ancestor must be enabled and unexpired; per-key `rate_per_min`. | A key holds no authority itself; everything comes from grants re-walked per call. |
 | **Owner identity** | 7, 8, 19 | Password (`hashlib.scrypt`, per-user salt), 5 failed logins/min/IP; sessions 12h idle / 7d absolute; admin tokens `aab_admin_<48hex>` stored hashed, revocable, optional expiry; one-time `SETUP_TOKEN` inert after setup. | Every human action carries an `AdminContext` and is recorded under the owner's username. |
 | **Broker ↔ plugin services** | 24, 25, 38, 42, 44 | One shared token per service, `PLUGIN_TOKEN_<SERVICE>` (`WHATSAPP`, `GITHUB`, `GOOGLE`), in `X-Plugin-Token`, constant-time compared; network `broker_net` (broker and plugin services only); every manifest from `GET /manifests` pinned (id + version) against the broker's vendored copy. | Plain HTTP inside the host. The plugin trusts the broker's `CallScope`: a compromised broker can request any credential the connection can mint, but cannot read stored credentials. The authorization code crosses here once (42). |
-| **Plugin ↔ sidecar** | 30, 33 | `SIDECAR_TOKEN` in `X-Internal-Token`, constant-time compared; network `wa_internal` which the broker is not on. | The sidecar has no policy at all; everything it is asked to do it does. The shared `wa_data` volume is a second crossing: sidecar rw, plugin-whatsapp ro, nobody else; it contains the plaintext `session.db` (4.3). |
+| **Plugin ↔ sidecar** | 30, 33 | `SIDECAR_TOKEN` in `X-Internal-Token`, constant-time compared; network `wa_internal` which the broker is not on. | The sidecar has no policy at all; everything it is asked to do it does. The shared `wa_data` volume is a second crossing: sidecar rw, plugin-whatsapp ro, nobody else; it holds only the archive. The plaintext `session.db` is in `wa_session`, which only the sidecar mounts (4.3). |
 | **Broker ↔ Telegram** | 16, 17 | Outbound HTTPS with the bot token; taps accepted only when both the chat id and the user id match the linked owner; kill switch. | No inbound webhook port. A Telegram tap is an owner action (`via=telegram`); agents have no path to it. Card content (summary, resource labels) leaves the host. |
 | **Owner ↔ consent, callback relay** | 35, 39 to 43 | The plugin generates, stores and checks the `state` nonce (10-minute TTL, single use); the callback page needs no owner credential (Access in public mode) and holds no data, and the POST it makes is admin-guarded (session and CSRF header, plus Access in public mode); the relay to `/connect/finish` uses the service token. The redirect URI is the broker's own callback, computed by the broker (public mode: from `SITE_DOMAIN` in its env, not from console config) and handed to the plugin in `/connect/start`. | The broker never sees a client secret or a refresh token; an intercepted code is useless without the plugin's client secret. The long-lived credential is created and kept only inside the plugin service. |
 | **Plugin ↔ target APIs** | 28, 29, 31, 43 | Google: short-lived access tokens minted by downscoped refresh. GitHub: installation tokens restricted to `repositories` + `permissions`. WhatsApp: the linked-device session. | See 4.2 for what each token actually restricts. |
@@ -705,11 +712,14 @@ follows the same rule.
   substitute for "hold nothing", and is the first thing an IdP integration
   would remove.
 - **The one credential not encrypted at rest: WhatsApp `session.db`.** It is
-  whatsmeow's own SQLite store in `wa_data`, in plaintext; re-encrypting a
-  third-party store is not considered worth it. Mitigations: volume scoping
-  (`whatsapp-sidecar` rw, `plugin-whatsapp` ro, nothing else mounts it), the
-  broker never mounts it, and every container runs as a non-root user. Backups
-  of `wa_data` carry the live account session.
+  whatsmeow's own SQLite store, in plaintext; re-encrypting a third-party
+  store is not considered worth it. It is scoped to the sidecar alone: it
+  lives in its own volume, `wa_session`, which only `whatsapp-sidecar` mounts
+  (read-write, at `/session`, a 0700 directory), apart from the archive in
+  `wa_data` that `plugin-whatsapp` reads. No other container, the broker
+  included, can open the file: it is not in any of their filesystems. Every
+  container runs as a non-root user. Backups of `wa_session` carry the live
+  account session.
 - **Blast radius by component.** Broker compromise: all grants and the decision
   record become forgeable (it holds `DECISION_SIGNING_KEY`), and it can drive
   every plugin within each connection's ceiling, but it holds no target
@@ -717,7 +727,10 @@ follows the same rule.
   still needs agent keys or owner credentials. Plugin service compromise: that
   service's long-lived credential and its targets, nothing else (separate
   network reach, volume, key, token). plugin-whatsapp compromise: the sidecar
-  API and read access to `wa_data`, which includes the session.
+  API (reads and sends as the account while the sidecar runs) and read access
+  to the archive in `wa_data`, but not the session: `session.db` is in
+  `wa_session`, which only the sidecar mounts, so the account cannot be
+  copied to another device from there.
 - **Decision record integrity** is tamper-*evident*, not tamper-proof: `verify()`
   recomputes the HMAC chain and reports the first bad id; anyone with
   `DECISION_SIGNING_KEY` and write access to `broker.db` can rewrite it.

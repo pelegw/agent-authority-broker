@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir .
 
 # Run unprivileged as aab, uid 10001 like every image in the stack (the
 # sidecar and plugin-whatsapp share wa_data under that uid; the broker never
-# mounts it and holds no target credential). /gwdata is created and owned in the image so a fresh named volume mounted
+# mounts it, nor the sidecar-only wa_session, and holds no target credential). /gwdata is created and owned in the image so a fresh named volume mounted
 # there inherits that ownership. /srv stays root-owned: the code is read-only
 # to the running process.
 RUN groupadd --system --gid 10001 aab \

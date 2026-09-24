@@ -381,7 +381,8 @@ Version 0.2.0, single owner.
 - **WhatsApp runs through whatsmeow, an unofficial client.** Meta's terms
   do not allow it, and accounts can be banned. The WhatsApp session is the
   one credential not encrypted at rest (whatsmeow's own store in
-  `wa_data`); a backup of that volume is the live account.
+  `wa_session`, a volume only the sidecar mounts); a backup of that volume
+  is the live account.
 - **Single owner, no identity provider.** With no token exchange, the
   Google refresh token and the GitHub App key are held long-term, inside
   their plugin containers only. No 2FA or passkeys yet.

@@ -1,7 +1,8 @@
 """The `sidecar_qr` connection: WhatsApp pairing and link status via the sidecar.
 
 The credential is the sidecar's whatsmeow session (`session.db` in the
-`wa_data` volume, which this container mounts read-only). So this
+`wa_session` volume, which only the sidecar mounts; this container mounts
+just the archive, `wa_data`, read-only). So this
 connection owns nothing itself: it relays the pairing QR, reports the
 sidecar's link state, and mints nothing (there is no token to narrow;
 WhatsApp enforcement is proxy-only).

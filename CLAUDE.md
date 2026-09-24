@@ -80,6 +80,9 @@ same plus a skill-drift job (`aab skill build` + `git diff --exit-code integrati
   `broker_net` with a per-service `X-Plugin-Token`; the edge sits on
   `edge_net` and can never reach a plugin; the WhatsApp sidecar is reachable
   only from its plugin over `wa_internal`.
+- The WhatsApp session (`session.db`, plaintext) lives in the `wa_session`
+  volume, which only the sidecar mounts; `plugin-whatsapp` mounts only the
+  archive (`wa_data`, read-only). Never mount `wa_session` anywhere else.
 
 **Generated files**
 - The agent skill doc and everything under `integrations/` are generated
