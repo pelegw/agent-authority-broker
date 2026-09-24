@@ -3,19 +3,23 @@
 This puts the broker on a public EC2 instance, reachable only through
 Cloudflare, with the admin/management plane gated by Cloudflare Access SSO.
 
-> Status: v0.2.0 is under construction. This runbook covers the deploy
-> mechanics, which are already final. The plugin containers
-> (`plugin-whatsapp`, `plugin-github`, `plugin-google`) are placeholders that
-> only idle until phases 4, 6 and 7 fill them in. The topology, env split and
-> volumes are explained in `docs/deployment.md`.
+> Status (v0.2.0): `plugin-whatsapp` and `plugin-google` are real plugin
+> services; `plugin-github` is a placeholder image that only idles until the
+> GitHub plugin (phase 6) merges. The images and the read-only `wa_data`
+> mount have not yet been verified by a real build and run, so do the checks
+> in `docs/deployment.md` > "Verify after `docker compose up`" on the host
+> after the first deploy. The topology, env split and volumes are explained
+> in `docs/deployment.md`.
 
 **Threat model recap.** The origin is locked down three ways so nobody who
 learns the EC2 IP can bypass Cloudflare: (1) the **security group** only accepts
 :443 from Cloudflare's IP ranges, (2) **Caddy** requires Cloudflare's client
 certificate (Authenticated Origin Pulls), and (3) the app rejects any request
 missing the **`X-AAB-Origin` secret** that a Cloudflare Transform Rule injects.
-Admin routes additionally require a **Cloudflare Access** identity. The broker
-**refuses to boot** in public mode if Access isn't configured.
+Admin routes additionally require a **Cloudflare Access** identity, on top of
+the owner's own login (session or `aab_admin_` token). The broker **refuses
+to boot** in public mode if Access isn't configured. Agent routes are not
+behind Access: agents authenticate with their `aab_` key.
 
 Inside the host, the edge (Caddy) sits on `edge_net` with the broker only; the
 plugin containers sit on `broker_net` with the broker only; the WhatsApp
@@ -110,6 +114,9 @@ match* `Hostname equals aab.example.com` > **Set static** `X-AAB-Origin` = `<the
 Then edit `/opt/aab/.env` on the host: set `SITE_DOMAIN`, `CF_ACCESS_ENABLED=true`,
 `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`, and optionally `CF_ACCESS_ALLOWED_EMAILS`.
 Leave `ALLOW_INSECURE_ADMIN=false`: the boot interlock is your safety net.
+`SITE_DOMAIN` also becomes the host of the OAuth redirect URIs below, and the
+public overlay adds it to the `/mcp` Host allowlist, so MCP clients can use
+`https://aab.example.com/mcp` without further configuration.
 
 ## 6b. Register the OAuth redirect URIs (only for the plugins you use)
 
@@ -122,16 +129,20 @@ container. Register exactly these (substitute your `SITE_DOMAIN`):
 | Google | Cloud Console > APIs & Services > Credentials > your OAuth client (Web application) > Authorized redirect URIs | `https://aab.example.com/oauth/callback/google` |
 | GitHub | Your GitHub App > General > Post installation > **Setup URL** (tick "Redirect on update"); GitHub appends `installation_id` to it | `https://aab.example.com/oauth/callback/github` |
 
-The Google OAuth client id and secret and the GitHub App id and private key
-are not in `/opt/aab/.env`: enter them in the console, in each plugin's config
-form (Plugins > Google, Plugins > GitHub), which relays them once to the plugin
-container (`docs/configuration.md`). For the GitHub App private key you may
-instead place it on the host as `/opt/aab/data/github-app/app.pem` (readable by
-uid 10001 only:
+No credential goes into `/opt/aab/.env` for any of this. The Google OAuth
+client id and secret and the GitHub App id, slug and private key are entered
+in the console, in the plugin config forms (Plugins > GitHub; for Google,
+the one account form that Gmail, Calendar and Drive share), which relay the
+secret fields once to the plugin container; the broker never stores them
+(`docs/configuration.md`, `docs/plugins/google.md`, `docs/plugins/github.md`).
+For the GitHub App private key you may instead place it on the host as
+`/opt/aab/data/github-app/app.pem` (readable by uid 10001 only:
 `sudo install -o 10001 -g 10001 -m 0400 app.pem /opt/aab/data/github-app/`)
-and point the GitHub plugin's config form at `/run/secrets/github/app.pem`.
-Only `plugin-github` mounts that directory. The Telegram bot token is entered
-in the console as well (Channels > Telegram).
+and name `/run/secrets/github/app.pem` in the GitHub plugin's key-path field.
+Only `plugin-github` mounts that directory, read-only, and `deploy/push.sh`
+never syncs or deletes `data/`. The Telegram bot token is entered in the
+console as well (Channels > Telegram; until console pass 2 merges, through
+`POST /v1/admin/telegram/token`).
 
 ## 7. Deploy
 
@@ -152,6 +163,12 @@ Open **`https://aab.example.com/admin`**. Cloudflare Access prompts for SSO,
 then the setup page asks for the `SETUP_TOKEN` from `/opt/aab/.env` and your
 username and password. The token is inert once the owner exists.
 
+For the `aab` CLI from your laptop, mint an admin token in the console
+(Account > Admin tokens; shown once) and create a Cloudflare Access service
+token for the same Access application, then export `AAB_URL`,
+`AAB_ADMIN_TOKEN`, `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`. Both
+layers are checked: the Access identity and the owner credential.
+
 ## 9. Verify
 
 ```bash
@@ -161,14 +178,25 @@ curl -s -o /dev/null -w '%{http_code}\n' https://<elastic-ip>/v1/health   # shou
 `https://aab.example.com/v1/admin/*` should require Access; a request without the
 Cloudflare secret header (i.e. straight to the origin) should get 403.
 
+Then, on the host (`cd /opt/aab`, with `-f docker-compose.yml -f
+docker-compose.public.yml` on every compose command), run the checklist in
+`docs/deployment.md` > "Verify after `docker compose up`": container health,
+published ports (only `edge` on 443), the plugin cards in the console, the
+read-only `wa_data` mount once WhatsApp is paired, and the decision-chain
+verification.
+
 ## Operations
 
 - **Update**: re-run `deploy/push.sh`; it rebuilds and restarts in place.
 - **Logs**: `ssh ... 'cd /opt/aab && docker compose -f docker-compose.yml -f docker-compose.public.yml logs -f broker'`
   (services: `edge`, `broker`, `plugin-whatsapp`, `whatsapp-sidecar`,
-  `plugin-github`, `plugin-google`). The WhatsApp pairing QR is printed in the
-  `whatsapp-sidecar` log and served as a PNG at
-  `/v1/admin/plugins/whatsapp/connect/qr.png`.
+  `plugin-github`, `plugin-google`). The WhatsApp pairing QR is shown in the
+  console (Plugins > WhatsApp > Connect), printed in the `whatsapp-sidecar`
+  log, and served as a PNG at `/v1/admin/plugins/whatsapp/connect/qr.png`.
+- **Extra MCP hosts**: a console change to `mcp_allowed_hosts_extra`
+  (Settings) takes effect at the next broker start:
+  `docker compose -f docker-compose.yml -f docker-compose.public.yml restart broker`.
+  Every other console setting applies on the next request.
 - **Reboots**: `restart: unless-stopped` + `systemctl enable docker` (provision
   does this) bring the stack back automatically.
 - **Backups**: back these up together to encrypted storage:
@@ -177,13 +205,37 @@ Cloudflare secret header (i.e. straight to the origin) should get 403.
   |---|---|---|
   | `broker_data` volume | owner account, keys, grants, decision record, console settings, Telegram bot token (encrypted) | `DECISION_SIGNING_KEY` (old rows verify only under it), `BROKER_SECRETS_KEY` (else re-enter the Telegram token) |
   | `wa_data` volume | WhatsApp session (**plaintext**: a backup is the live account) + message archive | nothing: treat the backup itself as a credential |
-  | `whatsapp_secrets` volume | plugin-whatsapp's encrypted config | `PLUGIN_SECRETS_KEY_WHATSAPP` |
-  | `github_secrets` volume | GitHub App key + installation (encrypted) | `PLUGIN_SECRETS_KEY_GITHUB` |
-  | `google_secrets` volume | Google OAuth refresh token (encrypted) | `PLUGIN_SECRETS_KEY_GOOGLE` |
+  | `whatsapp_secrets` volume | nothing today (plugin-whatsapp has no config to store) | `PLUGIN_SECRETS_KEY_WHATSAPP` |
+  | `github_secrets` volume | GitHub plugin config (App id and slug, the key if pasted, the PAT if used) and the installation (encrypted) | `PLUGIN_SECRETS_KEY_GITHUB` |
+  | `google_secrets` volume | Google OAuth client id and secret, refresh token (encrypted) | `PLUGIN_SECRETS_KEY_GOOGLE` |
+  | `/opt/aab/data/github-app/app.pem` | the GitHub App key, only if you use the file alternative | nothing: treat it as a credential |
   | `/opt/aab/.env` | every key above, plus tokens and the Cloudflare Access values | host-only, mode 0600 |
 
+  SQLite files are only consistent when copied at rest, so stop the stack
+  for the copy. For example, into a directory outside `/opt/aab` (which
+  `deploy/push.sh` keeps in sync with `--delete`):
+
+  ```bash
+  cd /opt/aab
+  C="docker compose -f docker-compose.yml -f docker-compose.public.yml"
+  mkdir -p ~/aab-backup && chmod 700 ~/aab-backup
+  $C stop
+  for v in broker_data wa_data whatsapp_secrets github_secrets google_secrets; do
+    docker run --rm -v aab_$v:/v:ro -v ~/aab-backup:/b alpine tar czf /b/$v.tgz -C /v .
+  done
+  $C start
+  cp .env ~/aab-backup/env && chmod 600 ~/aab-backup/env
+  ```
+
+  Then encrypt `~/aab-backup` before it leaves the host: it holds the live
+  WhatsApp session in plaintext and, in `env`, every key needed to read the
+  rest. Restore the volumes together with the `.env` they were taken with.
+
   Docker prefixes the volume names with the project name (`aab_broker_data`,
-  ...). Losing a `PLUGIN_SECRETS_KEY_<SERVICE>` means that plugin must be
-  reconnected; nothing else is lost. Losing `BROKER_SECRETS_KEY` means
-  re-entering the Telegram bot token. **Never** commit `.env`, `data/` or
+  ...). Losing a `PLUGIN_SECRETS_KEY_<SERVICE>` means that plugin's old
+  store must be cleared, its secret config re-entered and the plugin
+  reconnected (`docs/deployment.md` > Rotating secrets); nothing else is
+  lost. Losing `BROKER_SECRETS_KEY` means re-entering the Telegram bot
+  token. Losing `DECISION_SIGNING_KEY` means the existing decision record
+  no longer verifies. **Never** commit `.env`, `data/` or
   `edge/certs/*` (already gitignored).
