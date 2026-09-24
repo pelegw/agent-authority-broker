@@ -100,4 +100,4 @@ session's attribution trailers.
 - [x] 5. Delegation + generated skill doc (CI drift job is real) + draft-mode default for agent requests
 - [x] 6. GitHub plugin service (App installation tokens per call; PAT fallback reported as proxy)
 - [x] 7. Google plugin service (Gmail, Calendar, Drive over one OAuth connection) + `docs/platform-thesis.md`
-- [ ] 8. Simulation (done), release docs (done), tag 0.2.0 (SQLite flake fixed; pending: final suite run, Docker verification)
+- [x] 8. Simulation, release docs, SQLite flake fix, tag v0.2.0 (all Python suites green; Go sidecar unchanged since phase 0). Still to verify with Docker running: image builds, the read-only wa_data WAL mount, Google downscoped refresh against the real endpoint.

@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. The version number
 lives only in `VERSION`.
 
-## [0.2.0] - unreleased
+## [0.2.0] - 2026-09-24
 
 First release as the Agent Authority Broker, the successor of WA_GW 0.1.0.
 Clean break: new repo, new names (`aab_` keys, namespaced tools and endpoints),
