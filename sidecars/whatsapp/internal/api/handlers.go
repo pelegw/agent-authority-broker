@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -22,7 +23,7 @@ func (h *handlers) status(rw http.ResponseWriter, _ *http.Request) {
 // qr serves the current pairing code as a PNG so the human can log in from a
 // browser (served by plugin-whatsapp at /connect/qr.png and proxied by the
 // broker's admin API).
-func (h *handlers) qr(rw http.ResponseWriter, _ *http.Request) {
+func (h *handlers) qr(rw http.ResponseWriter, r *http.Request) {
 	png, err := h.wa.QRPNG()
 	switch {
 	case errors.Is(err, wa.ErrLoggedIn):
@@ -32,6 +33,8 @@ func (h *handlers) qr(rw http.ResponseWriter, _ *http.Request) {
 	case err != nil:
 		writeError(rw, http.StatusInternalServerError, err.Error())
 	default:
+		// That it was served, never the code (a pairing secret while valid).
+		log.Printf("qr served request_id=%s", RequestID(r))
 		rw.Header().Set("Content-Type", "image/png")
 		_, _ = rw.Write(png)
 	}
@@ -54,13 +57,18 @@ func (h *handlers) send(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := h.wa.SendText(r.Context(), req.To, req.Text)
+	// The message id only: never the text, never the recipient, never the
+	// error's text (it can quote the recipient).
 	switch {
 	case errors.Is(err, wa.ErrNotLinked):
+		log.Printf("send result=not_linked status=503 request_id=%s", RequestID(r))
 		writeError(rw, http.StatusServiceUnavailable, err.Error())
 	case err != nil:
+		log.Printf("send result=error status=502 request_id=%s", RequestID(r))
 		// Includes bad recipients; the plugin relays the message to the owner.
 		writeError(rw, http.StatusBadGateway, err.Error())
 	default:
+		log.Printf("send result=ok message_id=%s request_id=%s", Value(res.MessageID), RequestID(r))
 		writeJSON(rw, http.StatusOK, res)
 	}
 }

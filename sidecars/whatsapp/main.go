@@ -34,11 +34,20 @@ func main() {
 // archive reads answer 503 instead of reading through files a dead writer
 // left behind (docs/plugins/whatsapp.md, "Read-only WAL archive").
 func run() int {
+	// UTC with microseconds, like the Python services' ISO timestamps, so
+	// merged `docker compose logs` read in one order.
+	log.SetFlags(log.LstdFlags | log.LUTC | log.Lmicroseconds)
 	cfg, err := config.FromEnv()
 	if err != nil {
 		log.Printf("config: %v", err)
 		return 1
 	}
+	if cfg.LogLevelInvalid {
+		log.Printf("warning: LOG_LEVEL not recognised; using INFO")
+	}
+	wa.LogLevel = cfg.LogLevel
+	api.Quiet = cfg.LogLevel == "WARN" || cfg.LogLevel == "ERROR"
+	log.Printf("sidecar starting log_level=%s", cfg.LogLevel)
 
 	if err := prepareSessionDir(cfg); err != nil {
 		log.Printf("session dir: %v", err)

@@ -20,14 +20,14 @@ func (c *Client) handleEvent(evt interface{}) {
 	case *events.HistorySync:
 		c.ingestHistorySync(v)
 	case *events.Connected:
-		log.Println("connected to WhatsApp")
+		log.Println("whatsapp connection state=connected")
 		go c.syncContacts()
 	case *events.Disconnected:
-		log.Println("disconnected (whatsmeow auto-reconnects)")
+		log.Println("whatsapp connection state=disconnected (whatsmeow reconnects)")
 	case *events.LoggedOut:
 		// The user unlinked this device (or it expired). The stored session is
 		// dead; delete it and exit so Docker restarts us into a fresh QR flow.
-		log.Println("logged out by WhatsApp — clearing session, restarting for re-pair")
+		log.Println("whatsapp connection state=logged_out: clearing the session, restarting to re-pair")
 		if err := c.WM.Store.Delete(context.Background()); err != nil {
 			log.Printf("failed to clear session: %v", err)
 		}
@@ -36,7 +36,7 @@ func (c *Client) handleEvent(evt interface{}) {
 		// Another linked-device session took over this slot. whatsmeow will not
 		// reconnect; exit so a restart re-establishes (or surfaces a real conflict).
 		c.setFatal("stream replaced by another session")
-		log.Println("stream replaced by another WhatsApp session — restarting")
+		log.Println("whatsapp connection state=stream_replaced: another session took over; restarting")
 		os.Exit(1)
 	case *events.ClientOutdated:
 		// WhatsApp rejected our client version. Auto-reconnect can't fix this;

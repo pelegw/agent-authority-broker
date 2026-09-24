@@ -7,6 +7,7 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"log"
 	"net/http"
 
 	"aab/sidecars/whatsapp/internal/wa"
@@ -21,7 +22,8 @@ type WhatsApp interface {
 	MediaByMessage(ctx context.Context, chatJID, messageID string) ([]byte, string, error)
 }
 
-// NewHandler builds the route table. token guards everything but /health.
+// NewHandler builds the route table. token guards everything but /health;
+// every request but /health gets one log line (requestlog.go).
 func NewHandler(token string, w WhatsApp) http.Handler {
 	h := &handlers{wa: w}
 	auth := requireToken(token)
@@ -31,7 +33,7 @@ func NewHandler(token string, w WhatsApp) http.Handler {
 	mux.Handle("GET /qr", auth(h.qr))
 	mux.Handle("POST /send", auth(h.send))
 	mux.Handle("GET /media", auth(h.media))
-	return mux
+	return withRequestLog(mux)
 }
 
 // requireToken enforces the shared secret with a constant-time compare.
@@ -40,6 +42,8 @@ func requireToken(token string) func(http.HandlerFunc) http.Handler {
 		return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 			got := r.Header.Get("X-Internal-Token")
 			if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+				log.Printf("request refused: bad or missing X-Internal-Token path=%s request_id=%s",
+					Value(r.URL.Path), RequestID(r))
 				writeError(rw, http.StatusUnauthorized, "missing or invalid X-Internal-Token")
 				return
 			}

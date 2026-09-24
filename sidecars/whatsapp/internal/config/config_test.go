@@ -40,3 +40,28 @@ func TestTokenRequired(t *testing.T) {
 		t.Fatal("FromEnv without SIDECAR_TOKEN should fail")
 	}
 }
+
+// LOG_LEVEL is the variable every service reads; the sidecar maps it onto
+// whatsmeow's level names and falls back to INFO (flagged) on anything else.
+func TestLogLevel(t *testing.T) {
+	cases := []struct {
+		env, want string
+		invalid   bool
+	}{
+		{"", "INFO", false}, {"debug", "DEBUG", false}, {"INFO", "INFO", false},
+		{"warning", "WARN", false}, {"WARN", "WARN", false}, {"error", "ERROR", false},
+		{"critical", "ERROR", false}, {"loud", "INFO", true},
+	}
+	for _, tc := range cases {
+		t.Setenv("SIDECAR_TOKEN", "t")
+		t.Setenv("LOG_LEVEL", tc.env)
+		c, err := FromEnv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.LogLevel != tc.want || c.LogLevelInvalid != tc.invalid {
+			t.Errorf("LOG_LEVEL=%q: got %q/%v, want %q/%v",
+				tc.env, c.LogLevel, c.LogLevelInvalid, tc.want, tc.invalid)
+		}
+	}
+}
