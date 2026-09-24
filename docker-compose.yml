@@ -143,23 +143,25 @@ services:
 
   # Google plugin service: one container for gmail, gcal and gdrive, because
   # they share one OAuth credential (the isolation boundary that matters).
-  # Holds the client secret and refresh token; mints per-scope-set tokens.
+  # Holds the client secret and refresh token (encrypted in google_secrets);
+  # mints a short-lived access token per scope set, per call.
   plugin-google:
     build:
       context: ./plugins/google
       additional_contexts:
-        runtime: ./plugin-runtime
-        repo: .
+        runtime: ./plugin-runtime   # the aab-plugin-runtime package
     restart: unless-stopped
     networks: [broker_net]
     volumes:
-      - google_secrets:/secrets
+      - google_secrets:/secrets     # this plugin's own encrypted secret store
+    # Generic names inside the container (aab_plugin_runtime.from_env). No
+    # Google values here on purpose: the OAuth client id/secret are console
+    # config (relayed once to /configure, stored encrypted in /secrets), and
+    # the broker passes the OAuth redirect URI with each /connect/start.
     environment:
-      PLUGIN_TOKEN_GOOGLE: ${PLUGIN_TOKEN_GOOGLE:?run 'python scripts/init_secrets.py' to create .env}
-      PLUGIN_SECRETS_KEY_GOOGLE: ${PLUGIN_SECRETS_KEY_GOOGLE:?run 'python scripts/init_secrets.py' to create .env}
-      # The OAuth client id and secret arrive via /configure from the console.
-      # Builds the redirect URI https://<SITE_DOMAIN>/oauth/callback/google.
-      SITE_DOMAIN: ${SITE_DOMAIN:-}
+      PLUGIN_TOKEN: ${PLUGIN_TOKEN_GOOGLE:?run 'python scripts/init_secrets.py' to create .env}
+      PLUGIN_SECRETS_KEY: ${PLUGIN_SECRETS_KEY_GOOGLE:?run 'python scripts/init_secrets.py' to create .env}
+      PLUGIN_SECRETS_DIR: /secrets
 
 # None of these is `internal: true`: the broker (Telegram, Cloudflare JWKS),
 # the plugins (GitHub, Google) and the sidecar (WhatsApp) all need egress.

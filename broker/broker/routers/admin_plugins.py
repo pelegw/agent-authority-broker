@@ -6,7 +6,7 @@ service name, because one consent (Google) covers every plugin a service
 hosts.
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -60,8 +60,11 @@ def health(plugin: str, ctx: AdminContext = Depends(require_admin)) -> dict:
 
 
 @router.post("/v1/admin/plugins/{plugin}/connect/start")
-def connect_start(plugin: str, ctx: AdminContext = Depends(require_admin)) -> dict:
-    return plugins_admin.connect_start(ctx, plugin)
+def connect_start(plugin: str, request: Request,
+                  ctx: AdminContext = Depends(require_admin)) -> dict:
+    # The Host header matters only in local mode (the OAuth redirect URI);
+    # public mode builds it from SITE_DOMAIN.
+    return plugins_admin.connect_start(ctx, plugin, request.headers.get("host", ""))
 
 
 @router.post("/v1/admin/plugins/{plugin}/connect/finish")

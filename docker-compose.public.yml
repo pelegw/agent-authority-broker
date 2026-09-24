@@ -20,6 +20,9 @@ services:
       # Caddy forwards the original Host header (your public domain), so the
       # /mcp DNS-rebinding guard must accept it; otherwise MCP clients get 421.
       MCP_ALLOWED_HOSTS: "localhost:*,127.0.0.1:*,${SITE_DOMAIN:?set SITE_DOMAIN in .env}"
+      # The OAuth redirect URI the broker hands plugin-google:
+      # https://<SITE_DOMAIN>/oauth/callback/<service> (never the Host header).
+      SITE_DOMAIN: ${SITE_DOMAIN:?set SITE_DOMAIN in .env}
 
   edge:
     image: caddy:2-alpine

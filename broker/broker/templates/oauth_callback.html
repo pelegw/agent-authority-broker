@@ -1,9 +1,12 @@
 <!doctype html>
-<!-- OAuth / install callback. Rendered by routers/oauth.py; the server fills
-     only the service name (as JSON) and a CSP nonce. The code and state are
-     read from the URL here, in the browser, and relayed once to the broker,
-     which forwards them to the plugin. Nothing from the URL is ever written
-     into the page. -->
+<!-- OAuth / install callback. Rendered by routers/oauth.py WITHOUT an owner
+     credential (the provider's cross-site redirect carries no SameSite=Strict
+     session cookie); the server fills only the service name (as JSON) and a
+     CSP nonce. The code and state are read from the URL here, in the
+     browser, stripped from the address bar at once, and relayed by a
+     same-origin POST (which does carry the session cookie) to the
+     admin-guarded connect/finish. Nothing from the URL is ever written into
+     the page, and the code is kept in this script's memory only. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -15,11 +18,13 @@
          padding: 0 1rem; color: #1b1b1b; background: #fafafa; }
   @media (prefers-color-scheme: dark) { body { color: #e8e8e8; background: #161616; } }
   .ok { color: #1a7f37; } .err { color: #c62828; }
+  button { font: inherit; padding: .4rem 1rem; }
 </style>
 </head>
 <body>
 <h1>Connecting…</h1>
 <p id="msg">Finishing the connection.</p>
+<p><button id="retry" type="button" hidden>Retry</button></p>
 <script nonce="{{NONCE}}">
 (function () {
   var service = {{SERVICE_JSON}};
@@ -28,24 +33,49 @@
   ["code", "state", "installation_id"].forEach(function (k) {
     if (q.get(k)) { body[k] = q.get(k); }
   });
-  // Drop the code from the address bar and history right away.
+  // Drop the code from the address bar and history right away; from here
+  // on it lives only in `body`, in this page's memory.
   history.replaceState(null, "", window.location.pathname);
   var msg = document.getElementById("msg");
-  fetch("/v1/admin/plugins/" + encodeURIComponent(service) + "/connect/finish", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: {"Content-Type": "application/json", "X-Requested-With": "aab-console"},
-    body: JSON.stringify(body)
-  }).then(function (r) {
-    return r.json().then(function (j) { return {ok: r.ok, j: j}; });
-  }).then(function (res) {
-    msg.textContent = res.ok ? "Connected. You can close this tab."
-                             : "Connection failed: " + (res.j.error || "unknown error");
-    msg.className = res.ok ? "ok" : "err";
-  }).catch(function () {
-    msg.textContent = "Connection failed: the broker could not be reached.";
-    msg.className = "err";
-  });
+  var retry = document.getElementById("retry");
+
+  function show(text, cls, canRetry) {
+    msg.textContent = text;
+    msg.className = cls;
+    retry.hidden = !canRetry;
+  }
+
+  function finish() {
+    retry.hidden = true;
+    show("Finishing the connection.", "", false);
+    fetch("/v1/admin/plugins/" + encodeURIComponent(service) + "/connect/finish", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {"Content-Type": "application/json", "X-Requested-With": "aab-console"},
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; })
+        .then(function (j) { return {ok: r.ok, status: r.status, j: j}; });
+    }).then(function (res) {
+      if (res.ok) {
+        body = {};                  // done: forget the code
+        show("Connected. You can close this tab.", "ok", false);
+      } else if (res.status === 401) {
+        // No live owner session in this browser: keep the code in memory
+        // and let the owner log in elsewhere, then retry here.
+        show("Log in to the console in another tab, then retry.", "err", true);
+      } else {
+        body = {};                  // the plugin consumed the state: start over
+        show("Connection failed: " + (res.j.error || "unknown error") +
+             ". Start the connection again from the console.", "err", false);
+      }
+    }).catch(function () {
+      show("Connection failed: the broker could not be reached.", "err", true);
+    });
+  }
+
+  retry.addEventListener("click", finish);
+  finish();
 })();
 </script>
 </body>
