@@ -14,7 +14,9 @@ import broker
 
 ROOT = Path(broker.__file__).resolve().parent
 AGENT_ROOTS = ("broker.routers.targets", "broker.routers.actions", "broker.routers.me",
-               "broker.routers.permissions", "broker.services.agent", "broker.mcp_server")
+               "broker.routers.permissions", "broker.routers.delegations",
+               "broker.routers.skill", "broker.services.agent",
+               "broker.services.delegation", "broker.mcp_server")
 
 
 def _file(mod: str) -> Path | None:
@@ -76,6 +78,7 @@ def test_agent_surface_cannot_reach_admin_or_identity():
     g = graph(AGENT_ROOTS)
     assert "broker.engine" in g and "broker.policy" in g        # the walk is not vacuous
     assert "broker.mcp_tools" in g and "broker.mcp_generic" in g
+    assert "broker.services.delegation" in g and "broker.skill.generator" in g
     assert "broker.services.admin" not in g
     assert "broker.deps" not in g
     assert not [m for m in g if m.startswith("broker.identity")], sorted(g)

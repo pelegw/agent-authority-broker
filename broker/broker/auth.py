@@ -78,6 +78,13 @@ def hash_key(plaintext: str) -> str:
     return hashlib.sha256(plaintext.encode()).hexdigest()
 
 
+def max_delegation_depth() -> int:
+    """How many delegation hops below a root key are allowed. The one reader
+    of the setting, so authentication, key creation and the agent surface
+    (delegate, get_my_access, the MCP tool list) can never disagree."""
+    return get_settings().max_delegation_depth
+
+
 # ---- chain walking ------------------------------------------------------------
 
 def key_chain(key_id: int, conn: sqlite3.Connection | None = None) -> list[dict]:
@@ -109,7 +116,7 @@ def _chain_problem(chain: list[dict], now: int) -> str | None:
     """Why a chain cannot act right now, or None if every link is live."""
     if not chain:
         return "broken chain"
-    if len(chain) - 1 > get_settings().max_delegation_depth:
+    if len(chain) - 1 > max_delegation_depth():
         return "delegation too deep"
     principal = chain[0]["principal_id"]
     for link in chain:
@@ -286,7 +293,7 @@ def _check_child_of(conn, parent_key_id: int, principal_id: str, role: str,
     parent = chain[-1]
     if parent["principal_id"] != principal_id:
         raise ValueError("parent key belongs to another principal")
-    if len(chain) > get_settings().max_delegation_depth:   # child depth = len(chain)
+    if len(chain) > max_delegation_depth():   # child depth = len(chain)
         raise ValueError("delegation depth limit reached")
     if ROLE_RANK[role] > ROLE_RANK.get(parent["role"], -1):
         raise ValueError(f"role {role!r} exceeds parent role {parent['role']!r}")
@@ -338,4 +345,4 @@ def disable_key(key_id: int) -> bool:
 
 __all__ = ["ADMIN_TOKEN_PREFIX", "AuthContext", "KEY_PREFIX", "NewKey", "ROLES",
            "authenticate_bearer", "context_for_key", "create_key", "disable_key", "generate_key",
-           "hash_key", "key_chain", "rotate_key"]
+           "hash_key", "key_chain", "max_delegation_depth", "rotate_key"]

@@ -11,6 +11,7 @@ Design documents land here as the phases that need them are built:
 | `deployment.md` | phase 3 | One container per plugin service: local and public run, networks, the env split per container, what each volume holds, rotation per secret. |
 | `plugin-api.md` | phase 3 | The internal plugin API served by `aab-plugin-runtime` (`/manifests`, `/perform`, connect flows, `X-Plugin-Token`, 503/502 contract). |
 | `mcp.md` | phase 3 | The MCP surface: per-request tool derivation from manifests and the caller's reach, `<plugin>_<action>` naming, call controls, result encoding, what is deliberately absent. |
+| `delegation.md` | phase 5 | Agent-minted child keys: how a chain is built (only by `narrow()`), the owner's key tree, revocation propagation, the service-level properties 10 and 11. The generated agent skill doc is `integrations/claude-skill/agent-authority-broker/SKILL.md` (`aab skill build`; CI checks drift). |
 | `platform-thesis.md` | phase 7 | What adding Google after GitHub cost: manifest fields, engine files touched (target zero), shared adapter code. |
 
 The public deploy runbook (EC2 + Cloudflare) is `deploy/DEPLOY.md`. The implementation plan is referenced from `CLAUDE.md`.

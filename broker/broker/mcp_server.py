@@ -20,6 +20,9 @@ Every refusal is an `isError` result whose text is the same compact
 `{"error", "code", "hint"?}` JSON the REST route returns; never a stack
 trace or an exception message from inside the broker.
 
+One resource, `broker://skill`: the skill doc filtered to the calling key,
+the same text as REST `GET /v1/me/skill` for the same Host.
+
 There is NO approve/reject tool, and this module's import graph must not
 reach services/admin.py or identity/ (tests/test_no_admin_from_agent_paths.py).
 """
@@ -36,18 +39,24 @@ from typing import Any, AsyncIterator
 import anyio.to_thread
 from mcp import types
 from mcp.server.lowlevel import Server
+from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.shared.exceptions import McpError
 
 from . import __version__, mcp_tools
 from .agent_auth import authenticate
 from .auth import AuthContext
 from .config import get_settings
 from .errors import PolicyError
+from .services import agent
+from .skill.generator import base_url_from
+from .skill.sections import PLACEHOLDER
 
 log = logging.getLogger(__name__)
 
 CURRENT_AUTH: ContextVar[AuthContext | None] = ContextVar("aab_mcp_auth", default=None)
+SKILL_URI = "broker://skill"
 
 server: Server = Server("agent-authority-broker", version=__version__)
 
@@ -86,6 +95,53 @@ async def call_tool(name: str, arguments: dict | None) -> types.CallToolResult:
         log.exception("MCP tool %s failed", name)
         return mcp_tools.text_result({"error": "internal error", "code": "internal"},
                                      error=True)
+
+
+# ---- resources: the key's skill doc -------------------------------------------------
+
+def _request_base_url() -> str:
+    """The base URL the caller used, from the HTTP request the SDK carries
+    in the request context (same derivation as REST /v1/me/skill)."""
+    try:
+        request = server.request_context.request
+    except LookupError:
+        return PLACEHOLDER
+    if request is None:
+        return PLACEHOLDER
+    return base_url_from(request.headers, request.url.scheme)
+
+
+def _mcp_error(code: int, message: str) -> McpError:
+    return McpError(types.ErrorData(code=code, message=message))
+
+
+@server.list_resources()
+async def list_resources() -> list[types.Resource]:
+    try:
+        _auth()
+    except PolicyError as exc:
+        raise _mcp_error(types.INVALID_REQUEST, str(exc)) from None
+    return [types.Resource(
+        uri=SKILL_URI, name="skill", title="Agent guide for this key",
+        description="How to use the broker, filtered to what this key can do right now.",
+        mimeType="text/markdown")]
+
+
+@server.read_resource()
+async def read_resource(uri) -> list[ReadResourceContents]:
+    try:
+        auth = _auth()
+    except PolicyError as exc:
+        raise _mcp_error(types.INVALID_REQUEST, str(exc)) from None
+    if str(uri) != SKILL_URI:
+        raise _mcp_error(types.INVALID_PARAMS, "no such resource")
+    try:
+        text = await _run(agent.skill_doc, auth, _request_base_url())
+    except Exception:
+        # Same rule as tools: log here, never hand the agent internals.
+        log.exception("MCP resource %s failed", SKILL_URI)
+        raise _mcp_error(types.INTERNAL_ERROR, "internal error") from None
+    return [ReadResourceContents(content=text, mime_type="text/markdown")]
 
 
 # ---- transport ------------------------------------------------------------------------

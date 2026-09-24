@@ -18,8 +18,8 @@ from .config import get_settings, validate_exposure
 from .errors import PolicyError
 from .origin import OriginGuardMiddleware
 from .plugins.registry import get_registry, init_registry
-from .routers import (actions, admin, admin_keys, admin_ops, admin_plugins, auth, health, me,
-                      oauth, permissions, targets)
+from .routers import (actions, admin, admin_keys, admin_ops, admin_plugins, auth, delegations,
+                      health, me, oauth, permissions, skill, targets)
 
 
 @asynccontextmanager
@@ -64,7 +64,8 @@ api.include_router(auth.router)
 for _r in ADMIN_ROUTERS:
     api.include_router(_r)
 # The agent surface (aab_ keys). These routers never import deps.py/identity.
-for _r in (targets.router, actions.router, me.router, permissions.router):
+for _r in (targets.router, actions.router, me.router, permissions.router,
+           delegations.router, skill.router):
     api.include_router(_r)
 
 

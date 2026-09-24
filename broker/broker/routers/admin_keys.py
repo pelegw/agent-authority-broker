@@ -48,6 +48,13 @@ def list_keys() -> list[dict]:
     return admin.list_keys()
 
 
+# Declared before /v1/admin/keys/{key_id}, which would otherwise capture "tree".
+@router.get("/v1/admin/keys/tree")
+def key_tree() -> list[dict]:
+    """Root keys with their delegated children nested: status, liveness, grants."""
+    return admin.key_tree()
+
+
 @router.get("/v1/admin/keys/{key_id}")
 def get_key(key_id: int) -> dict:
     return admin.get_key(key_id)

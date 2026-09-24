@@ -5,6 +5,9 @@ only what the key could discover by trying: its own capabilities, grants
 and queued actions. It never lists hidden resources or deny sets, because
 listing them would reveal exactly what exists but is hidden.
 
+Delegation (delegate / list / revoke) lives in services/delegation.py, which
+builds on the helpers here.
+
 This module must not import services/admin.py or identity/ (a test walks
 the import graph): an agent has no path to approving anything.
 """
@@ -16,6 +19,7 @@ import time
 from .. import db, notify
 from ..actions import queue
 from ..audit import audit
+from ..auth import max_delegation_depth
 from ..authority import store
 from ..authority.capability import Capability, from_json, normalize_all, to_json
 from ..authority.ceiling import ceiling
@@ -31,6 +35,7 @@ from ..plugins.adapter import AdapterError
 from ..plugins.manifest import ManifestError
 from ..plugins.registry import get_registry
 from ..policy import enforced_where, run_mode
+from ..skill.generator import KeyContext, render
 
 
 def _caps_by_target(auth) -> dict[str, list[tuple[Capability, tuple[str, ...]]]]:
@@ -75,13 +80,39 @@ def list_targets(auth) -> dict:
     return {"items": items}
 
 
-def _visible_cap(cap: Capability, deny: dict[str, set[str]], dims: dict[str, str]) -> dict | None:
+def visible_caps(auth, caps, extra_denies: dict | None = None) -> list[dict]:
+    """Capabilities as JSON with every hidden or denied id removed (the
+    owner's hidden resources, the key's merged denies, and `extra_denies`),
+    dropping any capability that loses a whole selector. The one way this
+    surface shows capabilities it did not receive verbatim from the caller."""
+    reg = get_registry()
+    manifests = reg.manifests()
+    out = []
+    for cap in caps:
+        m = manifests.get(cap.target)
+        if m is None:
+            continue
+        deny = deny_sets(auth, cap.target)
+        for kind, ids in ((extra_denies or {}).get(cap.target) or {}).items():
+            deny.setdefault(kind, set()).update(ids)
+        dims = {n.dimension: (n.resource or n.dimension) for n in m.narrowings}
+        shown = _visible_cap(cap, deny, dims, reg.ancestors)
+        if shown is not None:
+            out.append(shown)
+    return out
+
+
+def _visible_cap(cap: Capability, deny: dict[str, set[str]], dims: dict[str, str],
+                 ancestors=None) -> dict | None:
     """Capability JSON with denied/hidden ids removed from its selectors;
-    None when that empties a selector (nothing left to show)."""
+    None when that empties a selector (nothing left to show). An id under a
+    hidden folder counts as hidden (the same ancestry rule the policy
+    applies), so a subtree selector never names what hiding its parent hid."""
+    anc = ancestors or (lambda kind, rid: ())
     out = to_json(cap)
     for dim, ids in list(out["selector"].items()):
         kind = dims.get(dim, dim)
-        kept = [i for i in ids if i not in deny.get(kind, set())]
+        kept = [i for i in ids if not is_denied(deny.get(kind, set()), i, kind, anc)]
         if not kept:
             return None
         out["selector"][dim] = kept
@@ -100,7 +131,7 @@ def get_my_access(auth) -> dict:
         health = reg.last_health(pid)
         entries, where = [], {}
         for cap, chain in caps.get(pid, []):
-            shown = _visible_cap(cap, deny, dims)
+            shown = _visible_cap(cap, deny, dims, reg.ancestors)
             if shown is None:
                 continue
             for action in cap.actions:
@@ -111,11 +142,51 @@ def get_my_access(auth) -> dict:
             shown["grant_chain"] = list(chain)
             entries.append(shown)
         targets[pid] = {"capabilities": entries, "enforced_where": dict(sorted(where.items()))}
+    parent, children = _lineage(auth)
     return {
         "name": auth.name, "role": auth.role, "rate_per_min": auth.rate_per_min,
         "key_expires_at": auth.expires_at, "credential_expires_at": auth.credential_expires_at,
-        "depth": auth.depth, "delegated": auth.parent_key_id is not None, "targets": targets,
+        "depth": auth.depth, "delegated": auth.parent_key_id is not None,
+        "parent": parent, "delegations": children,
+        "can_delegate": auth.depth < max_delegation_depth(), "targets": targets,
     }
+
+
+def _lineage(auth) -> tuple[str | None, int]:
+    """(the delegating key's name or None, how many live keys this key has
+    delegated directly). Only the parent's NAME: nothing else about another
+    key is an agent's business."""
+    parent = None
+    if auth.parent_key_id is not None:
+        conn = db.connect()
+        try:
+            row = conn.execute("SELECT name FROM api_keys WHERE id = ?",
+                               (auth.parent_key_id,)).fetchone()
+        finally:
+            conn.close()
+        parent = row["name"] if row else None
+    return parent, live_children(auth)
+
+
+def live_children(auth) -> int:
+    """Keys this key delegated directly that are neither disabled nor expired."""
+    conn = db.connect()
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM api_keys WHERE parent_key_id = ? AND principal_id = ?"
+            " AND disabled = 0 AND (expires_at IS NULL OR expires_at > ?)",
+            (auth.key_id, auth.principal_id, int(time.time()))).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def skill_doc(auth, base_url: str) -> str:
+    """The skill doc for this key: only the actions it can reach right now,
+    plus its current capabilities (from get_my_access, so never a hidden
+    resource or a deny list). Served at /v1/me/skill and as the MCP
+    resource broker://skill."""
+    ctx = KeyContext(reachable=reachable_actions(auth), access=get_my_access(auth))
+    return render(base_url, get_registry().enabled_manifests(), ctx)
 
 
 def resolve_resource(auth, target: str, kind: str, query: str, limit: int = 20) -> dict:
@@ -177,6 +248,31 @@ def _clipped_error(requested, narrowed_caps) -> PolicyError:
                "allowed": [to_json(c) for c in narrowed_caps]})
 
 
+def clipped_error(message: str, hint: str, requested, allowed: list[dict]) -> PolicyError:
+    """A 400 for a request that does not fit: `clipped` echoes the caller's
+    own capabilities that exceeded, `allowed` is what could be given (the
+    caller filters it through visible_caps first)."""
+    return PolicyError(400, message, "clipped", hint=hint,
+                       extra={"clipped": [to_json(c) for c in requested], "allowed": allowed})
+
+
+def normalize_request(capabilities) -> list[Capability]:
+    """Parse and normalize capability JSON an agent sent, against the ENABLED
+    plugins (a disabled plugin cannot be asked for). 400 on anything invalid
+    or on a request that normalizes to nothing."""
+    if not isinstance(capabilities, list) or not capabilities:
+        raise PolicyError(400, "capabilities must be a non-empty list", "invalid_capabilities")
+    try:
+        requested = normalize_all([from_json(c) for c in capabilities],
+                                  get_registry().enabled_manifests())
+    except (ValueError, ManifestError) as exc:
+        raise PolicyError(400, f"invalid capability: {exc}", "invalid_capabilities") from exc
+    if not requested:
+        raise PolicyError(400, "the request is empty after normalization",
+                          "invalid_capabilities")
+    return requested
+
+
 def request_permission(auth, capabilities: list, reason: str = "",
                        expires_in_hours: int | None = None) -> dict:
     """Ask the owner for more authority. The request is first narrowed
@@ -184,16 +280,7 @@ def request_permission(auth, capabilities: list, reason: str = "",
     the parent key's grants for a delegated one); anything clipped is a 400
     listing it, so a pending request is always grantable as asked."""
     reg = get_registry()
-    if not isinstance(capabilities, list) or not capabilities:
-        raise PolicyError(400, "capabilities must be a non-empty list", "invalid_capabilities")
-    enabled = reg.enabled_manifests()
-    try:
-        requested = normalize_all([from_json(c) for c in capabilities], enabled)
-    except (ValueError, ManifestError) as exc:
-        raise PolicyError(400, f"invalid capability: {exc}", "invalid_capabilities") from exc
-    if not requested:
-        raise PolicyError(400, "the request is empty after normalization",
-                          "invalid_capabilities")
+    requested = normalize_request(capabilities)
     now = int(time.time())
     expires_at = None
     if expires_in_hours is not None:
