@@ -17,8 +17,19 @@ Examples:
   aab sessions revoke <session-id>
   aab password                                # prompts for current and new
 
-Passwords are only ever read with getpass, never from arguments (which end up
-in shell history and process listings).
+  aab keys create --name bot --role read-draft --capabilities '<JSON list>'
+      (capabilities e.g. [{"target": "whatsapp", "actions": ["list_chats"]}])
+  aab keys list | rotate <id> | disable <id>
+  aab grants list [--status pending] | approve|reject|revoke <grant-id>
+  aab actions list [--status pending] | approve|reject|cancel <action-id>
+  aab plugins list | enable|disable|health <id>
+  aab plugins config <id> --set greeting=hi --secret api_secret   # secret read with getpass
+  aab hidden list [--target t] | add <target> <kind> <id> [--label L --reason R]
+  aab hidden rm <target> <kind> <id>
+  aab decisions list [--key 3 --target t --decision deny --limit 50] | verify
+
+Passwords and plugin secrets are only ever read with getpass, never from
+arguments (which end up in shell history and process listings).
 """
 
 import argparse
@@ -96,7 +107,138 @@ def build_parser() -> argparse.ArgumentParser:
     sr.add_argument("id")
 
     sub.add_parser("password", help="change the owner password")
+    _engine_commands(sub)
     return p
+
+
+def _json_arg(text: str):
+    try:
+        return json.loads(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"not valid JSON: {exc}") from exc
+
+
+def _engine_commands(sub) -> None:
+    """Phase 3: keys, grants, actions, plugins, hidden resources, decisions."""
+    ky = sub.add_parser("keys", help="manage agent keys").add_subparsers(dest="sub", required=True)
+    kc = ky.add_parser("create")
+    kc.add_argument("--name", required=True)
+    kc.add_argument("--role", default="read-only")
+    kc.add_argument("--rate", type=int, default=6)
+    kc.add_argument("--expires-at", type=int, default=None)
+    kc.add_argument("--capabilities", type=_json_arg, default=[],
+                    help="JSON list of capability objects")
+    kc.add_argument("--denies", type=_json_arg, default=None,
+                    help='JSON {target: {kind: [ids]}}')
+    ky.add_parser("list")
+    for verb in ("rotate", "disable"):
+        ky.add_parser(verb).add_argument("id", type=int)
+
+    gr = sub.add_parser("grants", help="list and decide grants").add_subparsers(
+        dest="sub", required=True)
+    gr.add_parser("list").add_argument("--status", default=None)
+    for verb in ("approve", "reject", "revoke"):
+        gr.add_parser(verb).add_argument("id")
+
+    ac = sub.add_parser("actions", help="queued actions").add_subparsers(
+        dest="sub", required=True)
+    ac.add_parser("list").add_argument("--status", default=None)
+    for verb in ("approve", "reject", "cancel"):
+        ac.add_parser(verb).add_argument("id")
+
+    pl = sub.add_parser("plugins", help="plugins").add_subparsers(dest="sub", required=True)
+    pl.add_parser("list")
+    for verb in ("enable", "disable", "health"):
+        pl.add_parser(verb).add_argument("id")
+    pc = pl.add_parser("config")
+    pc.add_argument("id")
+    pc.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
+                    help="non-secret field; VALUE is parsed as JSON when it can be")
+    pc.add_argument("--secret", action="append", default=[], metavar="NAME",
+                    help="secret field, prompted for with getpass")
+
+    hd = sub.add_parser("hidden", help="hidden resources").add_subparsers(
+        dest="sub", required=True)
+    hd.add_parser("list").add_argument("--target", default=None)
+    ha = hd.add_parser("add")
+    hr = hd.add_parser("rm")
+    for p in (ha, hr):
+        p.add_argument("target")
+        p.add_argument("kind")
+        p.add_argument("resource_id")
+    ha.add_argument("--label", default="")
+    ha.add_argument("--reason", default="")
+
+    dc = sub.add_parser("decisions", help="the decision record").add_subparsers(
+        dest="sub", required=True)
+    dl = dc.add_parser("list")
+    dl.add_argument("--key", type=int, default=None)
+    dl.add_argument("--target", default=None)
+    dl.add_argument("--decision", default=None)
+    dl.add_argument("--limit", type=int, default=50)
+    dc.add_parser("verify")
+
+
+def _config_body(args) -> dict:
+    config = {}
+    for item in args.set:
+        name, sep, value = item.partition("=")
+        if not sep:
+            raise SystemExit(f"--set expects NAME=VALUE, got {item!r}")
+        try:
+            config[name] = json.loads(value)
+        except ValueError:
+            config[name] = value
+    for name in args.secret:
+        config[name] = getpass.getpass(f"{name}: ")
+    return {"config": config}
+
+
+def _engine_request(c: httpx.Client, args) -> httpx.Response | None:
+    """The phase 3 commands; None when args are not one of them."""
+    cmd, sub = args.cmd, getattr(args, "sub", None)
+    if cmd == "keys":
+        if sub == "create":
+            return c.post("/v1/admin/keys", json={
+                "name": args.name, "role": args.role, "rate_per_min": args.rate,
+                "expires_at": args.expires_at, "capabilities": args.capabilities,
+                "denies": args.denies})
+        if sub == "list":
+            return c.get("/v1/admin/keys")
+        if sub == "rotate":
+            return c.post(f"/v1/admin/keys/{args.id}/rotate")
+        if sub == "disable":
+            return c.patch(f"/v1/admin/keys/{args.id}", json={"disabled": True})
+    if cmd == "grants":
+        if sub == "list":
+            return c.get("/v1/admin/grants", params={"status": args.status} if args.status else {})
+        return c.post(f"/v1/admin/grants/{args.id}/{sub}")
+    if cmd == "actions":
+        if sub == "list":
+            return c.get("/v1/admin/actions", params={"status": args.status} if args.status else {})
+        return c.post(f"/v1/admin/actions/{args.id}/{sub}")
+    if cmd == "plugins":
+        if sub == "list":
+            return c.get("/v1/admin/plugins")
+        if sub == "config":
+            return c.patch(f"/v1/admin/plugins/{args.id}", json=_config_body(args))
+        return c.post(f"/v1/admin/plugins/{args.id}/{sub}")
+    if cmd == "hidden":
+        if sub == "list":
+            return c.get("/v1/admin/hidden", params={"target": args.target} if args.target else {})
+        if sub == "add":
+            return c.post("/v1/admin/hidden", json={
+                "target": args.target, "kind": args.kind, "resource_id": args.resource_id,
+                "label": args.label, "reason": args.reason})
+        return c.delete(f"/v1/admin/hidden/{args.target}/{args.kind}/{args.resource_id}")
+    if cmd == "decisions":
+        if sub == "verify":
+            return c.get("/v1/admin/decisions/verify")
+        params = {k: v for k, v in (("key", args.key), ("target", args.target),
+                                    ("decision", args.decision), ("limit", args.limit))
+                  if v is not None}
+        return c.get("/v1/admin/decisions", params=params)
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -137,8 +279,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             r = c.post("/v1/admin/password", json={"current_password": current,
                                                    "new_password": new})
-        else:  # unreachable: argparse enforces the choices
-            return 2
+        else:
+            r = _engine_request(c, args)
+            if r is None:     # unreachable: argparse enforces the choices
+                return 2
     return _finish(r)
 
 

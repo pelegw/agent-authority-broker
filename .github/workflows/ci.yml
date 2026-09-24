@@ -19,6 +19,12 @@ jobs:
       - name: pytest
         working-directory: broker
         run: python -m pytest
+      # The plugin runtime (hosts plugin adapters in their own containers)
+      # is its own package with its own tests.
+      - name: plugin runtime tests
+        run: |
+          pip install -e "plugin-runtime[dev]"
+          cd plugin-runtime && python -m pytest
 
   plugin-runtime:
     runs-on: ubuntu-latest

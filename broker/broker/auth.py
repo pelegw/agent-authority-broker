@@ -186,6 +186,40 @@ def authenticate_bearer(authorization: str | None, client_ip: str = "") -> AuthC
     )
 
 
+def context_for_key(key_id: int) -> AuthContext | None:
+    """The AuthContext a key would have right now, without its secret.
+
+    Used when the broker acts later on a key's behalf (a scheduled or
+    approved action): the same chain checks as bearer auth apply, so a key
+    disabled or expired since queuing (or with a dead ancestor) yields None.
+    """
+    now = int(time.time())
+    conn = db.connect()
+    try:
+        chain = key_chain(key_id, conn)
+        if _chain_problem(chain, now) is not None or chain[-1]["id"] != key_id:
+            return None
+        row = chain[-1]
+        if not _principal_ok(conn, row["principal_id"]):
+            return None
+        try:
+            denies = merged_denies(chain)
+        except ValueError:
+            return None
+    finally:
+        conn.close()
+    expires_at = min((link["expires_at"] for link in chain if link["expires_at"] is not None),
+                     default=None)
+    return AuthContext(
+        key_id=row["id"], principal_id=row["principal_id"], name=row["name"],
+        role=row["role"], rate_per_min=row["rate_per_min"], expires_at=expires_at,
+        credential_expires_at=expires_at, parent_key_id=row["parent_key_id"],
+        depth=len(chain) - 1, denies=denies,
+        chain_key_ids=tuple(link["id"] for link in chain),
+        chain_roles=tuple(link["role"] for link in chain),
+    )
+
+
 def _touch_last_used(conn, row, now: int, client_ip: str) -> None:
     """Throttled update of last_used_at/last_used_ip (skips the write if the
     row was touched within the throttle window and the IP is unchanged)."""
@@ -303,5 +337,5 @@ def disable_key(key_id: int) -> bool:
 
 
 __all__ = ["ADMIN_TOKEN_PREFIX", "AuthContext", "KEY_PREFIX", "NewKey", "ROLES",
-           "authenticate_bearer", "create_key", "disable_key", "generate_key",
+           "authenticate_bearer", "context_for_key", "create_key", "disable_key", "generate_key",
            "hash_key", "key_chain", "rotate_key"]

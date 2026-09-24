@@ -10,14 +10,23 @@ tokens for every byte they read, so error bodies stay terse and stable.
 class PolicyError(Exception):
     """A refusal with the HTTP status (and machine-readable code) to return."""
 
-    def __init__(self, status: int, message: str, code: str | None = None):
+    def __init__(self, status: int, message: str, code: str | None = None,
+                 hint: str | None = None, extra: dict | None = None):
         super().__init__(message)
         self.status = status
         # Default code is derived from the status so every error carries one.
         self.code = code or _DEFAULT_CODES.get(status, "error")
+        # Optional: a short next step for the agent, and structured detail a
+        # caller needs to act (e.g. the clipped capabilities of a request).
+        self.hint = hint
+        self.extra = extra or {}
 
     def body(self) -> dict:
-        return {"error": str(self), "code": self.code}
+        out = {"error": str(self), "code": self.code}
+        if self.hint:
+            out["hint"] = self.hint
+        out.update({k: v for k, v in self.extra.items() if k not in out})
+        return out
 
 
 _DEFAULT_CODES = {

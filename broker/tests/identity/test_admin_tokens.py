@@ -175,20 +175,23 @@ def _admin_operations():
     from broker.main import api
     ops = []
     for path, methods in api.openapi()["paths"].items():
-        if path.startswith("/v1/admin") or path == "/auth/me":
+        if path.startswith(("/v1/admin", "/oauth")) or path == "/auth/me":
             ops += [(m.upper(), path) for m in methods]
     return ops
 
 
 def test_every_admin_route_is_guarded(env):
-    """Structural: every admin path is served by the guarded router, and every
-    route on that router carries require_admin."""
-    from broker.routers import admin
+    """Structural: every admin path is served by one of the guarded admin
+    routers (main.ADMIN_ROUTERS), and every route on them carries
+    require_admin."""
+    from broker.main import ADMIN_ROUTERS
     served = {(m, p) for m, p in _admin_operations()}
     guarded = set()
-    for route in admin.router.routes:
-        assert require_admin in [d.call for d in route.dependant.dependencies], route.path
-        guarded |= {(m, route.path) for m in route.methods}
+    for router in ADMIN_ROUTERS:
+        for route in router.routes:
+            assert require_admin in [d.call for d in route.dependant.dependencies], route.path
+            # OpenAPI prints "{x:path}" converters as "{x}".
+            guarded |= {(m, route.path.replace(":path}", "}")) for m in route.methods}
     assert served, "no admin routes found: the check would be vacuous"
     assert served <= guarded, served - guarded
     assert ("POST", "/v1/admin/tokens") in served and ("GET", "/auth/me") in served
@@ -198,7 +201,7 @@ def test_every_admin_route_is_401_without_credentials(client, owner):
     ops = _admin_operations()
     assert len(ops) >= 7
     for method, path in ops:
-        path = path.replace("{token_id}", "x").replace("{session_id}", "x")
+        path = re.sub(r"\{[^}]+\}", "x", path)
         r = client.request(method, path)
         assert r.status_code == 401, (method, path)
         assert r.json() == {"error": "admin authentication required", "code": "unauthorized"}
