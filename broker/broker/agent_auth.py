@@ -21,12 +21,19 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
-def current_auth(request: Request,
-                 authorization: str | None = Header(None)) -> "_auth.AuthContext":
-    """The calling agent key, or 401. Admin tokens are not agent keys and are
-    refused here even when valid."""
-    ctx = _auth.authenticate_bearer(authorization, client_ip(request))
+def authenticate(authorization: str | None, ip: str = "") -> "_auth.AuthContext":
+    """The agent key behind an Authorization header, or a 401 PolicyError.
+    Admin tokens are not agent keys and are refused even when valid. Shared
+    by the REST dependency below and the MCP auth middleware, so both
+    surfaces accept exactly the same credentials with the same error."""
+    ctx = _auth.authenticate_bearer(authorization, ip)
     if ctx is None:
         raise PolicyError(401, "missing or invalid API key (Authorization: Bearer aab_...)",
                           "unauthorized")
     return ctx
+
+
+def current_auth(request: Request,
+                 authorization: str | None = Header(None)) -> "_auth.AuthContext":
+    """FastAPI dependency: the calling agent key, or 401."""
+    return authenticate(authorization, client_ip(request))
