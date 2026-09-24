@@ -117,7 +117,7 @@ def action_tool(manifest: Manifest, act: Action) -> types.Tool:
 def tools_for(auth) -> list[types.Tool]:
     """Generic tools, then one tool per action this key can reach on an
     enabled plugin. Blocking (reads the database); call from a thread."""
-    tools = [g.tool() for g in mcp_generic.GENERIC]
+    tools = [g.tool() for g in mcp_generic.GENERIC if g.available(auth)]
     taken = {t.name for t in tools}
     manifests = get_registry().enabled_manifests()
     for pid, actions in sorted(agent.reachable_actions(auth).items()):

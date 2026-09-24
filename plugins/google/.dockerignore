@@ -1,0 +1,7 @@
+# Only pyproject.toml and aab_plugin_google/ are copied; keep the context
+# small and never ship test doubles or local caches.
+tests/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+*.egg-info/

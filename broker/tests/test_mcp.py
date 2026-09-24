@@ -18,8 +18,8 @@ from .conftest import cap
 from .mcp_helpers import ACCEPT, call, live, rpc, text_json, tools  # noqa: F401
 
 GENERIC = {"get_my_access", "list_targets", "resolve_resource", "request_permission",
-           "get_permission_status", "list_my_permissions", "get_action_status",
-           "list_my_actions", "cancel_action"}
+           "get_permission_status", "list_my_permissions", "delegate", "list_my_delegations",
+           "revoke_delegation", "get_action_status", "list_my_actions", "cancel_action"}
 ALL_ECHO = ["list_items", "get_item", "get_blob", "watch", "post_item", "delete_item",
             "touch_item"]
 INITIALIZE = {"protocolVersion": "2025-03-26", "capabilities": {},

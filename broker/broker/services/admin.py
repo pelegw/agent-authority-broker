@@ -23,6 +23,7 @@ from ..errors import PolicyError
 from ..plugins.adapter import AdapterError
 from ..plugins.manifest import ManifestError
 from ..plugins.registry import get_registry
+from .deny_input import normalize_denies
 
 
 def _audit(ctx, action: str, resource: str = "", detail: dict | None = None,
@@ -42,29 +43,6 @@ def normalize_caps(raw: list) -> list:
         return normalize_all(caps, get_registry().manifests())
     except (ValueError, ManifestError) as exc:
         raise PolicyError(400, f"invalid capability: {exc}", "invalid_capabilities") from exc
-
-
-def normalize_denies(raw) -> dict:
-    """Validate a deny set and normalize ids through each plugin, so a deny
-    matches the id the engine will compare (e.g. " R1" -> "r1")."""
-    try:
-        denies = parse_denies(raw or {})
-    except ValueError as exc:
-        raise PolicyError(400, str(exc), "invalid_denies") from exc
-    reg = get_registry()
-    out: dict = {}
-    for target, kinds in denies.items():
-        manifest, adapter = reg.manifests().get(target), reg.adapter(target)
-        for kind, ids in kinds.items():
-            res = manifest.resources.get(kind) if manifest else None
-            if res is not None and res.normalize and adapter is not None:
-                try:
-                    ids = sorted({adapter.normalize(kind, i) for i in ids})
-                except AdapterError as exc:
-                    raise PolicyError(400, f"denies.{target}.{kind}: {exc.message}",
-                                      "invalid_denies") from exc
-            out.setdefault(target, {})[kind] = ids
-    return out
 
 
 # ---- keys ------------------------------------------------------------------------------
@@ -139,6 +117,47 @@ def get_key(key_id: int) -> dict:
     out = _key_view(_key_row(key_id))
     out["grants"] = [_grant_view(g) for g in store.list_for_key(key_id, limit=500)]
     return out
+
+
+def key_tree() -> list[dict]:
+    """Every key as a forest: root keys with their delegated children nested.
+
+    Each node is the key view plus `status` (its own row: active | disabled
+    | expired), `live` (it and every ancestor are active and it is within
+    the depth limit, i.e. it would authenticate), `depth`, its grants, and
+    `children`. A key not reachable from any root (its parent row is missing,
+    or a corrupted parent loop) is listed at the top level with
+    `orphan: true`; it cannot authenticate, because its chain is broken."""
+    now = int(time.time())
+    with db.connect() as conn:
+        rows = [dict(r) for r in conn.execute("SELECT * FROM api_keys ORDER BY id")]
+    ids = {r["id"] for r in rows}
+    children: dict[int, list[dict]] = {}
+    for r in rows:
+        if r["parent_key_id"] is not None and r["parent_key_id"] in ids:
+            children.setdefault(r["parent_key_id"], []).append(r)
+    limit = auth.max_delegation_depth()
+    seen: set[int] = set()
+
+    def node(row: dict, depth: int, parent_live: bool) -> dict:
+        seen.add(row["id"])
+        status = ("disabled" if row["disabled"] else
+                  "expired" if row["expires_at"] is not None and row["expires_at"] <= now
+                  else "active")
+        live = parent_live and status == "active" and depth <= limit
+        out = _key_view(row)
+        out.update(status=status, live=live, depth=depth,
+                   grants=[_grant_view(g) for g in store.list_for_key(row["id"], limit=500)])
+        # `seen` stops a corrupted parent loop from recursing forever.
+        out["children"] = [node(c, depth + 1, live) for c in children.get(row["id"], ())
+                           if c["id"] not in seen]
+        return out
+
+    forest = [node(r, 0, True) for r in rows if r["parent_key_id"] is None]
+    for r in rows:        # a missing parent, or a parent loop: never reachable from a root
+        if r["id"] not in seen:
+            forest.append({**node(r, 0, False), "orphan": True})
+    return forest
 
 
 def _root_grant(key_id: int):

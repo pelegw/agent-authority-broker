@@ -9,11 +9,22 @@ Enable = validate required config -> relay config to the plugin's
 `/configure` -> store its `/status` as last_health. An enabled plugin that
 reports unhealthy is legitimate (WhatsApp before pairing). A configure that
 fails refuses the enable: an unconfigured plugin must not go live.
+
+OAuth redirect URI: the broker computes it, because only the broker knows
+how the owner reaches it. Public mode: `https://<SITE_DOMAIN>/oauth/
+callback/<service>` (SITE_DOMAIN is a fail-closed exposure setting; a
+missing one refuses the connect). Local mode: `http://<request host>/oauth/
+callback/<service>`. The plugin stores it beside its state nonce and reuses
+it for the code exchange.
 """
 
 from __future__ import annotations
 
+import os
+import re
+
 from ..audit import audit
+from ..config import get_settings
 from ..errors import PolicyError
 from ..plugins import manifest_view, settings
 from ..plugins.adapter import AdapterError
@@ -49,7 +60,8 @@ def view(plugin_id: str) -> dict:
         "last_health": row.get("last_health", {}),
         "config": settings.effective_config(m, row.get("config", {})),
         "config_schema": settings.schema_view(m),
-        "connection": {"kind": m.connection.kind, "enforcement": m.connection.enforcement},
+        "connection": {"kind": m.connection.kind, "enforcement": m.connection.enforcement,
+                       "shared": m.connection.shared},
         "actions": sorted(m.action_names),
         # What the console derives its editors and approval cards from.
         "manifest": manifest_view.admin_view(m),
@@ -78,7 +90,10 @@ def patch_config(ctx, plugin_id: str, patch: dict) -> dict:
     updates, secrets = settings.split_patch(e.manifest, patch)
     stored = settings.merge(plugin_rows().get(plugin_id, {}).get("config", {}), updates)
     enabled = plugin_rows().get(plugin_id, {}).get("enabled") == 1
-    if secrets or enabled:
+    # A shared field lives in the service's one connection, which serves the
+    # enabled siblings too: relay it even when this plugin is disabled.
+    shared = any(k in settings.shared_names(e.manifest) for k in updates)
+    if secrets or enabled or shared:
         # Relay first: if the plugin refuses, nothing is stored broker-side.
         try:
             e.adapter.configure(settings.effective_config(e.manifest, stored), secrets)
@@ -86,9 +101,23 @@ def patch_config(ctx, plugin_id: str, patch: dict) -> dict:
             _audit(ctx, "plugin.config", plugin_id, {"fields": sorted(patch)}, "error")
             raise _relay_error(exc) from exc
     settings.store_config(plugin_id, stored)
+    _propagate_shared(e.manifest, updates)
     _audit(ctx, "plugin.config", plugin_id,
            {"fields": sorted(updates), "secret_fields": sorted(secrets)})
     return view(plugin_id)
+
+
+def _propagate_shared(manifest, updates: dict) -> None:
+    """Keep a shared non-secret value (the Google OAuth client id) the same
+    on every plugin of the slot, so each one's view, enable and /configure
+    carry it. The plugin service holds one connection, so nothing else
+    needs relaying."""
+    common = {k: v for k, v in updates.items() if k in settings.shared_names(manifest)}
+    if not common:
+        return
+    rows = plugin_rows()
+    for pid in settings.shared_siblings(manifest, get_registry().manifests()):
+        settings.store_config(pid, settings.merge(rows.get(pid, {}).get("config", {}), common))
 
 
 def enable(ctx, plugin_id: str) -> dict:
@@ -138,11 +167,45 @@ def _connect_target(name: str):
     return e, siblings
 
 
-def connect_start(ctx, name: str) -> dict:
+_HOST_RE = re.compile(r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+                      r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*"
+                      r"|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?")
+_SERVICE_RE = re.compile(r"[a-z][a-z0-9]*")
+# Connection kinds (the manifest's closed vocabulary) whose connect flow is
+# an OAuth redirect and cannot start without a redirect URI.
+_REDIRECT_KINDS = frozenset({"google_oauth"})
+
+
+def oauth_redirect_uri(service: str, request_host: str) -> str:
+    """Where Google sends the owner back: the broker's callback page."""
+    if not _SERVICE_RE.fullmatch(service or ""):
+        raise PolicyError(400, "this service name cannot have an OAuth callback", "bad_request")
+    if get_settings().public_mode():
+        # An exposure setting read from the environment only: a hijacked
+        # console session must not be able to point the redirect elsewhere.
+        domain = os.environ.get("SITE_DOMAIN", "").strip().lower()
+        if not _HOST_RE.fullmatch(domain):
+            raise PolicyError(409, "SITE_DOMAIN is not set on the broker; the OAuth redirect "
+                                   "URI cannot be built", "not_configured")
+        return f"https://{domain}/oauth/callback/{service}"
+    host = (request_host or "").strip()
+    if not _HOST_RE.fullmatch(host):
+        raise PolicyError(400, "cannot build the OAuth redirect URI from this request's Host",
+                          "bad_request")
+    return f"http://{host}/oauth/callback/{service}"
+
+
+def connect_start(ctx, name: str, request_host: str = "") -> dict:
     e, siblings = _connect_target(name)
     enabled = [pid for pid in get_registry().enabled_plugins() if pid in siblings]
     try:
-        out = e.adapter.connect_start(enabled)
+        redirect = oauth_redirect_uri(e.service, request_host)
+    except PolicyError:
+        if e.manifest.connection.kind in _REDIRECT_KINDS:
+            raise                          # OAuth cannot start without one
+        redirect = None                    # QR / install flows never use it
+    try:
+        out = e.adapter.connect_start(enabled, redirect)
     except AdapterError as exc:
         raise _relay_error(exc) from exc
     _audit(ctx, "plugin.connect_start", e.service, {"plugins": enabled})

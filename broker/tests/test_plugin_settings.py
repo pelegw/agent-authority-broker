@@ -131,7 +131,7 @@ def test_health_failure_keeps_last_connected(client, admin_headers, echo_local, 
     assert body["last_health"]["healthy"] is False and body["connected"] is True
 
 
-@pytest.mark.parametrize("reported", ["proxy", "target"])
+@pytest.mark.parametrize("reported", ["proxy", "target", "mixed"])
 def test_health_failure_keeps_the_last_reported_enforcement(client, admin_headers, echo_local,
                                                             monkeypatch, reported):
     # A refresh that fails says nothing about how the credential enforces:
@@ -231,16 +231,15 @@ def test_qr_absent_is_404(client, admin_headers, echo):
 
 # ------------------------------------------------------------ OAuth callback page
 
-def test_oauth_callback_is_admin_guarded(client, owner):
-    assert client.get("/oauth/callback/google?code=x&state=y").status_code == 401
-
-
-def test_oauth_callback_page(session_client):
-    r = session_client.get("/oauth/callback/google?code=<script>alert(1)</script>&state=s")
+def test_oauth_callback_page_needs_no_owner_credential(client, owner):
+    # The provider's cross-site redirect carries no SameSite=Strict session
+    # cookie, so the page must be served without one (it holds no data).
+    r = client.get("/oauth/callback/google?code=<script>alert(1)</script>&state=s")
     assert r.status_code == 200
     csp = r.headers["content-security-policy"]
     nonce = csp.split("'nonce-")[1].split("'")[0]
     assert f'nonce="{nonce}"' in r.text and "default-src 'none'" in csp
+    assert "frame-ancestors 'none'" in csp and r.headers["x-frame-options"] == "DENY"
     assert r.headers["referrer-policy"] == "no-referrer"
     assert r.headers["cache-control"] == "no-store"
     assert 'var service = "google";' in r.text
@@ -248,5 +247,36 @@ def test_oauth_callback_page(session_client):
     assert "/connect/finish" in r.text and "aab-console" in r.text
 
 
-def test_oauth_callback_rejects_odd_service_names(session_client):
-    assert session_client.get("/oauth/callback/Goo%22gle").status_code == 404
+def test_oauth_callback_page_strips_the_code_before_posting(client, owner):
+    text = client.get("/oauth/callback/google").text
+    # The query is dropped from the address bar before anything else runs.
+    assert text.index("history.replaceState") < text.index("fetch(")
+    # No live session: the owner is asked to log in elsewhere and retry; the
+    # retry is wired by addEventListener (the CSP allows no inline handlers).
+    assert "Log in to the console in another tab, then retry." in text
+    assert 'addEventListener("click", finish)' in text and "onclick" not in text
+
+
+def test_oauth_callback_page_requires_cloudflare_access_when_enabled(client, owner,
+                                                                    monkeypatch):
+    monkeypatch.setenv("CF_ACCESS_ENABLED", "true")
+    monkeypatch.setenv("CF_ACCESS_TEAM_DOMAIN", "team.cloudflareaccess.com")
+    monkeypatch.setenv("CF_ACCESS_AUD", "aud-tag")
+    get_settings.cache_clear()
+    r = client.get("/oauth/callback/google?code=x&state=y")
+    assert r.status_code == 403 and r.json()["code"] == "forbidden"
+
+
+def test_connect_finish_still_needs_session_and_csrf(client, owner, disabled_echo):
+    body = {"code": "c", "state": "s"}
+    r = client.post("/v1/admin/plugins/echo/connect/finish", json=body, headers=CSRF_HEADERS)
+    assert r.status_code == 401
+    assert client.post("/auth/login", json={"username": owner.username,
+                                            "password": owner.password}).status_code == 200
+    assert client.post("/v1/admin/plugins/echo/connect/finish", json=body).status_code == 403
+    assert client.post("/v1/admin/plugins/echo/connect/finish", json=body,
+                       headers=CSRF_HEADERS).status_code == 200
+
+
+def test_oauth_callback_rejects_odd_service_names(client, owner):
+    assert client.get("/oauth/callback/Goo%22gle").status_code == 404

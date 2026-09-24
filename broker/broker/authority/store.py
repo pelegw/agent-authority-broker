@@ -28,7 +28,10 @@ from .capability import Capability, caps_from_json, caps_to_json
 from .grant import GRANT_STATUSES, Grant, NarrowedCapabilities, grant_le
 
 ACTIVE_WHERE = "status = 'active' AND (expires_at IS NULL OR expires_at > ?)"
-DECIDED_VIA = ("session", "token", "telegram", "system")
+# `agent`: a key revoked a delegation it made (services/delegation.py); the
+# revoking key's name is in the audit log. Never an approval: agents can only
+# move grants to `revoked`, and only below themselves.
+DECIDED_VIA = ("session", "token", "telegram", "system", "agent")
 # Allowed status transitions: target status -> statuses it may come from.
 # Terminal states (rejected, expired, revoked) never move again.
 _TRANSITIONS = {
@@ -109,6 +112,8 @@ def insert_root_grant(principal_id: str, key_id: int, caps: Iterable[Capability]
     if kind not in ("root", "expansion"):
         raise ValueError("insert_root_grant creates root or expansion grants only")
     _check_via(decided_via)
+    if decided_via == "agent":
+        raise ValueError("an agent cannot decide a grant")
     now = int(time.time())
     with _tx() as conn:
         key = _key_row(conn, key_id)
@@ -207,6 +212,8 @@ def set_status(grant_id: str, status: str, decided_by_principal: str | None = No
     if status not in _TRANSITIONS:
         raise ValueError(f"cannot set status {status!r}")
     _check_via(decided_via)
+    if decided_via == "agent" and status != "revoked":
+        raise ValueError("an agent can only revoke a grant, never decide one")
     sources = _TRANSITIONS[status]
     with _tx() as conn:
         cur = conn.execute(

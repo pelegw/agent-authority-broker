@@ -109,7 +109,8 @@ class Adapter(Protocol):
     def ancestors(self, kind: str, resource_id: str) -> list[str]: ...
     def label(self, kind: str, ids: list[str]) -> dict[str, str]: ...
     def perform(self, action: str, params: dict, scope: CallScope) -> Result: ...
-    def connect_start(self, enabled_plugins: list[str]) -> dict: ...
+    def connect_start(self, enabled_plugins: list[str],
+                      redirect_uri: str | None = None) -> dict: ...
     def connect_finish(self, code: str | None, state: str | None,
                        installation_id: str | None) -> dict: ...
     def connect_qr(self) -> bytes: ...
@@ -201,8 +202,14 @@ class InProcessAdapter:
         return Result(data=getattr(out, "data", None), binary=getattr(out, "binary", None),
                       mime=getattr(out, "mime", None))
 
-    def connect_start(self, enabled_plugins: list[str]) -> dict:
-        return self._call(self._connection().start, list(enabled_plugins))
+    def connect_start(self, enabled_plugins: list[str],
+                      redirect_uri: str | None = None) -> dict:
+        start = self._connection().start
+        # Same rule as the runtime: only a start() that takes the keyword
+        # (an OAuth connection) gets the redirect URI.
+        if redirect_uri is not None and _accepts(start, "redirect_uri"):
+            return self._call(lambda: start(list(enabled_plugins), redirect_uri=redirect_uri))
+        return self._call(start, list(enabled_plugins))
 
     def connect_finish(self, code, state, installation_id) -> dict:
         return self._call(self._connection().finish, code, state, installation_id)
@@ -212,6 +219,15 @@ class InProcessAdapter:
 
     def disconnect(self) -> dict:
         return self._call(self._connection().disconnect)
+
+
+def _accepts(fn: Callable, name: str) -> bool:
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
 
 
 def _jsonable(value: Any) -> Any:
@@ -301,9 +317,12 @@ class RemoteAdapter:
             return Result(binary=data, mime=out.get("mime") or "application/octet-stream")
         return Result(data=out.get("data"))
 
-    def connect_start(self, enabled_plugins: list[str]) -> dict:
-        return self._request("POST", "/connect/start",
-                             json_body={"enabled_plugins": list(enabled_plugins)})
+    def connect_start(self, enabled_plugins: list[str],
+                      redirect_uri: str | None = None) -> dict:
+        body: dict[str, Any] = {"enabled_plugins": list(enabled_plugins)}
+        if redirect_uri is not None:
+            body["redirect_uri"] = redirect_uri
+        return self._request("POST", "/connect/start", json_body=body)
 
     def connect_finish(self, code, state, installation_id) -> dict:
         return self._request("POST", "/connect/finish", json_body={

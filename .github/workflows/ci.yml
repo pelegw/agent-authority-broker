@@ -89,13 +89,45 @@ jobs:
           go build ./...
           go test ./...
 
+  # integrations/ is generated from the vendored manifests (never the DB) and
+  # never hand-edited: re-render it and fail if the commit does not match.
   skill-drift:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Phase 5 replaces this with: aab skill build ... && git diff --exit-code integrations/
-      - name: placeholder
-        run: echo "skill drift check added in phase 5"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install broker (provides the aab CLI)
+        run: pip install -e "broker[dev]"
+      - name: Re-render the skill doc
+        run: >-
+          aab skill build --all-plugins --base-url "{{BASE_URL}}"
+          --out integrations/claude-skill/agent-authority-broker/SKILL.md
+      # diff catches edits; status also catches a generated file never committed.
+      - name: Fail on drift
+        run: |
+          git diff --exit-code integrations/
+          test -z "$(git status --porcelain integrations/)"
+
+  # The Google plugin service (plugins/google: gmail, gcal, gdrive over one
+  # google_oauth connection): its own package and tests against the fake
+  # Google. The broker job above also runs broker/tests/targets/test_google.py,
+  # which serves this plugin through the runtime end to end.
+  plugin-google:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # aab-plugin-runtime is the repo's own package (not on PyPI): installing
+      # both in one command lets pip resolve the dependency from the path.
+      - name: Install plugin-runtime + plugin-google (editable, with dev extras)
+        run: pip install -e plugin-runtime -e "plugins/google[dev]"
+      - name: pytest
+        working-directory: plugins/google
+        run: python -m pytest
 
   # The GitHub plugin service (plugins/github): its own package and tests,
   # against a scripted GitHub (tests/fakes.py). The broker job above also

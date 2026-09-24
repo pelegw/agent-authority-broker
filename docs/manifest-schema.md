@@ -42,10 +42,18 @@ Worked examples: `broker/broker/targets/whatsapp/manifest.yaml` (full),
 
 ### `config_schema[]`
 
-`{name, type, secret, required, default, help, values}`; `type` is one of
+`{name, type, secret, shared, required, default, help, values}`; `type` is one of
 `string | text | integer | boolean | enum`. Rules: names match
 `^[a-z][a-z0-9_]*$` and are unique; `enum` needs `values` (and only `enum` has
 them); a `secret` field has no default; a default must match the type.
+
+`shared: true` marks a field that belongs to the connection's shared slot
+(`connection.shared`), not to this plugin alone: the Google OAuth client id
+and secret behind gmail, gcal and gdrive. The console shows such fields once
+per slot, the broker keeps a shared non-secret value identical on every
+plugin of the slot, and the plugin runtime stores a shared secret once, in
+that slot. A manifest with a shared field but no `connection.shared` is
+refused.
 
 ### `resources`
 
@@ -80,6 +88,16 @@ to ids; `hideable` lets the owner hide instances (hidden == 404). Kinds match
 scalar only: `range` (integer >= 0), `flag` (boolean), `level` (with
 `values`). A set-valued rule is either an allow-list (declare it as a
 narrowing) or a deny (it belongs in denies, outside the lattice).
+
+**Name a flag for the permission it grants: `true` must be the permissive
+side.** The algebra treats an absent flag as `true`, treats `true` as top
+and drops it at normalization (docs/grant-algebra.md). A flag whose `true`
+*restricts* (`hide_private`, `metadata_only`, `own_events_only`) would
+therefore vanish from every grant and fail open. Write `private_events`,
+`file_content`, `others_events` instead, restricting with `false`. The same
+holds for a `level`: its last value is top, so order values from most
+restrictive to most permissive. The Google plugins' tests lint their flag
+names for this.
 
 `default` is what the console pre-fills when the owner builds a capability. In
 the algebra an **absent** constraint means unrestricted; the default is not
@@ -144,3 +162,10 @@ coercion) and **forbids unknown params**.
 
 `{addressing, rules[], examples[{title, action, params}]}`. Each example's
 action must exist and its params must validate against the action's model.
+
+`broker/broker/skill/` renders this into the plugin's section of the agent
+skill doc: `addressing` and `rules` verbatim, each example as a REST `curl`
+call. The rest of the section (resources, dimensions, the action table with
+params, modes and schedulability, where each limit is enforced) comes from
+the other manifest fields. A key's copy (`/v1/me/skill`) drops actions and
+examples the key cannot reach.

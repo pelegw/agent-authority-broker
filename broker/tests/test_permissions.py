@@ -5,13 +5,14 @@ import types
 
 import pytest
 
-from broker import auth, notify
+from broker import auth, hidden, notify
 from broker.authority import store
 from broker.authority.capability import from_json, normalize_all
 from broker.authority.grant import narrow
 from broker.plugins.registry import get_registry
 
 from .conftest import cap
+from .mcp_helpers import call, live, text_json  # noqa: F401
 
 
 def perform(client, agent, action="post_item", params=None):
@@ -51,7 +52,7 @@ def test_pending_then_approve_grows_effective(client, admin_headers, echo_local,
     monkeypatch.setattr(notify, "_PROVIDERS", [Provider()])
     a = make_agent([cap(["list_items"])])
     assert perform(client, a).status_code == 403
-    r = request(client, a, [cap(["post_item"], selector={"room": ["r1"]})],
+    r = request(client, a, [cap(["post_item"], selector={"room": ["r1"]}, mode="direct")],
                 reason="need to post")
     assert r.status_code == 202 and r.json()["status"] == "pending"
     gid = r.json()["id"]
@@ -71,7 +72,7 @@ def test_reject_and_revoke(client, admin_headers, echo_local, make_agent):
         "status"] == "rejected"
     assert client.post(f"/v1/admin/grants/{gid}/approve",
                        headers=admin_headers).status_code == 409
-    gid2 = request(client, a, [cap(["post_item"])]).json()["id"]
+    gid2 = request(client, a, [cap(["post_item"], mode="direct")]).json()["id"]
     client.post(f"/v1/admin/grants/{gid2}/approve", headers=admin_headers)
     assert perform(client, a).status_code == 200
     client.post(f"/v1/admin/grants/{gid2}/revoke", headers=admin_headers)
@@ -107,7 +108,7 @@ def test_status_and_list_are_per_key(client, echo_local, make_agent):
 
 
 def test_delegated_key_clipped_to_parent_is_400_with_the_clipped_list(client, child):
-    wide = cap(["post_item"], selector={"room": ["r1", "r3"]})
+    wide = cap(["post_item"], selector={"room": ["r1", "r3"]}, mode="direct")
     r = request(client, child, [wide])
     assert r.status_code == 400
     body = r.json()
@@ -119,7 +120,7 @@ def test_delegated_key_clipped_to_parent_is_400_with_the_clipped_list(client, ch
 
 
 def test_delegated_key_request_inside_parent_goes_pending(client, admin_headers, child):
-    r = request(client, child, [cap(["post_item"], selector={"room": ["r2"]})])
+    r = request(client, child, [cap(["post_item"], selector={"room": ["r2"]}, mode="direct")])
     assert r.status_code == 202
     g = store.get(r.json()["id"])
     assert (g.kind, g.status, g.parent_grant_id) == ("expansion", "pending",
@@ -128,6 +129,108 @@ def test_delegated_key_request_inside_parent_goes_pending(client, admin_headers,
     ok = client.post("/v1/targets/echo/actions/post_item",
                      json={"params": {"room": "r2", "text": "x"}}, headers=child.headers)
     assert ok.status_code == 200
+
+
+def test_a_request_without_a_mode_asks_for_draft(client, admin_headers, echo_local,
+                                                 make_agent):
+    """An agent's request that omits `mode` asks for draft: once approved, its
+    writes still queue for a human; reads stay direct. Only an explicit
+    `"mode": "direct"` asks for autonomy."""
+    a = make_agent([cap(["get_item"])])
+    r = request(client, a, [cap(["list_items", "post_item"], selector={"room": ["r1"]})])
+    assert r.status_code == 202
+    g = store.get(r.json()["id"])
+    assert sorted((sorted(c.actions), c.mode) for c in g.capabilities) == [
+        (["list_items"], "direct"), (["post_item"], "draft")]
+    client.post(f"/v1/admin/grants/{g.id}/approve", headers=admin_headers)
+    assert perform(client, a, "list_items", {"room": "r1"}).status_code == 200
+    queued = perform(client, a)
+    assert queued.status_code == 202 and queued.json()["status"] == "pending_approval"
+    explicit = request(client, a, [cap(["post_item"], selector={"room": ["r1"]},
+                                       mode="direct")]).json()["id"]
+    client.post(f"/v1/admin/grants/{explicit}/approve", headers=admin_headers)
+    assert perform(client, a).status_code == 200
+
+
+def test_a_request_for_an_undraftable_write_needs_an_explicit_mode(client, echo_local,
+                                                                   make_agent):
+    a = make_agent([cap(["list_items"])])
+    r = request(client, a, [cap(["touch_item"])])
+    assert r.status_code == 400 and r.json()["code"] == "invalid_capabilities"
+    assert r.json()["hint"] == 'set "mode": "direct" explicitly to ask for it'
+    assert request(client, a, [cap(["touch_item"], mode="direct")]).status_code == 202
+
+
+def test_owner_authored_grants_keep_direct_when_mode_is_omitted(client, admin_headers,
+                                                                echo_local):
+    """The draft default is for agent-originated requests only: a key the
+    owner creates (or edits) with a mode-less capability keeps `direct`."""
+    made = client.post("/v1/admin/keys", json={
+        "name": "owner-made", "role": "full", "rate_per_min": 60,
+        "capabilities": [cap(["post_item"], selector={"room": ["r1"]})]},
+        headers=admin_headers).json()
+    headers = {"Authorization": f"Bearer {made['key']}"}
+    assert store.get(made["grant_id"]).capabilities[0].mode == "direct"
+    ok = client.post("/v1/targets/echo/actions/post_item",
+                     json={"params": {"room": "r1", "text": "x"}}, headers=headers)
+    assert ok.status_code == 200
+    client.patch(f"/v1/admin/keys/{made['id']}", json={"capabilities": [
+        cap(["post_item"], selector={"room": ["r2"]})]}, headers=admin_headers)
+    ok = client.post("/v1/targets/echo/actions/post_item",
+                     json={"params": {"room": "r2", "text": "x"}}, headers=headers)
+    assert ok.status_code == 200
+
+
+def test_ids_hidden_after_the_grant_never_appear_in_permission_views(
+        client, admin_headers, echo_local, make_agent):
+    """Regression: list_my_permissions and get_permission_status used to show
+    a grant's stored capabilities verbatim, so an id the owner hid (or denied
+    the key) AFTER granting it was still named there."""
+    a = make_agent([cap(["list_items"], selector={"room": ["r1", "r2", "r3"]}),
+                    cap(["get_item"], selector={"room": ["r2"]})])
+    pending = request(client, a, [cap(["post_item"], selector={"room": ["r1", "r3"]})]
+                      ).json()["id"]
+
+    def views():
+        listed = client.get("/v1/permissions", headers=a.headers)
+        one = client.get(f"/v1/permissions/{a.grant_id}", headers=a.headers)
+        req = client.get(f"/v1/permissions/{pending}", headers=a.headers)
+        assert listed.status_code == one.status_code == req.status_code == 200
+        return listed, one, req
+
+    assert all("r2" in r.text for r in views()[:2])      # visible before hiding
+    hidden.add("echo", "room", "r2")                       # the owner hides r2 afterwards
+    client.patch(f"/v1/admin/keys/{a.key_id}", json={"denies": {"echo": {"room": ["r3"]}}},
+                 headers=admin_headers)                    # and denies r3 to this key
+    listed, one, req = views()
+    for r in (listed, one, req):
+        assert "r2" not in r.text and "r3" not in r.text, r.text
+    # A capability left with nothing visible is dropped, the rest keeps r1.
+    assert [c["selector"] for c in one.json()["capabilities"]] == [{"room": ["r1"]}]
+    assert [c["selector"] for c in req.json()["capabilities"]] == [{"room": ["r1"]}]
+    # The grant itself is unchanged: the owner still sees what was granted.
+    raw = client.get(f"/v1/admin/keys/{a.key_id}", headers=admin_headers).json()
+    assert "r2" in str([g["capabilities"] for g in raw["grants"]])
+
+
+def test_ids_hidden_after_the_grant_never_appear_over_mcp(live, echo_local, make_agent):
+    a = make_agent([cap(["list_items"], selector={"room": ["r1", "r2"]})])
+    hidden.add("echo", "room", "r2")
+    for name, args in (("list_my_permissions", {}),
+                       ("get_permission_status", {"grant_id": a.grant_id})):
+        body = text_json(call(live, a.headers, name, args))
+        assert "r2" not in str(body)
+    assert text_json(call(live, a.headers, "list_my_permissions")) == \
+        live.get("/v1/permissions", headers=a.headers).json()
+
+
+def test_clipped_allowed_list_never_names_a_hidden_id(client, child):
+    """A delegated key's refusal lists what its parent could give; an id the
+    owner hid since is not part of that answer."""
+    hidden.add("echo", "room", "r2")
+    r = request(client, child, [cap(["post_item"], selector={"room": ["r2", "r3"]})])
+    assert r.status_code == 400 and r.json()["code"] == "clipped"
+    assert "r2" not in str(r.json()["allowed"])
 
 
 def test_delegated_key_never_exceeds_parent_after_parent_narrows(client, admin_headers, child):

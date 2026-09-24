@@ -192,6 +192,7 @@ def test_enforced_where_from_manifest_and_live_mode():
 @pytest.mark.parametrize("health,expected", [
     ({}, "target"),                                        # never reported: manifest stands
     ({"enforcement": "target", "healthy": True}, "target"),
+    ({"enforcement": "mixed"}, "target"),                  # plugin-google: per the manifest
     ({"enforcement": "proxy"}, "proxy"),
     # A record that does not say fails closed: a refresh error, a plugin
     # that omits the field, an unknown value.

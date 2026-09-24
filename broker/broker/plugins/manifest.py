@@ -66,6 +66,12 @@ class ConfigField(_Model):
     name: str
     type: Literal["string", "text", "integer", "boolean", "enum"]
     secret: bool = False
+    # Belongs to the shared connection (`connection.shared`, e.g. the one
+    # Google OAuth client behind gmail, gcal and gdrive), not to this plugin
+    # alone: the console shows it once per shared slot, the broker keeps the
+    # non-secret value identical on every plugin of that slot, and the
+    # plugin runtime stores a shared secret in the connection's slot.
+    shared: bool = False
     required: bool = False
     default: Any = None
     help: str = ""
@@ -247,6 +253,11 @@ def _validate(m: Manifest) -> None:
     cfg = [f.name for f in m.config_schema]
     if len(cfg) != len(set(cfg)):
         raise ValueError("duplicate config_schema names")
+    shared = [f.name for f in m.config_schema if f.shared]
+    if shared and not m.connection.shared:
+        # A shared field needs a slot to live in; without one it would
+        # silently become per-plugin, which is not what the author declared.
+        raise ValueError(f"config fields {shared} are shared but connection.shared is not set")
     for kind in m.resources:
         if not NAME_RE.match(kind):
             raise ValueError(f"resource kind {kind!r} must match {NAME_RE.pattern}")

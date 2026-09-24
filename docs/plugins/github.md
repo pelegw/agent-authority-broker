@@ -151,8 +151,13 @@ agent it had not.
 4. On GitHub choose the account and **All repositories** or **Only select
    repositories**: the installation's repository set is the outer ceiling
    that grants narrow within. GitHub redirects to the Setup URL with
-   `installation_id` and `state`; the callback page relays both to
-   `POST /v1/admin/plugins/github/connect/finish`.
+   `installation_id` and `state`; the callback page (served without the
+   owner's credential: it renders nothing from the URL) relays both to
+   `POST /v1/admin/plugins/github/connect/finish`, which does require the
+   owner's session and the console's CSRF header. The installation id and
+   state appear once in the broker's access log line for
+   `GET /oauth/callback/github` (uvicorn logs the query string); the state
+   is single-use and expires within minutes.
 5. The plugin checks the state, then verifies the installation with an App
    JWT (`GET /app/installations/{id}`: it must exist and belong to this
    App), and only then stores the installation id and its account. Status
