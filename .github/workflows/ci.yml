@@ -89,10 +89,23 @@ jobs:
           go build ./...
           go test ./...
 
+  # integrations/ is generated from the vendored manifests (never the DB) and
+  # never hand-edited: re-render it and fail if the commit does not match.
   skill-drift:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Phase 5 replaces this with: aab skill build ... && git diff --exit-code integrations/
-      - name: placeholder
-        run: echo "skill drift check added in phase 5"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install broker (provides the aab CLI)
+        run: pip install -e "broker[dev]"
+      - name: Re-render the skill doc
+        run: >-
+          aab skill build --all-plugins --base-url "{{BASE_URL}}"
+          --out integrations/claude-skill/agent-authority-broker/SKILL.md
+      # diff catches edits; status also catches a generated file never committed.
+      - name: Fail on drift
+        run: |
+          git diff --exit-code integrations/
+          test -z "$(git status --porcelain integrations/)"

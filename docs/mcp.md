@@ -119,12 +119,27 @@ event loop.
 | `request_permission(capabilities, reason?, expires_in_hours?)` | `POST /v1/permissions` |
 | `get_permission_status(grant_id)` | `GET /v1/permissions/{id}` |
 | `list_my_permissions(limit?, cursor?)` | `GET /v1/permissions` |
+| `delegate(name, capabilities, expires_in_hours?, reason?, role?, rate_per_min?, denies?)` | `POST /v1/delegations` |
+| `list_my_delegations` | `GET /v1/delegations` |
+| `revoke_delegation(key_id)` | `POST /v1/delegations/{key_id}/revoke` |
 | `get_action_status(action_id)` | `GET /v1/actions/{id}` |
 | `list_my_actions(status?, limit?, cursor?)` | `GET /v1/actions` |
 | `cancel_action(action_id)` | `DELETE /v1/actions/{id}` |
 
-Phase 5 adds `delegate`, `list_my_delegations` and `revoke_delegation`, plus
-the MCP resource `broker://skill` (the key-specific skill doc).
+A generic tool can be listed only for some keys: `delegate` is left out of
+the list for a key already at the delegation depth limit. That is an
+advertisement, never the check: calling it anyway gets the same
+`400 depth_exceeded` as REST, from the service. Delegation is described in
+`docs/delegation.md`.
+
+## Resources
+
+One resource, `broker://skill` (`text/markdown`): the skill doc filtered to
+the calling key, the same text as `GET /v1/me/skill` for the same `Host`.
+It lists only the actions the key can reach and a "Your current
+capabilities" block built from `get_my_access` (never a hidden resource or a
+deny set). `resources/read` of any other URI is a JSON-RPC error; a failure
+while rendering is logged server-side and returned as `internal error`.
 
 ## Deliberately absent
 

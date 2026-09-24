@@ -144,3 +144,10 @@ coercion) and **forbids unknown params**.
 
 `{addressing, rules[], examples[{title, action, params}]}`. Each example's
 action must exist and its params must validate against the action's model.
+
+`broker/broker/skill/` renders this into the plugin's section of the agent
+skill doc: `addressing` and `rules` verbatim, each example as a REST `curl`
+call. The rest of the section (resources, dimensions, the action table with
+params, modes and schedulability, where each limit is enforced) comes from
+the other manifest fields. A key's copy (`/v1/me/skill`) drops actions and
+examples the key cannot reach.

@@ -21,7 +21,8 @@ from fastapi.openapi.utils import get_openapi
 from .plugins.manifest import Manifest
 
 GENERIC = "/v1/targets/{target}/actions/{action}"
-AGENT_PREFIXES = ("/v1/targets", "/v1/me", "/v1/actions", "/v1/permissions")
+AGENT_PREFIXES = ("/v1/targets", "/v1/me", "/v1/actions", "/v1/permissions",
+                  "/v1/delegations")
 _ERROR = {"description": "refused",
           "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
 

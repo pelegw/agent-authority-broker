@@ -158,7 +158,8 @@ def test_tap_rejects(drafter, fake_telegram):
 def test_tap_approves_a_grant(client, echo_local, make_agent, fake_telegram, owner):
     a = make_agent([cap(["list_items"])])
     gid = client.post("/v1/permissions", headers=a.headers, json={
-        "capabilities": [cap(["post_item"], selector={"room": ["r1"]})]}).json()["id"]
+        "capabilities": [cap(["post_item"], selector={"room": ["r1"]}, mode="direct")]}
+                      ).json()["id"]
     inbound._handle_update(_cb(2, f"g:approve:{gid}"))
     g = store.get(gid)
     assert (g.status, g.decided_via, g.decided_by_principal) == ("active", "telegram",

@@ -102,6 +102,9 @@ def _validate_hosts(value: Any) -> tuple[str, ...]:
 SPECS: dict[str, Spec] = {s.name: s for s in (
     Spec("max_delegation_depth", "int", 0, 10, "hops",
          "How many delegation hops below a root key are allowed (0 = no delegation)."),
+    Spec("max_live_delegations", "int", 1, 200, "keys",
+         "How many live child keys one key may have delegated at once (revoked or "
+         "expired children do not count)."),
     Spec("session_idle_seconds", "int", 300, 7 * 86400, "seconds",
          "Console sessions end after this much inactivity."),
     Spec("session_absolute_seconds", "int", 3600, 30 * 86400, "seconds",
@@ -137,6 +140,7 @@ SPECS: dict[str, Spec] = {s.name: s for s in (
 @dataclass(frozen=True)
 class RuntimeSettings:
     max_delegation_depth: int
+    max_live_delegations: int
     session_idle_seconds: int
     session_absolute_seconds: int
     key_rotation_grace_seconds: int

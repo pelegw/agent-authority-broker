@@ -16,6 +16,7 @@ Examples:
   aab sessions list
   aab sessions revoke <session-id>
   aab password                                # prompts for current and new
+  aab skill build --all-plugins --base-url "{{BASE_URL}}" --out SKILL.md   # offline
 
   aab keys create --name bot --role read-draft --capabilities '<JSON list>'
       (capabilities e.g. [{"target": "whatsapp", "actions": ["list_chats"]}])
@@ -109,6 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     sr.add_argument("id")
 
     sub.add_parser("password", help="change the owner password")
+    _skill_commands(sub)
     _engine_commands(sub)
 
     sm = sub.add_parser("simulate", help="approval-volume simulation (local; needs a "
@@ -251,6 +253,8 @@ def _engine_request(c: httpx.Client, args) -> httpx.Response | None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.cmd == "skill":
+        return _skill(args)
 
     if args.cmd == "setup":
         if not args.setup_token:
@@ -326,6 +330,51 @@ def _finish(r: httpx.Response) -> int:
         print(_error(r), file=sys.stderr)
         return 1
     show(r.json())
+    return 0
+
+
+# ---- aab skill (phase 5): render the agent skill doc, offline ----------------------
+
+def _skill_commands(sub) -> None:
+    sk = sub.add_parser("skill", help="the generated agent skill doc").add_subparsers(
+        dest="sub", required=True)
+    b = sk.add_parser("build", help="render SKILL.md from the vendored manifests (no broker "
+                                    "or token needed)")
+    which = b.add_mutually_exclusive_group(required=True)
+    which.add_argument("--all-plugins", action="store_true",
+                       help="every vendored manifest (what CI checks)")
+    which.add_argument("--plugin", action="append", metavar="ID",
+                       help="only this plugin (repeatable)")
+    b.add_argument("--base-url", default="{{BASE_URL}}",
+                   help='written into the doc; default the literal "{{BASE_URL}}"')
+    b.add_argument("--out", default=None, help="file to write (default: stdout)")
+
+
+def _skill(args) -> int:
+    """Render from broker/broker/targets/*/manifest.yaml, never from a
+    database: the committed integrations/ file must not depend on which
+    plugins some deployment happens to have enabled."""
+    from pathlib import Path
+
+    from broker.skill.generator import skill_file, vendored_manifests
+
+    manifests = vendored_manifests()
+    if not args.all_plugins:
+        missing = sorted(set(args.plugin) - set(manifests))
+        if missing:
+            print(f"no vendored manifest for: {', '.join(missing)}", file=sys.stderr)
+            return 2
+        manifests = {pid: m for pid, m in manifests.items() if pid in args.plugin}
+    text = skill_file(manifests, args.base_url)
+    if args.out is None:
+        sys.stdout.write(text)
+        return 0
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # LF on every platform: the file is committed and diffed byte for byte.
+    with out.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    print(f"wrote {out} ({len(text.encode('utf-8'))} bytes)")
     return 0
 
 

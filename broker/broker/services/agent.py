@@ -5,6 +5,9 @@ only what the key could discover by trying: its own capabilities, grants
 and queued actions. It never lists hidden resources or deny sets, because
 listing them would reveal exactly what exists but is hidden.
 
+Delegation (delegate / list / revoke) lives in services/delegation.py, which
+builds on the helpers here.
+
 This module must not import services/admin.py or identity/ (a test walks
 the import graph): an agent has no path to approving anything.
 """
@@ -12,10 +15,12 @@ the import graph): an agent has no path to approving anything.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 
 from .. import db, notify
 from ..actions import queue
 from ..audit import audit
+from ..auth import max_delegation_depth
 from ..authority import store
 from ..authority.capability import Capability, from_json, normalize_all, to_json
 from ..authority.ceiling import ceiling
@@ -31,6 +36,7 @@ from ..plugins.manifest import ManifestError
 from ..plugins.registry import get_registry
 from ..policy import enforced_where, run_mode
 from ..runtime_settings import runtime_settings
+from ..skill.generator import KeyContext, render
 
 
 def _caps_by_target(auth) -> dict[str, list[tuple[Capability, tuple[str, ...]]]]:
@@ -75,13 +81,39 @@ def list_targets(auth) -> dict:
     return {"items": items}
 
 
-def _visible_cap(cap: Capability, deny: dict[str, set[str]], dims: dict[str, str]) -> dict | None:
+def visible_caps(auth, caps, extra_denies: dict | None = None) -> list[dict]:
+    """Capabilities as JSON with every hidden or denied id removed (the
+    owner's hidden resources, the key's merged denies, and `extra_denies`),
+    dropping any capability that loses a whole selector. The one way this
+    surface shows capabilities it did not receive verbatim from the caller."""
+    reg = get_registry()
+    manifests = reg.manifests()
+    out = []
+    for cap in caps:
+        m = manifests.get(cap.target)
+        if m is None:
+            continue
+        deny = deny_sets(auth, cap.target)
+        for kind, ids in ((extra_denies or {}).get(cap.target) or {}).items():
+            deny.setdefault(kind, set()).update(ids)
+        dims = {n.dimension: (n.resource or n.dimension) for n in m.narrowings}
+        shown = _visible_cap(cap, deny, dims, reg.ancestors)
+        if shown is not None:
+            out.append(shown)
+    return out
+
+
+def _visible_cap(cap: Capability, deny: dict[str, set[str]], dims: dict[str, str],
+                 ancestors=None) -> dict | None:
     """Capability JSON with denied/hidden ids removed from its selectors;
-    None when that empties a selector (nothing left to show)."""
+    None when that empties a selector (nothing left to show). An id under a
+    hidden folder counts as hidden (the same ancestry rule the policy
+    applies), so a subtree selector never names what hiding its parent hid."""
+    anc = ancestors or (lambda kind, rid: ())
     out = to_json(cap)
     for dim, ids in list(out["selector"].items()):
         kind = dims.get(dim, dim)
-        kept = [i for i in ids if i not in deny.get(kind, set())]
+        kept = [i for i in ids if not is_denied(deny.get(kind, set()), i, kind, anc)]
         if not kept:
             return None
         out["selector"][dim] = kept
@@ -100,7 +132,7 @@ def get_my_access(auth) -> dict:
         health = reg.last_health(pid)
         entries, where = [], {}
         for cap, chain in caps.get(pid, []):
-            shown = _visible_cap(cap, deny, dims)
+            shown = _visible_cap(cap, deny, dims, reg.ancestors)
             if shown is None:
                 continue
             for action in cap.actions:
@@ -111,11 +143,51 @@ def get_my_access(auth) -> dict:
             shown["grant_chain"] = list(chain)
             entries.append(shown)
         targets[pid] = {"capabilities": entries, "enforced_where": dict(sorted(where.items()))}
+    parent, children = _lineage(auth)
     return {
         "name": auth.name, "role": auth.role, "rate_per_min": auth.rate_per_min,
         "key_expires_at": auth.expires_at, "credential_expires_at": auth.credential_expires_at,
-        "depth": auth.depth, "delegated": auth.parent_key_id is not None, "targets": targets,
+        "depth": auth.depth, "delegated": auth.parent_key_id is not None,
+        "parent": parent, "delegations": children,
+        "can_delegate": auth.depth < max_delegation_depth(), "targets": targets,
     }
+
+
+def _lineage(auth) -> tuple[str | None, int]:
+    """(the delegating key's name or None, how many live keys this key has
+    delegated directly). Only the parent's NAME: nothing else about another
+    key is an agent's business."""
+    parent = None
+    if auth.parent_key_id is not None:
+        conn = db.connect()
+        try:
+            row = conn.execute("SELECT name FROM api_keys WHERE id = ?",
+                               (auth.parent_key_id,)).fetchone()
+        finally:
+            conn.close()
+        parent = row["name"] if row else None
+    return parent, live_children(auth)
+
+
+def live_children(auth) -> int:
+    """Keys this key delegated directly that are neither disabled nor expired."""
+    conn = db.connect()
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM api_keys WHERE parent_key_id = ? AND principal_id = ?"
+            " AND disabled = 0 AND (expires_at IS NULL OR expires_at > ?)",
+            (auth.key_id, auth.principal_id, int(time.time()))).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def skill_doc(auth, base_url: str) -> str:
+    """The skill doc for this key: only the actions it can reach right now,
+    plus its current capabilities (from get_my_access, so never a hidden
+    resource or a deny list). Served at /v1/me/skill and as the MCP
+    resource broker://skill."""
+    ctx = KeyContext(reachable=reachable_actions(auth), access=get_my_access(auth))
+    return render(base_url, get_registry().enabled_manifests(), ctx)
 
 
 def resolve_resource(auth, target: str, kind: str, query: str, limit: int = 20) -> dict:
@@ -162,19 +234,79 @@ def resolve_resource(auth, target: str, kind: str, query: str, limit: int = 20) 
 
 # ---- permission requests -------------------------------------------------------------
 
-def _grant_view(g) -> dict:
-    return {"id": g.id, "kind": g.kind, "status": g.status,
-            "capabilities": [to_json(c) for c in g.capabilities],
+def _grant_view(g, auth=None) -> dict:
+    """A grant as JSON. With `auth` (every agent-facing answer) its
+    capabilities go through visible_caps, so an id the owner hid, or the key
+    was denied, after the grant was made never appears. Without it (the
+    owner's notification card) the capabilities are shown as stored."""
+    caps = [to_json(c) for c in g.capabilities] if auth is None else \
+        visible_caps(auth, g.capabilities)
+    return {"id": g.id, "kind": g.kind, "status": g.status, "capabilities": caps,
             "created_at": g.created_at, "decided_at": g.decided_at,
             "expires_at": g.expires_at}
 
 
-def _clipped_error(requested, narrowed_caps) -> PolicyError:
-    return PolicyError(
-        400, "exceeds what your parent can give", "clipped",
-        hint="request only the allowed capabilities, or ask the owner directly",
-        extra={"clipped": [to_json(c) for c in requested],
-               "allowed": [to_json(c) for c in narrowed_caps]})
+def _clipped_error(auth, requested, narrowed_caps) -> PolicyError:
+    # `allowed` is derived from the parent's grants, so it is filtered like
+    # any capability this surface did not receive from the caller.
+    return clipped_error("exceeds what your parent can give",
+                         "request only the allowed capabilities, or ask the owner directly",
+                         requested, visible_caps(auth, narrowed_caps))
+
+
+def clipped_error(message: str, hint: str, requested, allowed: list[dict]) -> PolicyError:
+    """A 400 for a request that does not fit: `clipped` echoes the caller's
+    own capabilities that exceeded, `allowed` is what could be given (the
+    caller filters it through visible_caps first)."""
+    return PolicyError(400, message, "clipped", hint=hint,
+                       extra={"clipped": [to_json(c) for c in requested], "allowed": allowed})
+
+
+def _default_to_draft(raw, manifests) -> object:
+    """An agent's capability with no `mode` asks for draft: its writes and
+    destructive actions queue for a human unless the agent says `direct`
+    explicitly (reads are always direct; normalize splits them out). Least
+    privilege by default: forgetting a field must never buy autonomy.
+
+    A write that cannot be drafted (manifest `modes: [direct]`) would be
+    unreachable in a draft capability, so asking for one without a mode is a
+    400 that says to ask for direct explicitly, never a silent no-op grant."""
+    if not isinstance(raw, Mapping) or "mode" in raw:
+        return raw                    # explicit (or malformed: from_json reports it)
+    m = manifests.get(raw.get("target"))
+    if m is not None:
+        try:
+            names = m.expand_actions(raw.get("actions") or ())
+        except (ManifestError, TypeError):
+            names = frozenset()       # normalize reports the bad action list
+        stuck = sorted(n for n in names if m.action(n).side_effect != "read"
+                       and "draft" not in m.action(n).effective_modes)
+        if stuck:
+            raise PolicyError(
+                400, f"{m.id}: {', '.join(stuck)} cannot be drafted; without a mode a "
+                     "capability asks for draft", "invalid_capabilities",
+                hint='set "mode": "direct" explicitly to ask for it')
+    return {**raw, "mode": "draft"}
+
+
+def normalize_request(capabilities) -> list[Capability]:
+    """Parse and normalize capability JSON an agent sent, against the ENABLED
+    plugins (a disabled plugin cannot be asked for). A capability without
+    `mode` asks for draft (see _default_to_draft). 400 on anything invalid or
+    on a request that normalizes to nothing. Owner-authored grants do not
+    come through here and keep their explicit (or `direct`) mode."""
+    if not isinstance(capabilities, list) or not capabilities:
+        raise PolicyError(400, "capabilities must be a non-empty list", "invalid_capabilities")
+    manifests = get_registry().enabled_manifests()
+    try:
+        requested = normalize_all([from_json(_default_to_draft(c, manifests))
+                                   for c in capabilities], manifests)
+    except (ValueError, ManifestError) as exc:
+        raise PolicyError(400, f"invalid capability: {exc}", "invalid_capabilities") from exc
+    if not requested:
+        raise PolicyError(400, "the request is empty after normalization",
+                          "invalid_capabilities")
+    return requested
 
 
 def request_permission(auth, capabilities: list, reason: str = "",
@@ -184,16 +316,7 @@ def request_permission(auth, capabilities: list, reason: str = "",
     the parent key's grants for a delegated one); anything clipped is a 400
     listing it, so a pending request is always grantable as asked."""
     reg = get_registry()
-    if not isinstance(capabilities, list) or not capabilities:
-        raise PolicyError(400, "capabilities must be a non-empty list", "invalid_capabilities")
-    enabled = reg.enabled_manifests()
-    try:
-        requested = normalize_all([from_json(c) for c in capabilities], enabled)
-    except (ValueError, ManifestError) as exc:
-        raise PolicyError(400, f"invalid capability: {exc}", "invalid_capabilities") from exc
-    if not requested:
-        raise PolicyError(400, "the request is empty after normalization",
-                          "invalid_capabilities")
+    requested = normalize_request(capabilities)
     now = int(time.time())
     expires_at = None
     if expires_in_hours is not None:
@@ -206,7 +329,7 @@ def request_permission(auth, capabilities: list, reason: str = "",
         if auth.parent_key_id is None:
             narrowed = narrow(ceiling(auth.principal_id, reg.plugin_states()), requested, lattice)
             if clipped(requested, narrowed):
-                raise _clipped_error(clipped(requested, narrowed), narrowed.capabilities)
+                raise _clipped_error(auth, clipped(requested, narrowed), narrowed.capabilities)
             grant = store.insert_root_grant(auth.principal_id, auth.key_id,
                                             narrowed.capabilities, "pending", reason,
                                             expires_at, kind="expansion")
@@ -219,7 +342,7 @@ def request_permission(auth, capabilities: list, reason: str = "",
                 pooled = [c for n in options for c in n.capabilities]
                 clip = [r for r in requested if not any(lattice.le(r, c) for c in pooled)] \
                     or list(requested)
-                raise _clipped_error(clip, pooled)
+                raise _clipped_error(auth, clip, pooled)
             grant = store.insert_child_grant(auth.principal_id, auth.key_id, "expansion",
                                              best, reason, expires_at, auth.key_id)
     except (ValueError, TypeError, GrantInvariantError) as exc:
@@ -235,7 +358,7 @@ def get_permission_status(auth, grant_id: str) -> dict:
     g = store.get(grant_id)
     if g is None or g.key_id != auth.key_id:
         raise PolicyError(404, "no such permission request", "not_found")
-    return _grant_view(g)
+    return _grant_view(g, auth)
 
 
 def list_my_permissions(auth, limit: int = 50, cursor: int | None = None) -> dict:
@@ -251,7 +374,7 @@ def list_my_permissions(auth, limit: int = 50, cursor: int | None = None) -> dic
         rows = conn.execute(sql, args).fetchall()
     more = len(rows) > limit
     rows = rows[:limit]
-    items = [_grant_view(g) for g in (store.get(r["id"]) for r in rows) if g is not None]
+    items = [_grant_view(g, auth) for g in (store.get(r["id"]) for r in rows) if g is not None]
     return {"items": items, "next_cursor": rows[-1]["r"] if more and rows else None}
 
 

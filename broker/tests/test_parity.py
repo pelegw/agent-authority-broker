@@ -249,3 +249,14 @@ def test_generic_tools_match_their_rest_routes(live, echo_local, make_agent):
     other = make_agent().headers
     assert text_json(call(live, other, "cancel_action", {"action_id": aid})) == \
         live.delete(f"/v1/actions/{aid}", headers=other).json()
+    # Delegation: the same answers (a clipped request, a listing, a stranger's revoke).
+    wide = [cap(["post_item"], selector={"room": ["r9"]})]
+    assert text_json(call(live, h, "delegate", {"name": "x", "capabilities": wide})) == \
+        live.post("/v1/delegations", json={"name": "x", "capabilities": wide},
+                  headers=h).json()
+    made = live.post("/v1/delegations", json={"name": "kid", "capabilities": [
+        cap(["list_items"], selector={"room": ["r1"]})]}, headers=h).json()
+    assert text_json(call(live, h, "list_my_delegations")) == \
+        live.get("/v1/delegations", headers=h).json()
+    assert text_json(call(live, other, "revoke_delegation", {"key_id": made["key_id"]})) == \
+        live.post(f"/v1/delegations/{made['key_id']}/revoke", headers=other).json()

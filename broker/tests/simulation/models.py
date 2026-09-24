@@ -109,9 +109,11 @@ class _Day:
         if denied is None or denied.code != "out_of_grant":
             return
         # The agent's cue (hint: request_permission): ask once for exactly
-        # this room, bounded like the rest of its write authority.
+        # this room, bounded like the rest of its write authority. A standing
+        # grant is a request to act directly, so it says so: an agent request
+        # without a mode asks for draft (every write would still interrupt).
         req = agent.request_permission(
-            self.key, [{"target": TARGET, "actions": ["post_item"],
+            self.key, [{"target": TARGET, "actions": ["post_item"], "mode": "direct",
                         "selector": {"room": [room]}, "budget": {"per_day": self.per_day}}],
             reason=f"need to post in {room}")
         self._interrupt(hour, "grant")

@@ -20,7 +20,8 @@ from .notify import telegram_inbound
 from .origin import OriginGuardMiddleware
 from .plugins.registry import get_registry, init_registry
 from .routers import (actions, admin, admin_keys, admin_ops, admin_plugins, admin_settings,
-                      admin_telegram, auth, health, me, oauth, permissions, targets)
+                      admin_telegram, auth, delegations, health, me, oauth, permissions, skill,
+                      targets)
 from .routers import console
 
 
@@ -74,7 +75,8 @@ api.include_router(console.router)
 for _r in ADMIN_ROUTERS:
     api.include_router(_r)
 # The agent surface (aab_ keys). These routers never import deps.py/identity.
-for _r in (targets.router, actions.router, me.router, permissions.router):
+for _r in (targets.router, actions.router, me.router, permissions.router,
+           delegations.router, skill.router):
     api.include_router(_r)
 
 

@@ -1,16 +1,21 @@
 """The generic MCP tools: the key's own access, permissions and queued actions.
 
 These are the same operations as the agent REST routes (`/v1/me`,
-`/v1/permissions`, `/v1/actions`, `/v1/targets`), calling the same
-services/agent.py functions, so a key can do exactly the same over either
-surface. Arguments are validated by small pydantic models (extra keys
-refused), and each model's JSON schema is the tool's `inputSchema`, so the
-advertised schema and the check can never disagree.
+`/v1/permissions`, `/v1/delegations`, `/v1/actions`, `/v1/targets`), calling
+the same services/agent.py and services/delegation.py functions, so a key can
+do exactly the same over either surface. Arguments are validated by small
+pydantic models (extra keys refused; `delegate` reuses the REST body model),
+and each model's JSON schema is the tool's `inputSchema`, so the advertised
+schema and the check can never disagree.
+
+A tool may be `available` only to some keys: `delegate` is not listed for a
+key already at the delegation depth limit (calling it anyway gets the same
+400 `depth_exceeded` as REST, because the service checks, not the list).
 
 Deliberately absent: any approve/reject tool (approval is a human act that
 lives only on the admin plane), and anything that lists hidden resources.
-Phase 5 adds `delegate`, `list_my_delegations`, `revoke_delegation` and the
-`broker://skill` resource here.
+The key-specific skill doc is the MCP resource `broker://skill`
+(mcp_server.py).
 
 This module must not import services/admin.py or identity/ (a test walks
 the import graph from mcp_server.py).
@@ -24,9 +29,11 @@ from typing import Any, Callable
 from mcp import types
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .auth import max_delegation_depth
 from .errors import PolicyError
+from .routers.delegations import DelegateBody
 from .routers.permissions import PermissionBody
-from .services import agent
+from .services import agent, delegation
 
 
 class _Args(BaseModel):
@@ -54,11 +61,23 @@ class _ActionPage(_Page):
     status: str | None = Field(default=None, max_length=20)
 
 
+class _KeyId(_Args):
+    key_id: int = Field(ge=1)
+
+
 class _Resolve(_Args):
     target: str = Field(min_length=1, max_length=64)
     kind: str = Field(min_length=1, max_length=64)
     query: str = Field(default="", max_length=200)
     limit: int = Field(default=20, ge=1, le=50)
+
+
+def _always(auth) -> bool:
+    return True
+
+
+def _can_delegate(auth) -> bool:
+    return auth.depth < max_delegation_depth()
 
 
 @dataclass(frozen=True)
@@ -68,6 +87,9 @@ class Generic:
     args: type[BaseModel]
     run: Callable[[Any, BaseModel], Any]
     read_only: bool = True
+    # Whether the tool is LISTED for this key. Never a permission check:
+    # the service behind the tool enforces everything on every call.
+    available: Callable[[Any], bool] = _always
 
     def tool(self) -> types.Tool:
         return types.Tool(
@@ -106,9 +128,11 @@ GENERIC: tuple[Generic, ...] = (
                                                              a.limit)),
     Generic("request_permission",
             "Ask the owner for more authority. capabilities = list of capability "
-            "objects ({target, actions, selector?, constraints?, mode?, budget?}). "
-            "Returns {id, status: pending}; a request beyond what your parent can "
-            "give is refused with the clipped and allowed capabilities.",
+            "objects ({target, actions, selector?, constraints?, mode?, budget?}); omit "
+            "mode and writes are draft (queued for approval), ask for mode: direct "
+            "explicitly to act on your own. Returns {id, status: pending}; a request "
+            "beyond what your parent can give is refused with the clipped and allowed "
+            "capabilities.",
             PermissionBody,
             lambda auth, a: agent.request_permission(auth, a.capabilities, a.reason,
                                                      a.expires_in_hours),
@@ -117,6 +141,26 @@ GENERIC: tuple[Generic, ...] = (
             _GrantId, lambda auth, a: agent.get_permission_status(auth, a.grant_id)),
     Generic("list_my_permissions", "This key's grants and requests, newest first.",
             _Page, lambda auth, a: agent.list_my_permissions(auth, a.limit, a.cursor)),
+    Generic("delegate",
+            "Mint a child key for a sub-agent, carved out of your own authority: you can "
+            "only narrow (capabilities, role, rate and lifetime at most yours; your denies "
+            "carry over; omit mode and its writes are draft). No human approval. "
+            "Returns {key_id, name, key, expires_at, "
+            "capabilities}; the key is shown once. A request beyond what you hold is "
+            "refused with the clipped and allowed capabilities.",
+            DelegateBody,
+            lambda auth, a: delegation.delegate(auth, a.name, a.capabilities, a.reason,
+                                                a.expires_in_hours, a.role, a.rate_per_min,
+                                                a.denies),
+            read_only=False, available=_can_delegate),
+    Generic("list_my_delegations",
+            "Keys you delegated directly: status, role, expiry and their grants.",
+            _NoArgs, lambda auth, a: delegation.list_my_delegations(auth)),
+    Generic("revoke_delegation",
+            "Revoke a key you delegated (or one further down your delegation tree): it "
+            "and every key below it stop working at once.",
+            _KeyId, lambda auth, a: delegation.revoke_delegation(auth, a.key_id),
+            read_only=False),
     Generic("get_action_status",
             "One of this key's queued actions: pending (awaiting approval), scheduled, "
             "sending, done (with result), rejected, expired, canceled or failed.",

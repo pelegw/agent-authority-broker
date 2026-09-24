@@ -86,6 +86,7 @@ request; no restart.
 | Setting | Default | Min | Max | Unit | Meaning |
 |---|---|---|---|---|---|
 | `max_delegation_depth` | 3 | 0 | 10 | hops | Delegation hops below a root key (0 = no delegation). |
+| `max_live_delegations` | 25 | 1 | 200 | keys | Live child keys one key may have delegated at once; revoked or expired children do not count. |
 | `session_idle_seconds` | 43200 | 300 | 604800 | seconds | Console sessions end after this much inactivity. |
 | `session_absolute_seconds` | 604800 | 3600 | 2592000 | seconds | Console sessions end this long after login (new sessions). |
 | `key_rotation_grace_seconds` | 86400 | 0 | 2592000 | seconds | A rotated key's previous secret keeps working this long. |

@@ -180,6 +180,22 @@ def test_status_transitions(family, principal):
     assert not store.set_status("missing", "revoked")
 
 
+def test_an_agent_can_only_revoke(family, principal, key_factory):
+    """decided_via='agent' (revoke_delegation) never approves or creates."""
+    parent, child, g = family
+    pend = store.insert_child_grant(principal, child.key_id, "expansion",
+                                    narrow(g, [ECHO_ALL], LATTICE), "", None, child.key_id)
+    for status in ("active", "rejected", "expired"):
+        with pytest.raises(ValueError, match="agent"):
+            store.set_status(pend.id, status, None, "agent")
+    assert store.get(pend.id).status == "pending"
+    with pytest.raises(ValueError, match="agent"):
+        store.insert_root_grant(principal, key_factory().key_id, [ECHO_ALL], "active", "",
+                                None, None, decided_via="agent")
+    assert store.set_status(pend.id, "revoked", None, "agent")
+    assert store.get(pend.id).decided_via == "agent"
+
+
 def test_live_predicate_and_sweep(principal, key_factory):
     k = key_factory()
     now = int(time.time())
