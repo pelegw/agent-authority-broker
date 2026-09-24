@@ -147,6 +147,59 @@ def test_wrong_key_reads_as_reconnect_required(tmp_path, key):
         SecretStore(tmp_path, other).read_all("echo")
 
 
+def test_configure_after_a_key_change_replaces_the_unreadable_slot(tmp_path, key, caplog):
+    # A rotated PLUGIN_SECRETS_KEY used to make every write 503 (write()
+    # merged into a slot it could not read), so "reconnect required" could
+    # never be acted on. Re-entering the secrets is now the recovery.
+    SecretStore(tmp_path, key).write("echo", {"api_secret": "old-secret-value"})
+    old_ciphertext = (tmp_path / "echo.secrets").read_bytes()
+    other = Fernet.generate_key().decode()
+    c = TestClient(serve([echo_mod.EchoAdapter()], TOKEN, tmp_path, other),
+                   headers={"X-Plugin-Token": TOKEN}, raise_server_exceptions=False)
+    c.post("/configure", json={"config": {}})
+    assert c.get("/status").json()["health"] == "reconnect required"
+    with caplog.at_level("WARNING"):
+        r = c.post("/configure", json={"config": {},
+                                       "secrets": {"api_secret": "new-secret-value"}})
+    assert r.status_code == 200, r.text
+    assert c.get("/status").json()["api_secret_set"] is True
+    assert SecretStore(tmp_path, other).read_all("echo") == {"api_secret": "new-secret-value"}
+    assert (tmp_path / "echo.secrets").read_bytes() != old_ciphertext   # old one is gone
+    with pytest.raises(SecretsUnreadable):
+        SecretStore(tmp_path, key).read_all("echo")
+    # The warning names the slot and nothing else.
+    assert "'echo'" in caplog.text
+    assert "secret-value" not in caplog.text
+
+
+def test_an_unreadable_slot_is_replaced_not_merged(tmp_path, key):
+    SecretStore(tmp_path, key).write("echo", {"a": "1", "b": "2"})
+    s = SecretStore(tmp_path, Fernet.generate_key().decode())
+    s.write("echo", {"a": "3"})
+    assert s.read_all("echo") == {"a": "3"}        # nothing old survives, or is read
+    s.write("echo", {"c": "4"})                    # readable again: merges as before
+    assert s.read_all("echo") == {"a": "3", "c": "4"}
+
+
+def test_a_readable_slot_still_merges_without_a_warning(tmp_path, key, caplog):
+    s = SecretStore(tmp_path, key)
+    s.write("echo", {"a": "1", "b": "2"})
+    with caplog.at_level("WARNING"):
+        s.write("echo", {"a": "3", "b": None})
+        s.write("echo", {"c": "4"})
+    assert s.read_all("echo") == {"a": "3", "c": "4"}
+    assert caplog.text == ""
+
+
+def test_an_invalid_write_leaves_an_unreadable_slot_untouched(tmp_path, key):
+    SecretStore(tmp_path, key).write("echo", {"a": "1"})
+    before = (tmp_path / "echo.secrets").read_bytes()
+    s = SecretStore(tmp_path, Fernet.generate_key().decode())
+    with pytest.raises(AdapterError):
+        s.write("echo", {"a": 5})
+    assert (tmp_path / "echo.secrets").read_bytes() == before
+
+
 def test_secret_files_are_private(tmp_path, key):
     s = SecretStore(tmp_path / "d", key)
     s.write("echo", {"a": "1"})

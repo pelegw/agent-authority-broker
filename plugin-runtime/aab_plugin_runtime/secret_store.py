@@ -11,13 +11,17 @@ Fail-closed rules:
     (a restart without the key must not look like "no credentials yet");
   * a key that no longer decrypts (rotated or wrong) raises
     `SecretsUnreadable`, which the runtime reports as "reconnect required"
-    and maps to 503 on calls: nothing was performed.
+    and maps to 503 on calls: nothing was performed;
+  * reconnecting is a write: a slot that does not decrypt is replaced by the
+    values written now (never merged, never read back), so re-entering the
+    credentials in the console is the whole recovery.
 
 Paths are plain files under a directory the service user owns, so the
 container can run as a non-root user with only its own volume mounted.
 """
 
 import json
+import logging
 import os
 import re
 import tempfile
@@ -29,6 +33,8 @@ from .errors import AdapterError
 
 _SLOT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _SUFFIX = ".secrets"
+
+log = logging.getLogger(__name__)
 
 
 class SecretsUnreadable(Exception):
@@ -80,10 +86,22 @@ class SecretStore:
     # ---- writes ------------------------------------------------------------
 
     def write(self, slot: str, values: dict[str, str | None]) -> None:
-        """Merge `values` into the slot. None or "" deletes that name."""
+        """Merge `values` into the slot. None or "" deletes that name.
+
+        A slot that no longer decrypts (the key was rotated or replaced) is
+        replaced instead of merged: under this key its contents are gone
+        anyway, and refusing the write left "reconnect required" with no way
+        to reconnect (every /configure, connect and disconnect answered 503).
+        """
         if self._fernet is None:
             raise AdapterError(503, "secret store has no key (PLUGIN_SECRETS_KEY)")
-        current = self.read_all(slot)
+        try:
+            current = self.read_all(slot)
+        except SecretsUnreadable:
+            # The slot name only: never contents, old or new.
+            log.warning("secret slot %r does not decrypt with the current key; "
+                        "replacing it with the values being written", slot)
+            current = {}
         for name, value in values.items():
             if not isinstance(name, str) or not name:
                 raise AdapterError(400, "secret names must be non-empty strings")
