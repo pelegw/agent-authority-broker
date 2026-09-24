@@ -4,9 +4,10 @@ The page is one static file whose JavaScript cannot run under pytest, so
 these tests hold it to structural rules instead: strict headers with a
 per-request script nonce, no external resources, no HTML-string sinks or
 inline handlers (agent-written text must never become markup), every API
-path it calls exists, and every manifest vocabulary word it must render
-(config field types, narrowing forms, connection kinds, roles) is covered.
-Plus the manifest projection the console's editors are generated from.
+path it calls exists, every vocabulary word it must render (config field
+types, narrowing forms, connection kinds, roles, setting types) is covered,
+and the Telegram bot token field is write-only. Plus the manifest projection
+the console's editors are generated from.
 """
 
 import re
@@ -15,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from broker import deps
+from broker import deps, runtime_settings
 from broker.authority import roles
 from broker.plugins import manifest as manifest_mod
 from broker.plugins.manifest import ConfigField, Connection, load_manifest
@@ -233,14 +234,60 @@ def test_connection_panel_covers_every_connection_kind(html):
     assert _object_keys(_block(html, "connectors")) == kinds
 
 
-def test_views_and_nav_agree_and_pass2_placeholders_exist(html):
+def test_views_nav_and_loaders_agree(html):
     sections = re.findall(r'<section class="view" data-view="([a-z]+)"', html)
     nav = re.findall(r'<a href="#/([a-z]+)" data-view="\1">', html)
     assert sorted(sections) == sorted(nav) == sorted(_js_list(html, "VIEWS"))
-    for view in ("channels", "settings", "delegations"):
-        assert view in sections
+    loaders = re.search(r"const VIEW_REFRESH = \{(.*?)\n\};", _script(html), re.S).group(1)
+    assert set(re.findall(r"^\s{2}([a-z]+):", loaders, re.M)) == set(sections)
+
+
+def test_pass2_views_are_real_views(html):
+    """Channels, Settings and Delegations were placeholders in pass 1."""
+    assert "Available after the next merge." not in html
+    assert 'class="card placeholder"' not in html
+    for view, marker in (("channels", 'id="tgTokenForm"'), ("settings", 'id="settingsForm"'),
+                         ("delegations", 'id="treeRoot"')):
         sec = re.search(rf'<section class="view" data-view="{view}".*?</section>', html, re.S).group(0)
-        assert "Available after the next merge." in sec
+        assert marker in sec, view
+
+
+# ---- Telegram bot token: write-only ----------------------------------------------
+
+def test_telegram_token_field_is_write_only_in_the_markup(html):
+    tags = re.findall(r"<input\b[^>]*\bid=\"tgToken\"[^>]*>", _markup(html))
+    assert len(tags) == 1
+    tag = tags[0]
+    assert 'type="password"' in tag
+    assert 'autocomplete="new-password"' in tag
+    assert not re.search(r"\svalue\s*=", tag)
+    # It sits in a form whose native submit the CSP refuses (form-action 'none').
+    assert re.search(r'<form class="secretrow" id="tgTokenForm"[^>]*>\s*<input\b[^>]*id="tgToken"', html)
+
+
+def test_telegram_token_is_never_written_back(html):
+    script = _script(html)
+    # The only writes to the input empty it.
+    writes = re.findall(r'\$\("tgToken"\)\.value\s*=(?!=)\s*([^;]+);', script)
+    assert writes and set(writes) == {'""'}
+    assert not re.search(r"tgToken[^;\n]*setAttribute", script)
+    # The status's `token` field is a state word; code only ever compares it.
+    uses = re.findall(r"\btg\.token\b(.{0,6})", _strip_comments(script))
+    assert uses and all(re.match(r'\s*[!=]==\s*"', u) for u in uses), uses
+    # The submit handler clears the field before it sends anything.
+    handler = re.search(r'\$\("tgTokenForm"\)\.onsubmit = async \(e\) => \{(.*?)\n\};', script, re.S).group(1)
+    assert handler.index('$("tgToken").value = "";') < handler.index("api(")
+
+
+def test_settings_view_renders_every_setting_type(html):
+    kinds = {spec.kind for spec in runtime_settings.SPECS.values()}
+    assert kinds == {"int", "float", "hosts"}
+    assert _object_keys(_block(html, "setting-inputs")) == kinds
+
+
+def test_settings_view_flags_what_applies_only_at_start(html):
+    # mcp_allowed_hosts_extra is read when the MCP session manager starts.
+    assert re.search(r"mcp_allowed_hosts_extra: \"Applies at the next broker start", _script(html))
 
 
 # ---- every API path the page calls exists ---------------------------------------
@@ -271,7 +318,12 @@ def test_every_api_path_in_the_page_exists(env, html):
                  "/v1/admin/actions", "/v1/admin/hidden", "/v1/admin/resolve",
                  "/v1/admin/decisions", "/v1/admin/decisions/verify", "/v1/admin/tokens",
                  "/v1/admin/sessions", "/v1/admin/password",
-                 "/v1/admin/plugins/{x}/connect/qr.png"):
+                 "/v1/admin/plugins/{x}/connect/qr.png",
+                 "/v1/admin/telegram", "/v1/admin/telegram/token", "/v1/admin/telegram/link/start",
+                 "/v1/admin/telegram/enable", "/v1/admin/telegram/disable",
+                 "/v1/admin/telegram/test", "/v1/admin/telegram/unlink",
+                 "/v1/admin/settings", "/v1/admin/keys/tree",
+                 "/v1/admin/plugins/{x}/connect/finish", "/v1/admin/grants/{x}/revoke"):
         assert must in used, must
     missing = sorted(p for p in used if not any(_segments_match(p, s) for s in served))
     assert not missing, missing
@@ -319,3 +371,25 @@ def test_projection_matches_the_lattice_split_and_drops_derived_dimensions():
             n for n, f in forms.items() if f.form in manifest_mod.SCALAR_FORMS}
     github = admin_view(load_manifest(GITHUB))
     assert "permissions" not in {c["name"] for c in github["constraints"]}   # derived
+
+
+def test_shared_slot_markers_reach_the_console():
+    """The Google plugins share one account card: the console groups plugins
+    by connection.shared and edits the config fields marked shared once. Both
+    markers are in the data it reads (the vendored manifests, through
+    settings.schema_view and the admin view's connection block)."""
+    from broker.plugins import settings as plugin_settings
+    targets = Path(__file__).resolve().parents[1] / "broker" / "targets"
+    google = {}
+    for pid in ("gmail", "gcal", "gdrive"):
+        m = load_manifest(targets / pid / "manifest.yaml")
+        google[pid] = m
+        assert m.connection.shared == "google"
+        shared = {f["name"] for f in plugin_settings.schema_view(m) if f["shared"]}
+        assert shared == {"client_id", "client_secret"}
+
+
+def test_console_groups_plugins_by_shared_slot(html):
+    script = _script(html)
+    assert "function slotOf(p) { return (p && p.connection && p.connection.shared) || null; }" in script
+    assert "schema.filter((f) => f.shared)" in script and "schema.filter((f) => !f.shared)" in script

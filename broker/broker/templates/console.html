@@ -14,8 +14,8 @@
          so the test can check each one exists in the OpenAPI table.
        * Plaintext keys and tokens are shown once, in a copy box, and never
          kept anywhere else. Secret config fields are write-only.
-       * Views are section[data-view]; pass 2 fills channels, settings and
-         delegations in place. -->
+       * Views are section[data-view], each with a loader in VIEW_REFRESH.
+       * The Telegram bot token is write-only: typed, sent once, cleared. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -119,7 +119,6 @@
   .empty { color: var(--muted); padding: 1.1rem 0; text-align: center; }
   .hint { color: var(--muted); font-size: .88rem; }
   .toolbar { display: flex; gap: .5rem; margin-bottom: .8rem; }
-  .placeholder { text-align: center; padding: 2rem 1rem; }
 
   /* overview */
   .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: .8rem; margin-bottom: 1rem; }
@@ -144,6 +143,7 @@
   button.red { background: var(--red); color: #fff; border-color: transparent; }
   button.ghost { background: transparent; }
   button.link { border: 0; background: transparent; color: var(--accent); padding: .1rem .35rem; font-size: .8rem; }
+  .button-link.ghost { background: transparent; }
   input, select, textarea {
     font: inherit; padding: .45rem .55rem; border-radius: 8px; border: 1px solid var(--line);
     background: var(--panel-2); color: var(--ink); min-width: 0;
@@ -267,13 +267,15 @@
   .plugin .phead { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
   .plugin .phead h3 { margin: 0; font-size: 1rem; }
   .plugin .pstatus { display: flex; gap: .3rem; flex-wrap: wrap; }
-  .plugin .psec { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: .8rem; }
-  .plugin .psec > h4 { margin: 0 0 .5rem; font-size: .9rem; }
+  .psec { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: .8rem; }
+  .psec > h4 { margin: 0 0 .5rem; font-size: .9rem; }
+  .plugin.slot { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .plugin .healthline { margin: .35rem 0 0; }
   .cfgfield { display: flex; flex-direction: column; gap: .25rem; margin-bottom: .75rem; font-size: .85rem; }
   .cfgfield .fname { font-weight: 600; }
   .cfgfield .fname .req { color: var(--red); }
-  .cfgfield .secretrow { display: flex; gap: .4rem; flex-wrap: wrap; align-items: flex-start; }
-  .cfgfield .secretrow input, .cfgfield .secretrow textarea { flex: 1; min-width: 12rem; }
+  .secretrow { display: flex; gap: .4rem; flex-wrap: wrap; align-items: flex-start; }
+  .secretrow input, .secretrow textarea { flex: 1; min-width: 12rem; }
   .qrwrap img { width: 220px; height: 220px; border-radius: 8px; background: #fff; padding: 6px; margin: .6rem 0; }
   details.health { margin-top: .8rem; font-size: .82rem; }
   details.health summary { cursor: pointer; color: var(--muted); }
@@ -287,6 +289,38 @@
   }
   .copyrow { display: flex; gap: .4rem; margin-top: .45rem; }
   .copyrow input { flex: 1; font-family: var(--mono); font-size: .85rem; }
+
+  /* ---- delegation tree ---- */
+  ul.tree, ul.tree ul { list-style: none; margin: 0; padding: 0; }
+  ul.tree ul { margin-left: 1rem; padding-left: .9rem; border-left: 1px dashed var(--line); }
+  .tnode { padding: .5rem .4rem; border-radius: 8px; }
+  .tnode.focus { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .trow { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+  .trow .tname { font-weight: 600; unicode-bidi: isolate; overflow-wrap: anywhere; }
+  button.ttoggle { border: 0; background: transparent; padding: 0; width: 1.4rem; font-size: .9rem; color: var(--muted); }
+  button.ttoggle.leaf { visibility: hidden; }
+  .tmeta { font-size: .8rem; color: var(--muted); margin: .15rem 0 0 1.8rem; overflow-wrap: anywhere; }
+  .tnode > .row-actions, .tnode > details { margin: .35rem 0 0 1.8rem; }
+  .tnode > details .grantline { margin-top: .5rem; }
+
+  /* ---- settings ---- */
+  .setrow { display: grid; grid-template-columns: minmax(12rem, 1fr) minmax(12rem, 1fr); gap: .4rem 1.2rem;
+    padding: .8rem 0; border-bottom: 1px solid var(--line); }
+  .setrow:first-child { padding-top: 0; }
+  .setrow .sname { font-family: var(--mono); font-size: .88rem; font-weight: 600; }
+  .setrow .sctl { display: flex; flex-direction: column; gap: .3rem; align-items: flex-start; min-width: 0; }
+  .setrow .sctl input[type=number] { width: 12rem; }
+  .setrow .sctl textarea { width: 100%; min-height: 4.5rem; }
+  .setrow.changed .sname::after { content: " (unsaved)"; color: var(--amber); font-family: inherit; font-weight: 500; }
+  .settings-actions { margin-top: .9rem; }
+
+  /* ---- channels ---- */
+  .warnbox { border: 1px solid color-mix(in srgb, var(--amber) 45%, transparent);
+    background: color-mix(in srgb, var(--amber) 10%, transparent); border-radius: 8px;
+    padding: .55rem .8rem; font-size: .88rem; margin: .5rem 0; }
+  .codebox { font-family: var(--mono); font-size: 1.1rem; letter-spacing: .05em; padding: .5rem .8rem;
+    border: 1px dashed var(--line); border-radius: 8px; background: var(--panel-2); user-select: all;
+    display: inline-block; margin: .3rem 0; }
 
   /* ---- modal ---- */
   .overlay {
@@ -323,7 +357,7 @@
     nav.side .navsec { display: none; }
     nav.side a { white-space: nowrap; padding: .4rem .6rem; }
     main { padding: 1rem .9rem 3rem; }
-    .dimrow, .denyrow { grid-template-columns: 1fr; }
+    .dimrow, .denyrow, .setrow { grid-template-columns: 1fr; }
     header .who { display: none; }
   }
 </style>
@@ -359,6 +393,7 @@
 <header>
   <h1><span class="brand-dot">&#9679;</span> Agent Authority Broker</h1>
   <a class="pill" id="pluginPill" href="#/plugins"><span class="dot"></span><span id="pluginPillText">plugins</span></a>
+  <a class="pill" id="tgPill" href="#/channels"><span class="dot"></span><span id="tgPillText">Telegram</span></a>
   <div class="spacer"></div>
   <span class="who" id="whoami"></span>
   <button class="ghost" id="refreshBtn" type="button" title="Refresh this view">&#8635;</button>
@@ -474,11 +509,16 @@
       </div>
     </section>
 
-    <!-- ================= Delegations (pass 2) ================= -->
+    <!-- ================= Delegations ================= -->
     <section class="view" data-view="delegations" hidden>
       <h2>Delegations</h2>
-      <p class="viewsub">The tree of keys agents minted for their sub-agents, with revoke.</p>
-      <div class="card placeholder"><div class="hint">Available after the next merge.</div></div>
+      <p class="viewsub">Keys that agents created for their sub-agents, each under the key it came from. No human approves a delegation: a child holds only what was carved out of its parent's authority, and that is checked again on every call. You act after the fact: disable or revoke any key, and every key below it stops at its next call.</p>
+      <div class="toolbar">
+        <button type="button" id="treeExpand">Expand all</button>
+        <button type="button" id="treeCollapse">Collapse all</button>
+        <span class="hint" id="treeSummary"></span>
+      </div>
+      <div class="card"><ul class="tree" id="treeRoot"></ul></div>
     </section>
 
     <!-- ================= Hidden resources ================= -->
@@ -499,18 +539,52 @@
       </div>
     </section>
 
-    <!-- ================= Channels (pass 2) ================= -->
+    <!-- ================= Channels ================= -->
     <section class="view" data-view="channels" hidden>
       <h2>Channels</h2>
-      <p class="viewsub">Approve from your phone: Telegram approval cards with one-tap approve and reject.</p>
-      <div class="card placeholder"><div class="hint">Available after the next merge.</div></div>
+      <p class="viewsub">Approve from your phone. When linked and enabled, Telegram gets a card for every action waiting on you and every permission request, with one-tap approve and reject that act as you. Agents never see this channel and cannot approve through it.</p>
+      <div class="card">
+        <div class="subhead"><h3>Telegram</h3><span class="badges" id="tgBadges"></span></div>
+        <p class="hint" id="tgSummary"></p>
+        <div class="warnbox" id="tgKeyWarn" hidden>BROKER_SECRETS_KEY is not set on the broker, so a bot token cannot be stored. Run scripts/init_secrets.py, then restart the broker.</div>
+        <div class="psec">
+          <h4>Bot token</h4>
+          <p class="hint" id="tgTokenState"></p>
+          <form class="secretrow" id="tgTokenForm" autocomplete="off">
+            <input id="tgToken" type="password" autocomplete="new-password" spellcheck="false" maxlength="128" aria-label="Telegram bot token" placeholder="paste the token @BotFather gave you">
+            <button class="primary" type="submit" id="tgTokenSet">Set</button>
+            <button class="ghost" type="button" id="tgTokenClear">Clear</button>
+          </form>
+          <div class="sub">Write-only: stored encrypted under BROKER_SECRETS_KEY and never shown again, here or anywhere. The broker starts using it within seconds; no restart.</div>
+        </div>
+        <div class="psec"><h4>Your chat</h4><div id="tgLink"></div></div>
+        <div class="psec"><h4>Poll loop</h4><div id="tgPoll"></div></div>
+      </div>
     </section>
 
-    <!-- ================= Settings (pass 2) ================= -->
+    <!-- ================= Settings ================= -->
     <section class="view" data-view="settings" hidden>
       <h2>Settings</h2>
-      <p class="viewsub">Operator settings, and what lives in files instead of here (and why).</p>
-      <div class="card placeholder"><div class="hint">Available after the next merge.</div></div>
+      <p class="viewsub">Operator settings, stored in the broker's database. A change applies on the next request unless it says otherwise. A value in the environment file is only the default that a change here overrides; Reset goes back to it.</p>
+      <div class="card">
+        <form id="settingsForm" autocomplete="off" novalidate>
+          <div id="settingsRows"></div>
+          <div class="row-actions settings-actions">
+            <button class="primary" type="submit" id="settingsSave">Save changes</button>
+            <span class="sub" id="settingsPending"></span>
+          </div>
+        </form>
+      </div>
+      <div class="card">
+        <div class="subhead"><h3>What lives in files</h3></div>
+        <p class="hint">These are deliberately not editable here. Some are bootstrap secrets that must exist before the database can be read. The others decide how the broker is exposed and fail closed at boot, so a hijacked console session must not be able to weaken them. They are set in the broker's .env (written by scripts/init_secrets.py) or in the compose files: change them there and restart. Secrets show only whether they are set, never their value.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Key</th><th>Kind</th><th>Now</th><th>Why it lives in a file</th></tr></thead>
+            <tbody id="envOnlyRows"></tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <!-- ================= Account ================= -->
@@ -644,6 +718,8 @@ function empty(text) { return h("div", { class: "empty" }, text); }
 function fact(k, ...v) { return [h("div", { class: "k" }, k), h("div", { class: "v" }, ...v)]; }
 function idChips(ids) { return h("span", { class: "ids" }, (ids || []).map((i) => h("span", { class: "idchip" }, i))); }
 function errText(e) { return e && e.message ? e.message : String(e); }
+// A list of strings from untrusted JSON (anything else is dropped).
+function listOf(x) { return Array.isArray(x) ? x.filter((v) => typeof v === "string") : []; }
 // Stable JSON for "did this change?" comparisons.
 function canon(v) {
   if (Array.isArray(v)) return "[" + v.map(canon).join(",") + "]";
@@ -686,6 +762,7 @@ function toast(msg, kind = "ok") {
   const t = h("div", { class: "toast " + kind, role: kind === "err" ? "alert" : "status" }, msg);
   t.onclick = () => t.remove();
   $("toasts").append(t);
+  while ($("toasts").childElementCount > 5) $("toasts").firstElementChild.remove();
   setTimeout(() => t.remove(), kind === "err" ? 9000 : 4500);
 }
 function showErr(e) {
@@ -860,8 +937,12 @@ function pluginBadges(p) {
   const hl = healthOf(p);
   if (hl.healthy === true) out.push(badge("healthy", "ok"));
   else if (hl.healthy === false) out.push(badge("unhealthy", "bad"));
-  out.push(badge("enforced at " + (p.connection && p.connection.enforcement || "proxy"), ""));
+  out.push(badge("enforcement: " + enforcementOf(p), ""));
   return out;
+}
+function enforcementOf(p) {
+  const live = healthOf(p).enforcement;
+  return typeof live === "string" && live ? live : (p.connection && p.connection.enforcement) || "proxy";
 }
 function paintPluginPill() {
   const enabled = state.plugins.filter((p) => p.enabled);
@@ -900,9 +981,16 @@ function keyCrumbs(keyId, fallbackName) {
 // ============================================================ gate: setup / login
 let polling = null, lostShown = false;
 function gateErr(msg) { $("gateErr").textContent = msg || ""; }
+// Timers that belong to one view (QR refresh, Telegram link wait) and
+// typed-but-unsent secrets: dropped on navigation and on sign-out.
+function stopBackground() {
+  stopAllQr();
+  stopTgLinkPoll();
+  $("tgToken").value = "";
+}
 function showGate(which, msg) {
   stopPolling();
-  stopAllQr();
+  stopBackground();
   closeAllModals();
   document.querySelectorAll("[data-ephemeral]").forEach((n) => n.replaceChildren());
   $("app").hidden = true;
@@ -939,6 +1027,7 @@ async function enterApp() {
   $("gate").hidden = true;
   $("app").hidden = false;
   $("whoami").textContent = state.me.username;
+  refreshTelegramPill();
   renderRoute();
   await refreshView(currentView());
   startPolling();
@@ -996,7 +1085,7 @@ function renderRoute() {
   document.querySelectorAll("section.view").forEach((s) => { s.hidden = s.dataset.view !== v; });
   document.querySelectorAll("nav.side a").forEach((a) => a.classList.toggle("active", a.dataset.view === v));
 }
-// View name -> loader. Pass 2 adds channels, settings and delegations here.
+// View name -> loader. Every view has one (tested against VIEWS).
 const VIEW_REFRESH = {
   overview: () => refreshOverview(true),
   requests: refreshRequests,
@@ -1004,7 +1093,10 @@ const VIEW_REFRESH = {
   decisions: refreshDecisions,
   plugins: refreshPlugins,
   keys: refreshKeys,
+  delegations: refreshDelegations,
   hidden: refreshHidden,
+  channels: refreshChannels,
+  settings: refreshSettings,
   account: refreshAccount,
 };
 async function refreshView(v) {
@@ -1015,7 +1107,7 @@ async function refreshView(v) {
 }
 window.addEventListener("hashchange", () => {
   if ($("app").hidden) return;
-  stopAllQr();
+  stopBackground();
   // One-time secrets on the page we are leaving are dropped, not kept around.
   document.querySelectorAll("[data-ephemeral]").forEach((n) => n.replaceChildren());
   renderRoute();
@@ -1829,8 +1921,12 @@ async function refreshKeys() {
     rotate.onclick = () => rotateKey(k, rotate);
     const toggle = h("button", { type: "button", class: "ghost" }, k.disabled ? "Enable" : "Disable");
     toggle.onclick = () => setKeyDisabled(k, !k.disabled, toggle);
+    const chained = (k.parent_key_id !== null && k.parent_key_id !== undefined) ||
+      state.keys.some((x) => x.parent_key_id === k.id);
+    const tree = chained ? h("a", { class: "button-link ghost", href: `#/delegations/${k.id}`,
+                                    title: "Show this key in the delegation tree" }, "Tree") : null;
     rows.append(h("tr", null, name, role, h("td", null, String(k.rate_per_min)), parent, used, expires,
-      h("td", null, h("div", { class: "row-actions" }, edit, rotate, toggle))));
+      h("td", null, h("div", { class: "row-actions" }, edit, rotate, toggle, tree))));
   }
 }
 function roleSelect(value) {
@@ -1968,7 +2064,7 @@ async function submitEditKey(m, btn, k, f) {
   catch (e) { if (!(e instanceof AuthLost)) m.setError(errText(e)); return; }
   m.close();
   toast(`Saved "${k.name}".`);
-  refreshKeys().catch(showErr);
+  refreshView(currentView());
 }
 async function revokeGrant(g, btn, line) {
   const ok = await confirmBox({ title: "Revoke this grant?",
@@ -1994,7 +2090,7 @@ async function rotateKey(k, btn) {
     buttons: [{ label: "Done", cls: "primary", onClick: (m) => m.close() }] });
   refreshKeys().catch(showErr);
 }
-async function setKeyDisabled(k, disabled, btn) {
+async function setKeyDisabled(k, disabled, btn, after = refreshKeys) {
   if (disabled) {
     const ok = await confirmBox({ title: `Disable "${k.name}"?`,
       text: "It stops working immediately, and so does every key delegated from it. You can enable it again.",
@@ -2005,7 +2101,7 @@ async function setKeyDisabled(k, disabled, btn) {
     await withBusy(btn, () => api(`/v1/admin/keys/${enc(k.id)}`, { method: "PATCH", body: { disabled } }));
     toast(disabled ? `"${k.name}" disabled.` : `"${k.name}" enabled.`);
   } catch (e) { showErr(e); }
-  refreshKeys().catch(showErr);
+  after().catch(showErr);
 }
 $("newKeyBtn").onclick = async () => {
   try { await loadPlugins(); } catch (e) { showErr(e); return; }
@@ -2081,13 +2177,43 @@ async function unhide(r, btn) {
 }
 
 // ============================================================ plugins
+// Plugins that share a connection slot (manifest connection.shared, e.g. the
+// Google plugins' "google") get ONE card for what they share, above their
+// own cards: the shared config fields and the one connection. Edits and
+// connects through that card go to any one member (the service keeps one
+// connection, and the broker copies shared non-secret values to every member).
 const pluginUI = new Map();        // plugin id -> the card's live parts
+const slotUI = new Map();          // shared slot -> the shared card's live parts
 const qrRuns = new Map();          // plugin id -> {stopped, timer}
+let awaitingReturn = false;        // an install or consent page is open in another tab
 function stopQr(pid) {
   const run = qrRuns.get(pid);
   if (run) { run.stopped = true; clearTimeout(run.timer); qrRuns.delete(pid); }
 }
 function stopAllQr() { for (const pid of [...qrRuns.keys()]) stopQr(pid); }
+function slotOf(p) { return (p && p.connection && p.connection.shared) || null; }
+function slotTitle(slot) { return slot.charAt(0).toUpperCase() + slot.slice(1) + " account"; }
+function slotMembers(slot) { return state.plugins.filter((p) => slotOf(p) === slot); }
+// The member a shared edit or connect goes through; an enabled one if any.
+function slotRelay(slot) {
+  const members = slotMembers(slot);
+  return members.find((p) => p.enabled) || members[0] || null;
+}
+// The shared card's combined view: the relay's config and id, connected when
+// the service is, and every scope an enabled member still needs.
+function slotView(slot) {
+  const members = slotMembers(slot), relay = slotRelay(slot);
+  const granted = new Set(), missing = new Set();
+  for (const m of members) {
+    const c = connInfo(m);
+    listOf(c.granted_scopes).forEach((x) => granted.add(x));
+    if (m.enabled && m.connected) listOf(c.missing_scopes).forEach((x) => missing.add(x));
+  }
+  return { ...relay, display_name: slotTitle(slot),
+           connected: members.some((m) => m.connected), enabled: members.some((m) => m.enabled),
+           last_health: { granted_scopes: [...granted].sort(), missing_scopes: [...missing].sort(),
+                          account: accountText(connInfo(relay)) } };
+}
 
 async function refreshPlugins() {
   stopAllQr();
@@ -2095,10 +2221,19 @@ async function refreshPlugins() {
   const list = $("pluginList");
   list.replaceChildren();
   pluginUI.clear();
+  slotUI.clear();
   if (!state.plugins.length) {
     list.append(h("div", { class: "card" }, empty("No plugin services are registered. The broker discovers them from PLUGIN_URL_<SERVICE> and PLUGIN_TOKEN_<SERVICE> at boot.")));
   }
-  for (const p of state.plugins) list.append(pluginCard(p));
+  const drawn = new Set();
+  for (const p of state.plugins) {
+    const slot = slotOf(p);
+    if (!slot) { list.append(pluginCard(p)); continue; }
+    if (drawn.has(slot)) continue;
+    drawn.add(slot);
+    list.append(slotCard(slot));
+    for (const m of slotMembers(slot)) list.append(pluginCard(m));
+  }
   const ref = $("pluginRefused");
   ref.replaceChildren();
   if (state.refused.length) {
@@ -2108,21 +2243,54 @@ async function refreshPlugins() {
     ref.append(card);
   }
 }
+function slotCard(slot) {
+  const members = slotMembers(slot);
+  const names = members.map((m) => m.display_name).join(", ");
+  const card = h("div", { class: "card plugin slot" });
+  const status = h("span", { class: "pstatus" });
+  const healthLine = h("div", { class: "hint healthline" });
+  card.append(h("div", { class: "phead" },
+    h("div", null, h("h3", null, slotTitle(slot)), h("div", { class: "sub" }, `shared by ${names} · service ${members[0].service}`)),
+    h("span", { class: "spacer" }), status),
+    h("p", { class: "hint" }, `One account for ${names}: these settings and this connection are entered once and serve all of them. Enable each plugin in its own card below.`),
+    healthLine);
+  const configEl = h("div"), connEl = h("div");
+  card.append(h("div", { class: "psec" }, h("h4", null, "Configuration"), configEl),
+              h("div", { class: "psec" }, h("h4", null, "Connection"), connEl));
+  const ui = { slot, status, healthLine, configEl, connEl, p: slotView(slot), secrets: new Map(), qr: null };
+  slotUI.set(slot, ui);
+  paintSlotHead(ui);
+  renderConfig(ui);
+  renderConnection(ui);
+  return card;
+}
+function paintSlotHead(ui) {
+  const members = slotMembers(ui.slot), p = ui.p;
+  const on = members.filter((m) => m.enabled).length;
+  ui.status.replaceChildren(h("span", { class: "pstatus" },
+    badge(p.connected ? "connected" : "not connected", p.connected ? "ok" : "warn"),
+    badge(`${on} of ${members.length} enabled`, on ? "accent" : ""),
+    listOf(p.last_health.missing_scopes).length ? badge("reconnect needed", "warn") : null));
+  const notes = members.map((m) => [m, healthOf(m).health]).filter(([, x]) => typeof x === "string" && x && x !== "ok");
+  ui.healthLine.textContent = notes.map(([m, x]) => `${m.display_name}: ${x}`).join(" · ");
+  paintSecrets(ui);
+}
 function pluginCard(p) {
   const card = h("div", { class: "card plugin" });
   const status = h("span", { class: "pstatus" });
   const toggle = h("button", { type: "button" });
   const healthBtn = h("button", { type: "button", class: "ghost" }, "Check health");
+  const healthLine = h("div", { class: "hint healthline" });
   card.append(h("div", { class: "phead" },
     h("div", null, h("h3", null, p.display_name), h("div", { class: "sub" }, `${p.id} · v${p.version} · service ${p.service}`)),
-    h("span", { class: "spacer" }), status, healthBtn, toggle));
+    h("span", { class: "spacer" }), status, healthBtn, toggle), healthLine);
   if (p.description) card.append(h("p", { class: "hint" }, p.description));
   const configEl = h("div");
   const connEl = h("div");
   const healthEl = h("details", { class: "health" });
   card.append(h("div", { class: "psec" }, h("h4", null, "Configuration"), configEl),
               h("div", { class: "psec" }, h("h4", null, "Connection"), connEl), healthEl);
-  const ui = { p, status, toggle, configEl, connEl, healthEl, qr: null };
+  const ui = { p, status, toggle, configEl, connEl, healthEl, healthLine, qr: null, secrets: new Map() };
   pluginUI.set(p.id, ui);
   toggle.onclick = () => togglePlugin(ui);
   healthBtn.onclick = () => withBusy(healthBtn, async () => {
@@ -2135,31 +2303,47 @@ function pluginCard(p) {
   return card;
 }
 function paintPluginHead(ui) {
-  const p = ui.p;
+  const p = ui.p, health = healthOf(p).health;
   ui.status.replaceChildren(...pluginBadges(p));
   ui.toggle.textContent = p.enabled ? "Disable" : "Enable";
   ui.toggle.className = p.enabled ? "ghost" : "primary";
+  ui.healthLine.textContent = typeof health === "string" && health && health !== "ok" ? "Status: " + health : "";
   ui.healthEl.replaceChildren(h("summary", null, "Last status report"),
     h("pre", { class: "mono" }, JSON.stringify(healthOf(p), null, 2)));
   paintSecrets(ui);
 }
-// A fresh view of one plugin: repaint its header and connection panel, but
-// not its config form (that would throw away unsaved edits).
+// A fresh view of one plugin: repaint its header and connection panel (and
+// its shared card), but never a config form: that would drop unsaved edits.
 function updatePlugin(p) {
   if (!p || !p.id) return;
   state.pluginsById.set(p.id, p);
   state.plugins = state.plugins.map((x) => (x.id === p.id ? p : x));
   paintPluginPill();
   const ui = pluginUI.get(p.id);
-  if (!ui) return;
-  ui.p = p;
-  paintPluginHead(ui);
-  if (!qrRuns.has(p.id)) renderConnection(ui);
+  if (ui) {
+    ui.p = p;
+    paintPluginHead(ui);
+    if (!qrRuns.has(p.id)) renderConnection(ui);
+  }
+  const sui = slotUI.get(slotOf(p));
+  if (sui) {
+    sui.p = slotView(sui.slot);
+    paintSlotHead(sui);
+    renderConnection(sui);
+  }
 }
-// After connect/disconnect: sibling plugins sharing a service changed too.
+// After connect/disconnect or a shared edit: sibling plugins changed too.
 async function reloadPluginStates() {
   await loadPlugins();
   for (const p of state.plugins) updatePlugin(p);
+}
+// Every member reports its own status; refresh them all after a shared change.
+async function refreshSlotHealth(slot) {
+  for (const m of slotMembers(slot)) {
+    try { await api(`/v1/admin/plugins/${enc(m.id)}/health`, { method: "POST" }); }
+    catch (e) { if (e instanceof AuthLost) throw e; }
+  }
+  await reloadPluginStates();
 }
 async function togglePlugin(ui) {
   const p = ui.p;
@@ -2217,14 +2401,26 @@ const CONFIG_RENDERERS = {
   },
 };
 /* config-renderers:end */
+// Which fields a card edits: a shared card its slot's shared fields; a
+// member card only its own; any other plugin all of them.
+function cardFields(ui) {
+  const schema = (ui.p && ui.p.config_schema) || [];
+  if (ui.slot) return schema.filter((f) => f.shared);
+  return slotOf(ui.p) ? schema.filter((f) => !f.shared) : schema;
+}
 function renderConfig(ui) {
   const p = ui.p, el = ui.configEl;
   el.replaceChildren();
   ui.secrets = new Map();
-  const schema = p.config_schema || [];
-  if (!schema.length) { el.append(h("div", { class: "hint" }, "This plugin has no settings.")); return; }
+  const fields = cardFields(ui);
+  if (!fields.length) {
+    el.append(h("div", { class: "hint" }, slotOf(p) && !ui.slot
+      ? `Nothing of its own: its account settings are in the ${slotTitle(slotOf(p))} card above.`
+      : "This plugin has no settings."));
+    return;
+  }
   const plain = [];
-  for (const f of schema) {
+  for (const f of fields) {
     const head = h("div", { class: "fname" }, f.name, f.required ? h("span", { class: "req", title: "required" }, " *") : null,
       f.secret ? [" ", badge("secret, write-only", "accent")] : null);
     const field = h("div", { class: "cfgfield" }, head);
@@ -2243,7 +2439,8 @@ function renderConfig(ui) {
     const save = h("button", { type: "button", class: "primary" }, "Save settings");
     save.onclick = () => saveConfig(ui, plain, save);
     el.append(h("div", { class: "row-actions" }, save,
-      h("span", { class: "sub" }, "Empty resets a field to its default. Saving an enabled plugin re-sends its settings to it.")));
+      h("span", { class: "sub" }, ui.slot ? "Saved once for every plugin that shares this account."
+        : "Empty resets a field to its default. Saving an enabled plugin re-sends its settings to it.")));
   }
 }
 async function saveConfig(ui, plain, btn) {
@@ -2260,9 +2457,15 @@ async function saveConfig(ui, plain, btn) {
   if (!Object.keys(changes).length) { toast("Nothing changed.", "info"); return; }
   try {
     const v = await withBusy(btn, () => api(`/v1/admin/plugins/${enc(ui.p.id)}`, { method: "PATCH", body: { config: changes } }));
-    updatePlugin(v);
-    renderConfig(pluginUI.get(v.id) || ui);
     toast("Settings saved.");
+    if (ui.slot) {
+      await refreshSlotHealth(ui.slot);
+      const sui = slotUI.get(ui.slot);
+      if (sui) renderConfig(sui);
+    } else {
+      updatePlugin(v);
+      renderConfig(pluginUI.get(v.id) || ui);
+    }
   } catch (e) { showErr(e); }
 }
 // Write-only: the value goes to the plugin once and is cleared from the page
@@ -2276,6 +2479,11 @@ function paintSecrets(ui) {
     s.set.textContent = known === true ? "Replace" : known === false ? "Set" : "Set / replace";
   }
 }
+async function afterSecret(ui) {
+  // The plugin, not the broker, knows whether it now holds the value.
+  if (ui.slot) await refreshSlotHealth(ui.slot);
+  else updatePlugin(await api(`/v1/admin/plugins/${enc(ui.p.id)}/health`, { method: "POST" }));
+}
 function secretField(ui, f) {
   const input = f.type === "text"
     ? h("textarea", { spellcheck: "false", autocomplete: "off", placeholder: "paste a new value" })
@@ -2285,13 +2493,12 @@ function secretField(ui, f) {
   const clear = h("button", { type: "button", class: "ghost" }, "Clear");
   set.onclick = async () => {
     const value = input.value;
-    if (!value) { toast(`Type a value for ${f.name} first.`, "info"); return; }
     input.value = "";
+    if (!value) { toast(`Type a value for ${f.name} first.`, "info"); return; }
     try {
       await withBusy(set, () => api(`/v1/admin/plugins/${enc(ui.p.id)}`, { method: "PATCH", body: { config: { [f.name]: value } } }));
       toast(`${f.name} sent to the plugin.`);
-      // The plugin, not the broker, knows whether it now holds the value.
-      updatePlugin(await api(`/v1/admin/plugins/${enc(ui.p.id)}/health`, { method: "POST" }));
+      await afterSecret(ui);
     } catch (e) { showErr(e); }
   };
   clear.onclick = async () => {
@@ -2300,7 +2507,7 @@ function secretField(ui, f) {
     try {
       await withBusy(clear, () => api(`/v1/admin/plugins/${enc(ui.p.id)}`, { method: "PATCH", body: { config: { [f.name]: null } } }));
       toast(`${f.name} cleared.`);
-      updatePlugin(await api(`/v1/admin/plugins/${enc(ui.p.id)}/health`, { method: "POST" }));
+      await afterSecret(ui);
     } catch (e) { showErr(e); }
   };
   ui.secrets.set(f.name, { status, set });
@@ -2309,7 +2516,8 @@ function secretField(ui, f) {
 }
 
 // ---- connection panel, by the manifest's connection.kind (every kind the
-// manifest schema allows has an entry; tested).
+// manifest schema allows has an entry; tested). A member of a shared slot
+// shows only its own status: its slot's card owns the connection.
 /* connectors:start */
 const CONNECTORS = {
   none(ui, c, el) {
@@ -2324,15 +2532,36 @@ function renderConnection(ui) {
   const p = ui.p, el = ui.connEl;
   el.replaceChildren();
   ui.qr = null;
+  if (!ui.slot && slotOf(p)) { memberConnection(ui, el); return; }
   const kind = p.connection && p.connection.kind;
   const fn = CONNECTORS[kind];
   if (!fn) { el.append(h("div", { class: "formerr" }, `Unknown connection kind ${kind}.`)); return; }
   fn(ui, connInfo(p), el);
-  if (p.connection && p.connection.enforcement === "target") {
-    el.append(h("div", { class: "sub" }, "Enforced at the target: its credential is minted per call with only the permissions the call needs."));
-  } else {
-    el.append(h("div", { class: "sub" }, "Enforced by the broker (proxy): the connected account can do more than any grant allows; the broker is what restricts it."));
-  }
+  enforcementNote(p, el);
+}
+function enforcementNote(p, el) {
+  const how = enforcementOf(p);
+  el.append(h("div", { class: "sub" }, how === "target"
+    ? "Enforced at the target: its credential is minted per call with only the permissions the call needs."
+    : how === "mixed"
+      ? "Mixed: the permission set (for Google, the OAuth scopes) is enforced by the target; finer narrowing is enforced by the plugin and the broker."
+      : "Enforced by the broker (proxy): the connected account can do more than any grant allows; the broker is what restricts it."));
+}
+// Missing scopes are shown only once connected: before that, every scope is
+// "missing" and the answer is simply to connect.
+function scopeFacts(c, connected) {
+  const granted = listOf(c.granted_scopes), missing = connected ? listOf(c.missing_scopes) : [];
+  const facts = h("div", { class: "facts" });
+  if (granted.length) facts.append(...fact("Granted scopes", idChips(granted)));
+  if (missing.length) facts.append(...fact("Missing scopes", [badge("reconnect needed", "warn"), " ", idChips(missing)]));
+  return facts.childElementCount ? facts : null;
+}
+function memberConnection(ui, el) {
+  const p = ui.p, c = connInfo(p);
+  // Element.append() would print a null as "null"; h() drops it.
+  el.append(h("div", null, p.connected ? badge("connected", "ok") : badge("not connected", "warn")), h("div", null, scopeFacts(c, p.connected)),
+    h("div", { class: "hint" }, `Connect, reconnect and disconnect in the ${slotTitle(slotOf(p))} card above: one connection serves every plugin that shares it.`));
+  enforcementNote(p, el);
 }
 function disconnectButton(ui, label) {
   const b = h("button", { type: "button", class: "ghost" }, label || "Disconnect");
@@ -2352,6 +2581,24 @@ async function connectStart(ui, btn) {
   return withBusy(btn, () => api(`/v1/admin/plugins/${enc(ui.p.id)}/connect/start`, { method: "POST" }));
 }
 function accountText(c) { return c.account || c.push_name || c.login || c.email || c.jid || ""; }
+// The link a connect/start handed back, kept on the card until the owner
+// comes back from it, so a repaint does not lose it.
+function pendingLinkEl(ui) {
+  const pl = ui.pendingLink;
+  if (!pl) return null;
+  return h("div", null,
+    h("p", null, h("a", { class: "button-link primary", href: pl.url, target: "_blank", rel: "noopener noreferrer" }, pl.label)),
+    h("div", { class: "sub" }, "Opens ", h("span", { class: "idchip" }, pl.url)),
+    h("p", { class: "hint" }, pl.hint));
+}
+// After an install or consent page, coming back to this tab reloads the
+// plugin states once (the broker's callback page finished the connection).
+window.addEventListener("focus", () => {
+  if (!awaitingReturn || $("app").hidden || currentView() !== "plugins") return;
+  awaitingReturn = false;
+  for (const ui of [...pluginUI.values(), ...slotUI.values()]) ui.pendingLink = null;
+  reloadPluginStates().catch(showErr);
+});
 
 // WhatsApp-style pairing: the QR is re-fetched every 5 s while the plugin
 // reports waiting_for_qr; once it reports connected, connect/finish runs.
@@ -2359,7 +2606,7 @@ function connectSidecarQr(ui, c, el) {
   const p = ui.p;
   if (p.connected) {
     el.append(h("div", null, badge("linked", "ok"), " ", accountText(c) || "a linked device"),
-      h("div", { class: "row-actions", style: "margin-top:.5rem" }, disconnectButton(ui, "Unlink")));
+      h("div", { class: "row-actions" }, disconnectButton(ui, "Unlink")));
     return;
   }
   if (!p.enabled) { el.append(h("div", { class: "hint" }, "Enable the plugin first, then pair a device.")); return; }
@@ -2377,7 +2624,7 @@ function connectSidecarQr(ui, c, el) {
 function startQr(ui) {
   const pid = ui.p.id;
   if (qrRuns.has(pid)) return;
-  const run = { stopped: false, timer: null, finishing: false };
+  const run = { stopped: false, timer: null };
   qrRuns.set(pid, run);
   const next = () => { if (!run.stopped) run.timer = setTimeout(tick, 5000); };
   async function tick() {
@@ -2415,67 +2662,552 @@ function startQr(ui) {
   }
   tick();
 }
-// GitHub App: install on github.com (the callback page finishes it), or
-// paste the installation id by hand.
+// GitHub App: install on github.com (GitHub's redirect to the broker's
+// callback page finishes it), or paste the installation id here; either way
+// connect/finish gets the state nonce connect/start issued.
 function connectGithubApp(ui, c, el) {
   const p = ui.p;
   if (p.connected) {
     el.append(h("div", null, badge("installed", "ok"), " ", accountText(c) || "GitHub App installation"));
-    if (c.permissions && typeof c.permissions === "object") {
+    if (c.permissions && typeof c.permissions === "object" && !Array.isArray(c.permissions)) {
       el.append(h("div", { class: "facts" }, ...fact("Installed permissions",
         idChips(Object.entries(c.permissions).map(([k, v]) => `${k}: ${v}`)))));
     }
   }
-  const slot = h("div");
   const start = h("button", { type: "button", class: p.connected ? "ghost" : "primary" }, p.connected ? "Install on more accounts" : "Install the GitHub App");
   start.onclick = async () => {
     let r;
     try { r = await connectStart(ui, start); } catch (e) { showErr(e); return; }
     const url = externalUrl(r && r.url);
     if (!url) { toast("The plugin returned no usable https link. Check its App settings.", "err"); return; }
-    slot.replaceChildren(h("p", null, h("a", { class: "button-link primary", href: url, target: "_blank", rel: "noopener noreferrer" }, "Open GitHub to install the app")),
-      h("p", { class: "hint" }, "GitHub sends you back to the broker, which finishes the connection. If it does not, paste the installation id below."));
+    ui.ghState = r && typeof r.state === "string" ? r.state.slice(0, 512) : null;
+    ui.pendingLink = { url, label: "Open GitHub to install the app",
+      hint: "GitHub sends you back to the broker, which finishes the connection. If it does not, paste the installation id below." };
+    awaitingReturn = true;
+    renderConnection(ui);
   };
   const inst = h("input", { type: "text", inputmode: "numeric", placeholder: "installation id, e.g. 12345678", maxlength: "20" });
   const finish = h("button", { type: "button" }, "Finish with this id");
   finish.onclick = async () => {
     const id = inst.value.trim();
     if (!/^[0-9]{1,20}$/.test(id)) { toast("An installation id is a number.", "err"); return; }
+    const body = { installation_id: id };
+    if (ui.ghState) body.state = ui.ghState;
     try {
-      await withBusy(finish, () => api(`/v1/admin/plugins/${enc(p.id)}/connect/finish`, { method: "POST", body: { installation_id: id } }));
+      await withBusy(finish, () => api(`/v1/admin/plugins/${enc(p.id)}/connect/finish`, { method: "POST", body }));
       inst.value = "";
+      ui.ghState = null;
+      ui.pendingLink = null;
       toast("Connected.");
     } catch (e) { showErr(e); }
     reloadPluginStates().catch(showErr);
   };
-  el.append(h("div", { class: "row-actions", style: "margin:.5rem 0" }, start, p.connected ? disconnectButton(ui) : null), slot,
-    h("div", { class: "row-actions" }, inst, finish));
+  el.append(h("div", { class: "row-actions" }, start, p.connected ? disconnectButton(ui) : null),
+    h("div", null, pendingLinkEl(ui)), h("div", { class: "row-actions" }, inst, finish));
 }
-// Google: one consent covers every Google plugin the service hosts; the
-// callback page finishes it. Status lists granted and missing scopes.
+// Google: one consent covers every Google plugin the service hosts, and the
+// broker's callback page finishes it. Missing scopes mean "reconnect needed".
 function connectGoogle(ui, c, el) {
   const p = ui.p;
-  const list = (x) => (Array.isArray(x) ? x.filter((s) => typeof s === "string") : []);
-  const granted = list(c.granted_scopes), missing = list(c.missing_scopes);
-  if (p.connected) el.append(h("div", null, badge("connected", "ok"), " ", accountText(c) || "Google account"));
-  const facts = h("div", { class: "facts" });
-  if (granted.length) facts.append(...fact("Granted scopes", idChips(granted)));
-  if (missing.length) facts.append(...fact("Missing scopes", [badge("reconnect to grant", "warn"), " ", idChips(missing)]));
-  if (facts.childElementCount) el.append(facts);
-  const slot = h("div");
+  const missing = p.connected ? listOf(c.missing_scopes) : [];
+  el.append(h("div", null, p.connected ? badge("connected", "ok") : badge("not connected", "warn"),
+    " ", p.connected ? accountText(c) || "Google account" : ""), h("div", null, scopeFacts(c, p.connected)));
+  if (!p.enabled) {
+    el.append(h("div", { class: "hint" }, "Enable at least one of the plugins first: the consent asks for exactly the scopes the enabled ones need."));
+    return;
+  }
   const start = h("button", { type: "button", class: "primary" },
-    !p.connected ? "Connect Google" : missing.length ? "Reconnect to grant missing scopes" : "Reconnect Google");
+    !p.connected ? "Connect Google" : missing.length ? "Reconnect Google (grants the missing scopes)" : "Reconnect Google");
   start.onclick = async () => {
     let r;
     try { r = await connectStart(ui, start); } catch (e) { showErr(e); return; }
     const url = externalUrl(r && r.url);
     if (!url) { toast("The plugin returned no usable https link. Check its OAuth client settings.", "err"); return; }
+    ui.pendingLink = { url, label: "Open the Google consent page",
+      hint: "Google sends you back to the broker, which finishes the connection. This page refreshes when you come back to it." };
+    awaitingReturn = true;
     window.open(url, "_blank", "noopener,noreferrer");
     // Popup blockers may stop window.open after an await; the link always works.
-    slot.replaceChildren(h("p", null, h("a", { class: "button-link", href: url, target: "_blank", rel: "noopener noreferrer" }, "Open the Google consent page")),
-      h("p", { class: "hint" }, "Google sends you back to the broker, which finishes the connection. Then press Check health here."));
+    renderConnection(ui);
   };
-  el.append(h("div", { class: "row-actions", style: "margin:.5rem 0" }, start, p.connected ? disconnectButton(ui) : null), slot);
+  el.append(h("div", { class: "row-actions" }, start, p.connected ? disconnectButton(ui) : null), h("div", null, pendingLinkEl(ui)));
+}
+
+// ============================================================ delegations
+// The key forest from GET /v1/admin/keys/tree. The owner's revoke mirrors an
+// agent's revoke_delegation: the key is disabled (it and everything below it
+// stop authenticating at once) and its live grants are revoked.
+const treeCollapsed = new Set();   // key ids whose children are folded
+let treeData = [];
+function treeFocusId() {
+  const parts = location.hash.replace(/^#\/?/, "").split("/");
+  const id = parts[0] === "delegations" && /^[0-9]{1,12}$/.test(parts[1] || "") ? Number(parts[1]) : null;
+  return Number.isSafeInteger(id) ? id : null;
+}
+function walkTree(nodes, fn, ancestors = []) {
+  for (const n of nodes || []) {
+    fn(n, ancestors);
+    walkTree(n.children, fn, [...ancestors, n]);
+  }
+}
+async function refreshDelegations() {
+  await loadPlugins();
+  treeData = await api("/v1/admin/keys/tree");
+  renderTree();
+}
+function renderTree() {
+  const root = $("treeRoot");
+  root.replaceChildren();
+  let keys = 0, delegated = 0, notLive = 0, orphans = 0;
+  walkTree(treeData, (n) => {
+    keys++;
+    if (n.parent_key_id !== null && n.parent_key_id !== undefined) delegated++;
+    if (!n.live) notLive++;
+    if (n.orphan) orphans++;
+  });
+  $("treeSummary").textContent = `${keys} key${keys === 1 ? "" : "s"}, ${delegated} delegated` +
+    (notLive ? `, ${notLive} not live` : "") + (orphans ? `, ${orphans} orphaned` : "");
+  const focus = treeFocusId();
+  if (focus !== null) walkTree(treeData, (n, anc) => { if (n.id === focus) anc.forEach((a) => treeCollapsed.delete(a.id)); });
+  if (!treeData.length) root.append(h("li", null, empty("No agent keys yet.")));
+  for (const n of treeData) root.append(treeNode(n, []));
+  if (focus !== null) {
+    const el = [...root.querySelectorAll("li.tnode")].find((x) => x.dataset.keyId === String(focus));
+    if (el) { el.classList.add("focus"); el.scrollIntoView({ block: "center" }); }
+  }
+}
+// Why a key would get 401 right now, from its own row and its ancestors'.
+function notLiveReason(n, ancestors) {
+  if (n.orphan || ancestors.some((a) => a.orphan)) return "its chain is broken: a key above it is missing";
+  if (n.status !== "active") return `it is ${n.status}`;
+  const dead = ancestors.find((a) => a.status !== "active");
+  if (dead) return `the key it came from, ${dead.name}, is ${dead.status}`;
+  return "it is deeper than the delegation depth limit (Settings: max_delegation_depth)";
+}
+function grantSummary(grants) {
+  const list = grants || [];
+  if (!list.length) return "no grants";
+  const counts = {};
+  for (const g of list) counts[g.status] = (counts[g.status] || 0) + 1;
+  const reach = [];
+  for (const g of list.filter((x) => x.status === "active")) {
+    for (const c of g.capabilities || []) {
+      const n = (c.actions || []).length;
+      reach.push(`${pluginName(c.target)}: ${n} action${n === 1 ? "" : "s"}${c.mode === "draft" ? " (draft)" : ""}`);
+    }
+  }
+  return `grants: ${Object.entries(counts).map(([st, k]) => `${k} ${st}`).join(", ")}` +
+    (reach.length ? ` · reaches ${reach.join("; ")}` : "");
+}
+function treeNode(n, ancestors) {
+  const kids = n.children || [];
+  const li = h("li", { class: "tnode", "data-key-id": String(n.id) });
+  const toggle = h("button", { type: "button", class: "ttoggle" + (kids.length ? "" : " leaf"),
+                               "aria-label": "show or hide the keys below" });
+  toggle.textContent = treeCollapsed.has(n.id) ? "▸" : "▾";
+  const delegatedKey = n.parent_key_id !== null && n.parent_key_id !== undefined;
+  li.append(h("div", { class: "trow" }, toggle, h("span", { class: "tname" }, n.name),
+    badge(n.status, { active: "ok", disabled: "bad", expired: "warn" }[n.status] || ""),
+    n.live ? badge("live", "ok") : badge("not live", "bad"),
+    n.orphan ? badge("orphan", "bad") : null,
+    badge(`depth ${n.depth}`, ""),
+    badge(n.role, n.role === "full" ? "warn" : ""),
+    kids.length ? h("span", { class: "sub" }, `${kids.length} below`) : null));
+  li.append(h("div", { class: "tmeta" },
+    `${delegatedKey ? "delegated" : "created by you"} ${relTime(n.created_at)} · expires ${n.expires_at ? relTime(n.expires_at) : "never"}` +
+    ` · last used ${n.last_used_at ? relTime(n.last_used_at) : "never"} · ${n.rate_per_min}/min`));
+  if (!n.live) li.append(h("div", { class: "tmeta" }, `Not live: ${notLiveReason(n, ancestors)}. It gets 401 on its next call.`));
+  li.append(h("div", { class: "tmeta" }, grantSummary(n.grants)));
+  const liveGrants = (n.grants || []).filter((g) => g.status === "active" || g.status === "pending");
+  if (liveGrants.length) {
+    const d = h("details", { class: "params" }, h("summary", null, "Capabilities"));
+    for (const g of liveGrants) {
+      d.append(h("div", { class: "effrow grantline" }, badge(g.kind, "accent"),
+        badge(g.status, g.status === "active" ? "ok" : "warn"),
+        g.expires_at ? h("span", { class: "sub" }, "expires " + relTime(g.expires_at)) : null));
+      for (const c of g.capabilities || []) d.append(capView(c));
+    }
+    li.append(d);
+  }
+  const edit = h("button", { type: "button" }, "Edit");
+  edit.onclick = () => openEditKey(n.id);
+  const onoff = h("button", { type: "button", class: "ghost" }, n.disabled ? "Enable" : "Disable");
+  onoff.onclick = () => setKeyDisabled(n, !n.disabled, onoff, refreshDelegations);
+  const acts = h("div", { class: "row-actions" }, edit, onoff);
+  if (delegatedKey && (!n.disabled || liveGrants.length)) {
+    const rv = h("button", { type: "button", class: "red" }, "Revoke");
+    rv.onclick = () => revokeTreeKey(n, liveGrants, rv);
+    acts.append(rv);
+  }
+  li.append(acts);
+  if (kids.length) {
+    const ul = h("ul");
+    ul.hidden = treeCollapsed.has(n.id);
+    for (const c of kids) ul.append(treeNode(c, [...ancestors, n]));
+    li.append(ul);
+    toggle.onclick = () => {
+      if (treeCollapsed.has(n.id)) treeCollapsed.delete(n.id); else treeCollapsed.add(n.id);
+      ul.hidden = treeCollapsed.has(n.id);
+      toggle.textContent = ul.hidden ? "▸" : "▾";
+    };
+  }
+  return li;
+}
+async function revokeTreeKey(n, liveGrants, btn) {
+  let below = 0;
+  walkTree(n.children, () => { below++; });
+  const g = liveGrants.length;
+  const ok = await confirmBox({ title: `Revoke "${n.name}"?`,
+    text: `The key is disabled and its ${g} active or pending grant${g === 1 ? " is" : "s are"} revoked, as if the key above it had revoked it. ` +
+      (below === 1 ? "The key below it stops at its next call too. "
+        : below ? `The ${below} keys below it stop at their next call too. ` : "") +
+      "Enabling the key again later does not bring revoked grants back.",
+    ok: "Revoke", danger: true });
+  if (!ok) return;
+  await withBusy(btn, async () => {
+    try {
+      // Disable first: the key and its subtree stop authenticating at once,
+      // so a failure part-way through the grant revokes still fails closed.
+      await api(`/v1/admin/keys/${enc(n.id)}`, { method: "PATCH", body: { disabled: true } });
+      for (const x of liveGrants) {
+        try { await api(`/v1/admin/grants/${enc(x.id)}/revoke`, { method: "POST" }); }
+        catch (e) { if (e.status !== 409) throw e; }      // already decided elsewhere
+      }
+      toast(`"${n.name}" revoked.`);
+    } catch (e) { showErr(e); }
+  });
+  refreshDelegations().catch(showErr);
+}
+$("treeExpand").onclick = () => { treeCollapsed.clear(); renderTree(); };
+$("treeCollapse").onclick = () => {
+  walkTree(treeData, (n) => { if ((n.children || []).length) treeCollapsed.add(n.id); });
+  renderTree();
+};
+
+// ============================================================ channels: Telegram
+// The bot token is write-only. It is read from #tgToken once, the input is
+// emptied before the request is even sent, and nothing ever writes a token
+// back: the status the broker returns carries only a state word in tg.token
+// (unset | set | unreadable), which this code only ever compares (tested).
+const TG_TOKEN_SHAPE = /^[0-9]{5,16}:[A-Za-z0-9_-]{30,80}$/;
+let tgLinkRun = null;
+function stopTgLinkPoll() {
+  if (tgLinkRun) { tgLinkRun.stopped = true; clearTimeout(tgLinkRun.timer); tgLinkRun = null; }
+}
+// A Telegram deep link must be an https link on t.me; anything else is not shown.
+function telegramLink(u) {
+  try {
+    const x = new URL(String(u));
+    return x.protocol === "https:" && x.hostname === "t.me" ? x.href : null;
+  } catch { return null; }
+}
+function paintTgPill(tg) {
+  const unreadable = tg.token === "unreadable";
+  $("tgPill").className = "pill " + (tg.active ? "ok" : unreadable ? "off" : tg.token === "set" ? "warn" : "");
+  $("tgPillText").textContent = tg.active ? "Telegram on" : unreadable ? "Telegram: re-enter token" : "Telegram off";
+}
+async function refreshTelegramPill() {
+  try { paintTgPill(await api("/v1/admin/telegram")); } catch { /* the pill is cosmetic */ }
+}
+async function refreshChannels() {
+  renderTelegram(await api("/v1/admin/telegram"));
+}
+function nextTgStep(tg) {
+  if (tg.token !== "set") return "Next: store the bot token.";
+  if (!tg.linked) return "Next: link your chat.";
+  if (!tg.enabled) return "Next: enable the channel.";
+  return "";
+}
+function renderTelegram(tg) {
+  paintTgPill(tg);
+  const stored = tg.token === "set", unreadable = tg.token === "unreadable";
+  $("tgBadges").replaceChildren(
+    tg.active ? badge("on", "ok") : badge("off", ""),
+    stored ? badge("token stored", "ok") : unreadable ? badge("re-enter required", "bad") : badge("no token", "warn"),
+    tg.linked ? badge("chat linked", "ok") : badge("not linked", "warn"),
+    tg.enabled ? badge("enabled", "accent") : badge("disabled", ""));
+  $("tgSummary").textContent = tg.active
+    ? "Approval cards are being sent to your linked chat."
+    : "Cards are sent only when a bot token is stored, your chat is linked, and the channel is enabled. " + nextTgStep(tg);
+  $("tgKeyWarn").hidden = tg.secrets_key_configured !== false;
+  $("tgTokenState").replaceChildren(h("span", null, stored
+    ? ["A token is stored", tg.bot_username ? [" for ", h("b", null, "@" + tg.bot_username)] : " (Telegram did not tell us the bot's name just now)", "."]
+    : unreadable
+      ? "A token is stored but can no longer be decrypted (BROKER_SECRETS_KEY changed). Telegram is off until you enter it again."
+      : "No token stored. Create a bot with @BotFather in Telegram, then paste its token here."));
+  $("tgTokenSet").textContent = stored || unreadable ? "Replace" : "Set";
+  $("tgTokenSet").disabled = tg.secrets_key_configured === false;
+  $("tgTokenClear").hidden = tg.token === "unset";
+  renderTgLink(tg);
+  const p = tg.poll || {};
+  const facts = h("div", { class: "facts" });
+  facts.append(...fact("Loop", p.running ? badge("running", "ok")
+    : badge(stored ? "not running" : "stopped: no token", stored ? "warn" : "")));
+  facts.append(...fact("Last success", p.last_ok_at ? `${fmtWhen(p.last_ok_at)} (${relTime(p.last_ok_at)})` : "never"));
+  if (p.consecutive_errors) {
+    const le = p.last_error || {};
+    facts.append(...fact("Errors", [badge(`${p.consecutive_errors} in a row`, "bad"), " last: ",
+      h("span", { class: "mono" }, `${le.type || "unknown"}${le.status ? " " + le.status : ""}`),
+      le.at ? ` (${relTime(le.at)})` : ""]));
+  }
+  $("tgPoll").replaceChildren(facts);
+}
+function renderTgLink(tg) {
+  const el = $("tgLink");
+  if (tgLinkRun && tg.linking && !tg.linked) return;     // a code is on screen: keep it
+  el.replaceChildren();
+  if (tg.linked) {
+    const onoff = h("button", { type: "button", class: tg.enabled ? "ghost" : "green" }, tg.enabled ? "Disable" : "Enable");
+    onoff.onclick = () => (tg.enabled
+      ? tgAction(onoff, "/v1/admin/telegram/disable", "Telegram disabled: no more cards.")
+      : tgAction(onoff, "/v1/admin/telegram/enable", "Telegram enabled: cards will arrive in your chat."));
+    const test = h("button", { type: "button", class: "ghost" }, "Send a test message");
+    test.onclick = () => tgAction(test, "/v1/admin/telegram/test", "Test message sent.");
+    const unlink = h("button", { type: "button", class: "ghost" }, "Unlink");
+    unlink.onclick = async () => {
+      const ok = await confirmBox({ title: "Unlink Telegram?",
+        text: "Cards stop, and taps in that chat stop counting. You can link a chat again at any time.",
+        ok: "Unlink", danger: true });
+      if (ok) tgAction(unlink, "/v1/admin/telegram/unlink", "Unlinked.");
+    };
+    el.append(h("div", { class: "facts" },
+      ...fact("Chat", h("span", { class: "mono" }, String(tg.chat_id || ""))),
+      ...fact("Telegram user", h("span", { class: "mono" }, String(tg.user_id || "")))),
+      h("p", { class: "hint" }, "Only taps from this user in this chat count, and each one acts as you."),
+      h("div", { class: "row-actions" }, onoff, test, unlink));
+    return;
+  }
+  if (tg.token !== "set") {
+    el.append(h("div", { class: "hint" }, "Store the bot token first, then link the chat you will approve from."));
+    return;
+  }
+  const start = h("button", { type: "button", class: "primary" }, tg.linking ? "Get a new link code" : "Link my chat");
+  start.onclick = () => tgStartLink(start);
+  el.append(h("p", { class: "hint" }, "You get a one-time code to send to your bot from your private Telegram chat. Sending it proves the chat is yours."),
+    h("div", { class: "row-actions" }, start));
+}
+async function tgAction(btn, path, done) {
+  try {
+    const r = await withBusy(btn, () => api(path, { method: "POST" }));
+    toast(done);
+    if (r && hasOwn(r, "linked")) renderTelegram(r); else await refreshChannels();
+  } catch (e) { showErr(e); }
+}
+// The link code binds whichever Telegram account sends it first, so it is
+// shown only here, never kept, and dropped when the owner navigates away.
+async function tgStartLink(btn) {
+  let r;
+  try { r = await withBusy(btn, () => api("/v1/admin/telegram/link/start", { method: "POST" })); }
+  catch (e) { showErr(e); return; }
+  stopTgLinkPoll();
+  const deep = telegramLink(r.link);
+  const expires = Date.now() + (Number(r.expires_in) || 300) * 1000;
+  const left = h("span", { class: "sub" });
+  const bot = r.bot_username ? "@" + r.bot_username : "your bot";
+  $("tgLink").replaceChildren(h("div", { "data-ephemeral": true },
+    h("p", null, "From your private chat with ", h("b", null, bot), ", send:"),
+    h("div", { class: "codebox" }, `/start ${r.code}`),
+    deep ? h("p", null, h("a", { class: "button-link primary", href: deep, target: "_blank", rel: "noopener noreferrer" }, "Open the bot in Telegram"),
+      " ", h("span", { class: "sub" }, "(fills in the code; press Start)")) : null,
+    h("div", { class: "warnbox" }, "Whoever sends this code first becomes your approver. Send it yourself, from your own account, and never share it."),
+    h("p", null, left)));
+  const run = { stopped: false, timer: null, ticks: 0 };
+  tgLinkRun = run;
+  const tick = async () => {
+    if (run.stopped) return;
+    if (currentView() !== "channels" || $("app").hidden) { stopTgLinkPoll(); return; }
+    const secs = Math.max(0, Math.round((expires - Date.now()) / 1000));
+    left.textContent = `The code expires in ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}. Waiting for your message...`;
+    if (run.ticks++ % 3 === 0 || secs === 0) {
+      let tg = null;
+      try { tg = await api("/v1/admin/telegram"); }
+      catch (e) { if (e instanceof AuthLost) { stopTgLinkPoll(); return; } }
+      if (run.stopped) return;
+      if (tg && tg.linked) {
+        stopTgLinkPoll();
+        toast("Telegram linked. Enable the channel to start receiving cards.");
+        renderTelegram(tg);
+        return;
+      }
+      if ((tg && !tg.linking) || secs === 0) {
+        stopTgLinkPoll();
+        toast("The link code expired. Get a new one.", "info");
+        if (tg) renderTelegram(tg); else refreshChannels().catch(showErr);
+        return;
+      }
+    }
+    run.timer = setTimeout(tick, 1000);
+  };
+  tick();
+}
+$("tgTokenForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const value = $("tgToken").value.trim();
+  $("tgToken").value = "";          // write-only: gone from the page before anything else
+  if (!value) { toast("Paste the bot token first.", "info"); return; }
+  if (!TG_TOKEN_SHAPE.test(value)) { toast("That is not a Telegram bot token (it looks like 123456789:AA...).", "err"); return; }
+  try {
+    const tg = await withBusy($("tgTokenSet"), () => api("/v1/admin/telegram/token", { method: "POST", body: { token: value } }));
+    toast("Token stored. The bot is picked up within seconds.");
+    renderTelegram(tg);
+  } catch (err) { showErr(err); }
+};
+$("tgTokenClear").onclick = async () => {
+  const ok = await confirmBox({ title: "Clear the bot token?",
+    text: "Telegram stops within seconds: no cards, no taps. The chat link is kept, so storing the same bot's token again resumes it.",
+    ok: "Clear token", danger: true });
+  if (!ok) return;
+  try {
+    renderTelegram(await withBusy($("tgTokenClear"), () => api("/v1/admin/telegram/token", { method: "DELETE" })));
+    toast("Token cleared.");
+  } catch (e) { showErr(e); }
+};
+
+// ============================================================ settings
+// One form for every console-editable setting. Save sends only the settings
+// that changed; a reset sends null, which returns a setting to its default
+// from the environment file. One input per setting type the broker declares
+// (runtime_settings.SPECS; tested).
+/* setting-inputs:start */
+const SETTING_INPUTS = {
+  int(s, v) { return numberSetting(s, v, true); },
+  float(s, v) { return numberSetting(s, v, false); },
+  hosts(s, v) {
+    const t = h("textarea", { spellcheck: "false", rows: "3", placeholder: "one per line: host, host:port or host:*" });
+    const set = (x) => { t.value = listOf(x).join("\n"); };
+    set(v);
+    return { el: t, set, get: () => t.value.split(/[\s,]+/).map((x) => x.trim().toLowerCase()).filter(Boolean) };
+  },
+};
+/* setting-inputs:end */
+function rangeText(s) {
+  return s.min !== undefined && s.min !== null ? ` from ${s.min} to ${s.max}${s.unit ? " " + s.unit : ""}` : "";
+}
+function numberSetting(s, v, integer) {
+  const i = h("input", { type: "number", step: integer ? "1" : "any", min: s.min, max: s.max });
+  const set = (x) => { i.value = x === null || x === undefined ? "" : String(x); };
+  set(v);
+  return { el: i, set, get() {
+    const t = i.value.trim(), n = Number(t);
+    if (t === "" || !Number.isFinite(n) || (integer && !Number.isInteger(n))) {
+      throw new Error(`${s.name}: ${integer ? "a whole number" : "a number"}${rangeText(s)}.`);
+    }
+    if ((typeof s.min === "number" && n < s.min) || (typeof s.max === "number" && n > s.max)) {
+      throw new Error(`${s.name} must be${rangeText(s)}.`);
+    }
+    return n;
+  } };
+}
+// "43200 seconds" reads better as "12 h".
+function humanDuration(n, unit) {
+  const secs = unit === "seconds" ? n : unit === "hours" ? n * 3600 : unit === "days" ? n * 86400 : null;
+  if (secs === null || !Number.isFinite(secs) || secs < 60) return "";
+  for (const [d, u] of [[86400, "d"], [3600, "h"], [60, "min"]]) {
+    if (secs >= d) { const x = secs / d; return `${Number.isInteger(x) ? x : x.toFixed(1)} ${u}`; }
+  }
+  return "";
+}
+function settingText(v) {
+  if (Array.isArray(v)) return v.length ? v.join(", ") : "none";
+  return v === null || v === undefined ? "none" : String(v);
+}
+const SETTING_SOURCE = { console: "set here", env: "from the environment file", default: "built-in default" };
+// Settings that the broker reads only when it starts, with the reason.
+const AT_NEXT_START = {
+  mcp_allowed_hosts_extra: "Applies at the next broker start: the /mcp endpoint reads its Host allowlist when it starts.",
+};
+let settingRows = [];
+function settingChanged(r) {
+  if (r.reset) return true;
+  try { return canon(r.input.get()) !== canon(r.s.value); } catch { return true; }
+}
+function paintSettingsPending() {
+  const n = settingRows.filter((r) => { const c = settingChanged(r); r.row.classList.toggle("changed", c); return c; }).length;
+  $("settingsPending").textContent = n ? `${n} unsaved change${n === 1 ? "" : "s"}` : "";
+}
+async function refreshSettings() {
+  renderSettings(await api("/v1/admin/settings"));
+}
+function renderSettings(data) {
+  const rows = $("settingsRows");
+  rows.replaceChildren();
+  settingRows = [];
+  for (const s of data.settings || []) {
+    const row = h("div", { class: "setrow" });
+    const make = SETTING_INPUTS[s.type];
+    const about = h("div", null, h("div", { class: "sname" }, s.name), h("div", { class: "hint" }, s.help));
+    if (!make) {
+      row.append(about, h("div", { class: "formerr" }, `Unsupported setting type ${s.type}.`));
+      rows.append(row);
+      continue;
+    }
+    const meta = [`default ${settingText(s.default)}`];
+    if (s.type !== "hosts") meta.push(`allowed${rangeText(s)}`);
+    meta.push(SETTING_SOURCE[s.source] || s.source);
+    about.append(h("div", { class: "sub" }, meta.join(" · ")));
+    const input = make(s, s.value);
+    const r = { s, input, row, reset: false };
+    const human = h("span", { class: "sub" });
+    const reset = h("button", { type: "button", class: "link" }, "Reset to default");
+    reset.hidden = s.source !== "console";
+    const paint = () => {
+      let n = null;
+      try { n = input.get(); } catch { /* shown on save */ }
+      const hd = typeof n === "number" ? humanDuration(n, s.unit) : "";
+      human.textContent = r.reset ? "resets to the default on save" : hd ? `= ${hd}` : "";
+      paintSettingsPending();
+    };
+    reset.onclick = () => { input.set(s.default); r.reset = true; paint(); };
+    input.el.addEventListener("input", () => { r.reset = false; paint(); });
+    const ctl = h("div", { class: "sctl" }, input.el, h("div", { class: "row-actions" }, human, reset));
+    if (s.type === "hosts") {
+      ctl.append(h("div", { class: "sub" }, "From the environment file, not removable here: ", listOf(s.base).length ? idChips(listOf(s.base)) : "none"),
+        h("div", { class: "sub" }, AT_NEXT_START[s.name] ? "Effective list from the next start: " : "Effective list: ",
+          listOf(s.effective).length ? idChips(listOf(s.effective)) : "none"));
+    }
+    if (AT_NEXT_START[s.name]) ctl.append(h("div", { class: "warnbox" }, AT_NEXT_START[s.name]));
+    row.append(about, ctl);
+    rows.append(row);
+    settingRows.push(r);
+    paint();
+  }
+  renderEnvOnly(data.env_only);
+  paintSettingsPending();
+}
+$("settingsForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const changes = {};
+  try {
+    for (const r of settingRows) {
+      if (r.reset) { changes[r.s.name] = null; continue; }
+      const v = r.input.get();
+      if (canon(v) !== canon(r.s.value)) changes[r.s.name] = v;
+    }
+  } catch (err) { toast(errText(err), "err"); return; }
+  const names = Object.keys(changes);
+  if (!names.length) { toast("Nothing changed.", "info"); return; }
+  try {
+    const data = await withBusy($("settingsSave"), () => api("/v1/admin/settings", { method: "PATCH", body: { settings: changes } }));
+    renderSettings(data);
+    toast(`Saved: ${names.join(", ")}.`);
+  } catch (err) { showErr(err); }
+};
+const ENV_KIND = { bootstrap: "accent", exposure: "warn", deployment: "", compose: "" };
+function envValue(v) {
+  if (v === null || v === undefined || v === "") return h("span", { class: "sub" }, "not set");
+  if (typeof v === "boolean") return badge(String(v), v ? "accent" : "");
+  return h("span", { class: "mono" }, typeof v === "string" ? v : JSON.stringify(v));
+}
+function renderEnvOnly(list) {
+  const tb = $("envOnlyRows");
+  tb.replaceChildren();
+  for (const e of list || []) {
+    const now = hasOwn(e, "set") ? (e.set ? badge("set", "ok") : badge("not set", ""))
+      : hasOwn(e, "value") ? envValue(e.value)
+        : h("span", { class: "sub" }, "not read by the broker");
+    tb.append(h("tr", null, h("td", { class: "mono" }, e.name), h("td", null, badge(e.category, ENV_KIND[e.category] || "")),
+      h("td", null, now), h("td", null, e.why)));
+  }
 }
 
 // ============================================================ account
