@@ -76,8 +76,10 @@ same plus a skill-drift job (`aab skill build` + `git diff --exit-code integrati
   through the plugin runtime's secret store; the broker relays a secret config
   field once to the plugin's `/configure` and never stores it. Tokens and
   secrets are never logged, printed, or returned after creation.
-- One container per plugin service; the broker reaches plugins over
-  `broker_net` with a per-service `X-Plugin-Token`; the edge sits on
+- One container per plugin service; the broker reaches each plugin over
+  that plugin's own network (`net_whatsapp`, `net_github`, `net_google`)
+  with a per-service `X-Plugin-Token`, so no plugin can reach another; the
+  edge sits on
   `edge_net` and can never reach a plugin; the WhatsApp sidecar is reachable
   only from its plugin over `wa_internal`.
 - The WhatsApp session (`session.db`, plaintext) lives in the `wa_session`

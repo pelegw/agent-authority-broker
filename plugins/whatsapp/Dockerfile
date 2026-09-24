@@ -1,5 +1,5 @@
 # plugin-whatsapp: the aab-plugin-runtime hosting the WhatsApp adapter.
-# Serves the plugin API on :8090 (broker_net only, never published), reads the
+# Serves the plugin API on :8090 (net_whatsapp only, never published), reads the
 # sidecar's archive from the read-only wa_data mount, and talks to the Go
 # sidecar over wa_internal.
 #

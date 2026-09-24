@@ -62,7 +62,7 @@ namespaced tools and endpoints, and no migration of WA_GW's database.
 │                   │                           │  grants, policy, decisions,    │
 │                   │                           │  queue, Telegram cards         │
 │                   └─────────────┬─────────────┘  holds no target credential    │
-│ broker_net                      │  X-Plugin-Token (one per service)            │
+│ one network per plugin service  │  X-Plugin-Token (one per service)            │
 │              ┌──────────────────┼──────────────────────┐                       │
 │              ▼                  ▼                      ▼                       │
 │   ┌──────────────────┐ ┌────────────────┐ ┌─────────────────────────┐          │
@@ -77,11 +77,12 @@ namespaced tools and endpoints, and no migration of WA_GW's database.
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Three networks, one kind of traffic each.** `edge_net` (edge and
-  broker), `broker_net` (broker and plugin services), `wa_internal`
-  (plugin-whatsapp and the sidecar). The edge cannot reach a plugin; the
-  broker cannot reach the sidecar or the message archive. No plugin or
-  sidecar port is ever published.
+- **One network per kind of traffic.** `edge_net` (edge and broker), one
+  network per plugin service (`net_whatsapp`, `net_github`, `net_google`:
+  the broker and that service), `wa_internal` (plugin-whatsapp and the
+  sidecar). The edge cannot reach a plugin, no plugin can reach another
+  plugin, and the broker cannot reach the sidecar or the message archive.
+  No plugin or sidecar port is ever published.
 - **The broker sends requirements, not credentials.** With each call it
   sends a `CallScope`: what the key may see, the constraints, and the
   credential the call needs (for example "`gmail.readonly`", or "repo

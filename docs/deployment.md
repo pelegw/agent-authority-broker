@@ -21,16 +21,19 @@ every console setting with its bounds, is `docs/configuration.md`.
 | Service | Image / build | Networks | Published port | Volumes |
 |---|---|---|---|---|
 | `edge` (public overlay only) | `caddy:2-alpine` | `edge_net` | `443` | `caddy_data`, `edge/Caddyfile` (ro), `edge/certs` (ro) |
-| `broker` | `./broker` | `edge_net`, `broker_net` | `127.0.0.1:${BROKER_PORT:-8080}` in the base file only; none in public mode | `broker_data` |
-| `plugin-whatsapp` | `./plugins/whatsapp` | `broker_net`, `wa_internal` | none | `wa_data` (ro), `whatsapp_secrets` |
+| `broker` | `./broker` | `edge_net`, `net_whatsapp`, `net_github`, `net_google` | `127.0.0.1:${BROKER_PORT:-8080}` in the base file only; none in public mode | `broker_data` |
+| `plugin-whatsapp` | `./plugins/whatsapp` | `net_whatsapp`, `wa_internal` | none | `wa_data` (ro), `whatsapp_secrets` |
 | `whatsapp-sidecar` | `./sidecars/whatsapp` | `wa_internal` | none | `wa_data` (rw), `wa_session` (rw, this service only) |
-| `plugin-github` | `./plugins/github` | `broker_net` | none | `github_secrets`, `${GITHUB_APP_KEY_DIR}` bind at `/run/secrets/github` (ro) |
-| `plugin-google` | `./plugins/google` | `broker_net` | none | `google_secrets` |
+| `plugin-github` | `./plugins/github` | `net_github` | none | `github_secrets`, `${GITHUB_APP_KEY_DIR}` bind at `/run/secrets/github` (ro) |
+| `plugin-google` | `./plugins/google` | `net_google` | none | `google_secrets` |
 
 - `edge_net` carries edge ↔ broker only, so a compromised edge cannot reach any
   plugin's `/perform`.
-- `broker_net` carries broker ↔ plugin services. Plugins answer on `:8090`
-  (`PLUGIN_URL_<SERVICE>`), authenticated by `X-Plugin-Token`.
+- `net_whatsapp`, `net_github` and `net_google` each carry broker ↔ one
+  plugin service. Plugins answer on `:8090` (`PLUGIN_URL_<SERVICE>`),
+  authenticated by `X-Plugin-Token`. Only the broker is on all three, so a
+  plugin service cannot reach another one at all: `plugin-github` cannot
+  resolve `plugin-google`, let alone open a connection to it.
 - `wa_internal` carries plugin-whatsapp ↔ sidecar only. The broker is not on
   it and cannot reach the sidecar or its archive.
 - No network is `internal: true`: the broker (Telegram, Cloudflare JWKS), the
@@ -119,7 +122,14 @@ gateway, for example), set `BROKER_PORT` in `.env`.
 2. **Published ports.** `docker compose ps` shows a host port only for the
    broker (`127.0.0.1:8080->8080/tcp`), or in public mode only for `edge`
    (`443`). The plugins show `8090/tcp` with no `->`: that is the image's
-   `EXPOSE`, not a published port. The sidecar shows none.
+   `EXPOSE`, not a published port. The sidecar shows none. Each plugin
+   service is alone on its network with the broker:
+   `docker compose exec plugin-github python -c "import socket;
+   socket.create_connection(('plugin-google', 8090), timeout=3)"` fails
+   with `socket.gaierror: [Errno -2] Name or service not known` (the same
+   for every pair of plugin services, and for any plugin but
+   `plugin-whatsapp` towards `whatsapp-sidecar:8081`), while the broker
+   reaches all three (step 5 lists all five plugins).
 3. **Health.** `curl -s http://127.0.0.1:8080/health` and `/v1/health`
    answer `200 {"status":"ok","version":"0.2.0"}`. They report liveness only,
    never plugin or connection state.

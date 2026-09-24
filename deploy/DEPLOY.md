@@ -23,7 +23,8 @@ to boot** in public mode if Access isn't configured. Agent routes are not
 behind Access: agents authenticate with their `aab_` key.
 
 Inside the host, the edge (Caddy) sits on `edge_net` with the broker only; the
-plugin containers sit on `broker_net` with the broker only; the WhatsApp
+plugin containers each sit on their own network with the broker only
+(`net_whatsapp`, `net_github`, `net_google`: no plugin can reach another); the WhatsApp
 sidecar sits on `wa_internal` with `plugin-whatsapp` only. The broker holds no
 target credential: each plugin container keeps its own, encrypted in its own
 volume.

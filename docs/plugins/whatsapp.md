@@ -6,9 +6,9 @@ The broker reaches it over the internal plugin API (`docs/plugin-api.md`) and
 never touches WhatsApp, the Go sidecar or the message archive itself.
 
 ```
-broker ──(broker_net, X-Plugin-Token)──> plugin-whatsapp ──(wa_internal, X-Internal-Token)──> whatsapp-sidecar ──> WhatsApp
-                                               │
-                                               └── reads /data/messages.db (wa_data, mounted read-only)
+broker ──(net_whatsapp, X-Plugin-Token)──> plugin-whatsapp ──(wa_internal, X-Internal-Token)──> whatsapp-sidecar ──> WhatsApp
+                                                 │
+                                                 └── reads /data/messages.db (wa_data, mounted read-only)
 ```
 
 - **Package:** `plugins/whatsapp/aab_plugin_whatsapp/`. It is served by

@@ -9,7 +9,8 @@
 # see deploy/DEPLOY.md and docs/deployment.md.
 #
 # The edge joins edge_net only: it can reach the broker and nothing else, so a
-# compromised edge cannot call any plugin's /perform (those live on broker_net).
+# compromised edge cannot call any plugin's /perform (each plugin service is on
+# its own network with the broker: net_whatsapp, net_github, net_google).
 
 services:
   broker:

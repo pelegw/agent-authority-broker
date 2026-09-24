@@ -42,6 +42,16 @@ lives only in `VERSION`.
   session directory created 0700, and an uncreatable one returning an exit
   code; `tests/test_config_files.py` asserts that only the sidecar mounts
   `wa_session` and that `wa_data` is read-only everywhere else.
+- One network per plugin service. The shared `broker_net` let every plugin
+  container reach every other one: their API still demanded the other
+  service's token, but a compromised plugin could connect to its
+  neighbours' ports and probe them. It is replaced by
+  `net_whatsapp`, `net_github` and `net_google`: the broker joins
+  `edge_net` and all three, each plugin service joins only its own
+  (`plugin-whatsapp` also `wa_internal`). `plugin-github` can no longer
+  even resolve `plugin-google`. `tests/test_config_files.py` asserts the
+  exact membership of every network in both compose shapes and that no
+  service falls back to compose's default network.
 
 ### Upgrade notes
 - **WhatsApp session volume.** An existing `wa_data` volume keeps its
@@ -66,6 +76,9 @@ lives only in `VERSION`.
   `wa_data`: `docker run --rm -v aab_wa_data:/d alpine sh -c 'rm -f
   /d/session.db*'`. Backups now include `wa_session` (`deploy/DEPLOY.md` >
   Backups): it, not `wa_data`, is the live account.
+- **Per-plugin networks.** `docker compose up -d` creates the three new
+  networks and moves the containers onto them; the old `aab_broker_net` is
+  left behind unused. Remove it with `docker network rm aab_broker_net`.
 
 ### Fixed
 - The WhatsApp sidecar never closed its databases on a graceful stop: its

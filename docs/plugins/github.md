@@ -8,7 +8,7 @@ credential: the App's private key, the installation and every minted token
 live only here.
 
 ```
-broker ──(broker_net, X-Plugin-Token)──> plugin-github ──(HTTPS, per-call installation token)──> api.github.com
+broker ──(net_github, X-Plugin-Token)──> plugin-github ──(HTTPS, per-call installation token)──> api.github.com
                                                │
                                                └── /secrets (github_secrets): App key, installation id,
                                                    connect state, encrypted under PLUGIN_SECRETS_KEY

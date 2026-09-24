@@ -1,6 +1,6 @@
 # plugin-google: the aab-plugin-runtime hosting the gmail, gcal and gdrive
 # adapters over one google_oauth connection. Serves the plugin API on :8090
-# (broker_net only, never published) and talks only to Google's OAuth and
+# (net_google only, never published) and talks only to Google's OAuth and
 # API endpoints. The OAuth client id/secret and the refresh token live in
 # /secrets (the google_secrets volume), encrypted under PLUGIN_SECRETS_KEY.
 #

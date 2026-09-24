@@ -3,7 +3,8 @@ table is identical in docs/deployment.md and docs/architecture.md section
 2.2, compose only references keys .env.example carries, and the third-party
 credentials that moved to the console appear in no file. Compose also keeps
 the isolation docs/architecture.md section 2 describes: the WhatsApp session
-volume is mounted by the sidecar alone, and the archive read-only elsewhere."""
+volume is mounted by the sidecar alone, the archive read-only elsewhere, and
+each plugin service has a network of its own."""
 
 import re
 from pathlib import Path
@@ -95,3 +96,32 @@ def test_the_archive_volume_is_read_only_outside_the_sidecar():
         "whatsapp-sidecar": [("/data", False)], "plugin-whatsapp": [("/data", True)]}
     assert base["services"]["plugin-whatsapp"]["environment"]["MESSAGES_DB"] == \
         "/data/messages.db"
+
+
+def test_each_plugin_service_has_a_network_of_its_own():
+    """Who can reach whom: the broker every plugin service, each plugin
+    service only the broker (plugin-whatsapp also its sidecar), the edge only
+    the broker. No plugin shares a network with another plugin."""
+    members: dict[str, set[str]] = {}
+    for rel in ("docker-compose.yml", "docker-compose.public.yml"):
+        doc = _compose(rel)
+        for name, svc in doc["services"].items():
+            # A service without `networks` would land on compose's default
+            # network, shared with every other such service.
+            if rel == "docker-compose.yml" or name not in _compose("docker-compose.yml")[
+                    "services"]:
+                assert svc.get("networks"), (rel, name)
+            for net in svc.get("networks", []):
+                members.setdefault(net, set()).add(name)
+    assert members == {
+        "edge_net": {"broker", "edge"},
+        "net_whatsapp": {"broker", "plugin-whatsapp"},
+        "net_github": {"broker", "plugin-github"},
+        "net_google": {"broker", "plugin-google"},
+        "wa_internal": {"plugin-whatsapp", "whatsapp-sidecar"},
+    }
+    assert set(_compose("docker-compose.yml")["networks"]) == set(members)
+    # The broker finds each plugin by the name it has on that plugin's network.
+    env = _compose("docker-compose.yml")["services"]["broker"]["environment"]
+    for service in ("whatsapp", "github", "google"):
+        assert env[f"PLUGIN_URL_{service.upper()}"] == f"http://plugin-{service}:8090"

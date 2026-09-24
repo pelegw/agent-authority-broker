@@ -1,5 +1,5 @@
 # plugin-github: the aab-plugin-runtime hosting the GitHub adapter and the
-# github_app connection. Serves the plugin API on :8090 (broker_net only,
+# github_app connection. Serves the plugin API on :8090 (net_github only,
 # never published). Holds the App private key, the installation id and the
 # connect state in /secrets (encrypted under PLUGIN_SECRETS_KEY); minted
 # installation tokens live only in this process's memory.
