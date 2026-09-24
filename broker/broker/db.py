@@ -218,7 +218,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 
 -- Runtime, admin-managed key/value config (setup_completed, telegram_*,
--- OAuth state nonces).
+-- operator settings edited from the console). OAuth state nonces live in
+-- the plugin services, never here.
 CREATE TABLE IF NOT EXISTS app_config (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
