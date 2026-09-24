@@ -9,7 +9,9 @@ Security properties this module owns:
   * every endpoint, `/manifests` included, requires `X-Plugin-Token`,
     compared in constant time; an empty configured token refuses to boot;
   * secrets are write-only over the network: `/configure` stores them and
-    no endpoint returns them;
+    no endpoint returns them. A secret field a manifest marks `shared: true`
+    goes to the connection's shared slot (plugin-google: `google`), so one
+    OAuth client secret serves gmail, gcal and gdrive and is stored once;
   * adapter failures map onto the broker's contract (AdapterError status
     passthrough; unreadable secrets = 503, not performed; anything
     unexpected = 502, unknown outcome, with no internals in the body).
@@ -17,6 +19,7 @@ Security properties this module owns:
 
 import base64
 import hmac
+import inspect
 import logging
 from pathlib import Path
 from typing import Any
@@ -73,6 +76,10 @@ class PerformBody(_Body):
 
 class ConnectStartBody(_Body):
     enabled_plugins: list[str] = Field(default_factory=list)
+    # Computed by the broker (public: https://<SITE_DOMAIN>/oauth/callback/
+    # <service>; local: the request's host). Passed only to connections
+    # whose start() takes it; the plugin stores it beside the state nonce.
+    redirect_uri: str | None = Field(default=None, max_length=2048)
 
 
 class ConnectFinishBody(_Body):
@@ -102,6 +109,22 @@ class SecretSlot:
         return f"SecretSlot(slot={self._slot!r})"
 
 
+class SharedAwareReader:
+    """The SecretReader for a plugin with `shared: true` secret fields: those
+    names are read from the shared slot, everything else from the plugin's
+    own slot. Read-only, never shows values."""
+
+    def __init__(self, store: SecretStore, own: str, shared: str, names: frozenset[str]):
+        self._store, self._own, self._shared, self._names = store, own, shared, names
+
+    def get(self, name: str, default: str | None = None) -> str | None:
+        slot = self._shared if name in self._names else self._own
+        return self._store.read_all(slot).get(name, default)
+
+    def __repr__(self) -> str:
+        return f"SharedAwareReader(slot={self._own!r}, shared={self._shared!r})"
+
+
 def serve(adapters: list[PluginAdapter], token: str, secrets_dir: str | Path,
           secrets_key: str | None) -> FastAPI:
     """Build the plugin API app. Raises at boot on any unsafe configuration."""
@@ -115,6 +138,7 @@ def serve(adapters: list[PluginAdapter], token: str, secrets_dir: str | Path,
         by_id[pid] = a
     if not by_id:
         raise RuntimeError("serve() needs at least one adapter")
+    shared = _shared_fields(by_id)
     store = SecretStore(secrets_dir, secrets_key)
     _bind(by_id, store)
     expected = token.encode()
@@ -193,9 +217,15 @@ def serve(adapters: list[PluginAdapter], token: str, secrets_dir: str | Path,
     @app.post("/configure")
     def configure(body: ConfigureBody, request: Request) -> dict:
         pid, adapter = pick(request)
-        if body.secrets:
-            store.write(pid, body.secrets)
-        adapter.configure(body.config, store.reader(pid))
+        slot, names = shared.get(pid, (None, frozenset()))
+        own = {k: v for k, v in body.secrets.items() if k not in names}
+        common = {k: v for k, v in body.secrets.items() if k in names}
+        if own:
+            store.write(pid, own)
+        if common:
+            store.write(slot, common)       # once, in the connection's shared slot
+        reader = SharedAwareReader(store, pid, slot, names) if names else store.reader(pid)
+        adapter.configure(body.config, reader)
         return {"ok": True}      # never echo secret values
 
     @app.post("/normalize")
@@ -227,7 +257,10 @@ def serve(adapters: list[PluginAdapter], token: str, secrets_dir: str | Path,
 
     @app.post("/connect/start")
     def connect_start(body: ConnectStartBody, request: Request) -> dict:
-        return connection(request).start(body.enabled_plugins)
+        conn = connection(request)
+        if body.redirect_uri is not None and _accepts(conn.start, "redirect_uri"):
+            return conn.start(body.enabled_plugins, redirect_uri=body.redirect_uri)
+        return conn.start(body.enabled_plugins)
 
     @app.get("/connect/qr.png")
     def connect_qr(request: Request) -> Response:
@@ -245,6 +278,39 @@ def serve(adapters: list[PluginAdapter], token: str, secrets_dir: str | Path,
         return connection(request).disconnect()
 
     return app
+
+
+def _shared_fields(by_id: dict[str, PluginAdapter]) -> dict[str, tuple[str, frozenset[str]]]:
+    """{plugin id: (shared slot, names of its `shared: true` config fields)}.
+
+    Refuses to boot when a manifest declares shared fields but the adapter's
+    connection has no slot, or a slot other than the manifest's
+    `connection.shared`: a shared secret would otherwise land in a slot no
+    connection reads (or in another service's idea of "shared")."""
+    out = {}
+    for pid, adapter in by_id.items():
+        schema = adapter.manifest.get("config_schema") or []
+        names = frozenset(f["name"] for f in schema
+                          if isinstance(f, dict) and f.get("shared") and f.get("name"))
+        if not names:
+            continue
+        slot = getattr(getattr(adapter, "connection", None), "slot", None)
+        declared = (adapter.manifest.get("connection") or {}).get("shared")
+        if not slot or slot != declared:
+            raise RuntimeError(f"{pid}: shared config fields need a connection whose slot "
+                               f"matches connection.shared ({declared!r})")
+        out[pid] = (slot, names)
+    return out
+
+
+def _accepts(fn, name: str) -> bool:
+    """Does `fn` take keyword `name`? Connections that need no redirect URI
+    (a QR pairing, the echo test plugin) keep their one-argument start()."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
 
 
 def _bind(by_id: dict[str, PluginAdapter], store: SecretStore) -> None:

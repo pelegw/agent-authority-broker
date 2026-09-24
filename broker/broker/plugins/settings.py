@@ -5,6 +5,13 @@ Secret fields are validated for type and then handed back to the caller to
 relay to the plugin's `/configure`; they are never written to broker.db,
 never audited, never logged and never returned (the admin view shows only
 which secret fields exist).
+
+Shared fields (`shared: true`, e.g. the one Google OAuth client behind
+gmail, gcal and gdrive) belong to the connection's shared slot rather than
+to one plugin: the console renders them once per slot (one "Google
+account" form), a non-secret value is kept identical on every plugin of the
+slot (`shared_siblings` + plugins_admin.patch_config), and a secret one is
+relayed once and stored once, in that slot, by the plugin runtime.
 """
 
 from __future__ import annotations
@@ -86,8 +93,22 @@ def missing_required(manifest: Manifest, config: dict) -> list[str]:
 
 def schema_view(manifest: Manifest) -> list[dict]:
     return [{"name": f.name, "type": f.type, "secret": f.secret, "required": f.required,
-             "default": f.default, "help": f.help, "values": f.values}
+             "default": f.default, "help": f.help, "values": f.values, "shared": f.shared}
             for f in manifest.config_schema]
+
+
+def shared_names(manifest: Manifest) -> frozenset[str]:
+    """Config fields that belong to the manifest's shared connection slot."""
+    return frozenset(f.name for f in manifest.config_schema if f.shared)
+
+
+def shared_siblings(manifest: Manifest, manifests: dict[str, Manifest]) -> list[str]:
+    """Other plugin ids whose manifests use the same shared connection slot."""
+    slot = manifest.connection.shared
+    if not slot:
+        return []
+    return sorted(pid for pid, m in manifests.items()
+                  if pid != manifest.id and m.connection.shared == slot)
 
 
 # ---- the plugins row -------------------------------------------------------------

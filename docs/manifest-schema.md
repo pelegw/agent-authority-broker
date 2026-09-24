@@ -42,10 +42,18 @@ Worked examples: `broker/broker/targets/whatsapp/manifest.yaml` (full),
 
 ### `config_schema[]`
 
-`{name, type, secret, required, default, help, values}`; `type` is one of
+`{name, type, secret, shared, required, default, help, values}`; `type` is one of
 `string | text | integer | boolean | enum`. Rules: names match
 `^[a-z][a-z0-9_]*$` and are unique; `enum` needs `values` (and only `enum` has
 them); a `secret` field has no default; a default must match the type.
+
+`shared: true` marks a field that belongs to the connection's shared slot
+(`connection.shared`), not to this plugin alone: the Google OAuth client id
+and secret behind gmail, gcal and gdrive. The console shows such fields once
+per slot, the broker keeps a shared non-secret value identical on every
+plugin of the slot, and the plugin runtime stores a shared secret once, in
+that slot. A manifest with a shared field but no `connection.shared` is
+refused.
 
 ### `resources`
 

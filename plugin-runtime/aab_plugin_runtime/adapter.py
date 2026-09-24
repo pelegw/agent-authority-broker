@@ -30,7 +30,11 @@ class SecretReader(Protocol):
 
 @runtime_checkable
 class Connection(Protocol):
-    """The credential side of a plugin: connect flow and token minting."""
+    """The credential side of a plugin: connect flow and token minting.
+
+    `start` may also take a keyword `redirect_uri` (OAuth connections): the
+    runtime passes the broker-computed callback URL only to a start() that
+    accepts it."""
     def start(self, enabled_plugins: list[str]) -> dict: ...
     def finish(self, code: str | None, state: str | None,
                installation_id: str | None) -> dict: ...
