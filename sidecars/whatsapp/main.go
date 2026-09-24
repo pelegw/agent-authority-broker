@@ -1,6 +1,8 @@
 // The sidecar: logs into WhatsApp as a linked device (whatsmeow), archives
 // messages into /data/messages.db, and serves a tiny token-guarded HTTP API
 // for the whatsapp plugin. It holds no policy — it just speaks WhatsApp.
+// The session (whatsmeow's session.db, the account credential) lives in
+// /session, a volume no other container mounts.
 package main
 
 import (
@@ -9,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -37,6 +40,11 @@ func run() int {
 		return 1
 	}
 
+	if err := prepareSessionDir(cfg); err != nil {
+		log.Printf("session dir: %v", err)
+		return 1
+	}
+
 	st, err := store.Open(cfg.DataDir + "/messages.db")
 	if err != nil {
 		log.Printf("store: %v", err)
@@ -47,7 +55,7 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	client, err := wa.New(ctx, cfg.DataDir, cfg.DeviceName, st)
+	client, err := wa.New(ctx, cfg.SessionDir, cfg.DeviceName, st)
 	if err != nil {
 		log.Printf("whatsapp client: %v", err)
 		return 1
@@ -82,6 +90,22 @@ func run() int {
 	_ = srv.Shutdown(shutdownCtx) // no new sends or reads through the API
 	client.WM.Disconnect()        // no new events, so no new archive writes
 	return 0
+}
+
+// prepareSessionDir makes sure the directory for session.db exists, private
+// to the sidecar (0700 when created here; the image's /session is created
+// that way too), and says where the session and the archive live. It warns
+// when they share a directory: fine for a dev run, but in compose that would
+// put the session where plugin-whatsapp, which mounts DATA_DIR, can read it.
+func prepareSessionDir(cfg config.Config) error {
+	if err := os.MkdirAll(cfg.SessionDir, 0o700); err != nil {
+		return err
+	}
+	if filepath.Clean(cfg.SessionDir) == filepath.Clean(cfg.DataDir) {
+		log.Printf("warning: session.db shares DATA_DIR (%s); set SESSION_DIR to keep it private", cfg.DataDir)
+	}
+	log.Printf("session store in %s, archive in %s", cfg.SessionDir, cfg.DataDir)
+	return nil
 }
 
 // closeLogged runs a deferred Close and logs a failure; at shutdown there is

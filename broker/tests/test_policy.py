@@ -7,6 +7,7 @@ import yaml
 
 from broker import hidden
 from broker.plugins import settings
+from broker.plugins.adapter import AdapterError
 from broker.plugins.manifest import Manifest
 from broker.policy import enforced_where, evaluate
 
@@ -216,3 +217,127 @@ def test_without_authority_hidden_and_nonexistent_look_the_same(echo_local, make
     assert (hid.status, hid.message, hid.code) == (
         nonexistent.status, nonexistent.message, nonexistent.code) == (
         403, "not covered by any of your grants", "out_of_grant")
+
+
+# ---- connection state is told only to a key that could act -----------------------
+#
+# The rule table for steps 3-5 of policy.py's order. A key without authority
+# for the call gets the same 403 whether or not the plugin is connected (and
+# whether or not the selector is well-formed); a covered key learns that the
+# plugin is not connected (503). Columns: capabilities, action, params, then
+# the (status, code, reason) expected while connected and while not.
+
+R1 = [cap(["post_item"], selector={"room": ["r1"]})]
+POST_R1 = {"room": "r1", "text": "x"}
+OK = (200, "", "covered")
+NOT_CONNECTED = (503, "not_connected", "not_connected")
+OUT = (403, "out_of_grant", "out_of_grant")
+
+RULES = {
+    "covered": (R1, "post_item", POST_R1, OK, NOT_CONNECTED),
+    "outside the selector": (R1, "post_item", {"room": "r2", "text": "x"}, OUT, OUT),
+    "action not granted": ([cap(["list_items"])], "post_item", POST_R1, OUT, OUT),
+    "no grant at all": (None, "list_items", {}, OUT, OUT),
+    "no selector param, covered": ([cap(["list_items"])], "list_items", {}, OK, NOT_CONNECTED),
+    # A malformed selector is a 400 only for a key with authority for the
+    # action; any other key would otherwise learn that the plugin answered.
+    "malformed selector, no authority": ([cap(["list_items"])], "post_item",
+                                         {"room": "lobby", "text": "x"}, OUT, OUT),
+    "malformed selector, covered": ([cap(["post_item"])], "post_item",
+                                    {"room": "lobby", "text": "x"},
+                                    (400, "invalid_params", "invalid_resource"), NOT_CONNECTED),
+    "draft-only on a direct-only action": (
+        [cap(["touch_item"], mode="draft")], "touch_item", {"item_id": "i1"},
+        (403, "out_of_grant", "mode_unsupported"), (403, "out_of_grant", "mode_unsupported")),
+    # Not connected, the raw value is all there is: a non-canonical form
+    # matches nothing and gets the 403 (the fail-closed side).
+    "non-canonical selector": (R1, "post_item", {"room": " R1 ", "text": "x"}, OK, OUT),
+}
+
+
+@pytest.mark.parametrize("name", sorted(RULES))
+def test_connection_state_rule_table(echo_local, make_agent, name):
+    caps, action, params, when_connected, when_not = RULES[name]
+    a = make_agent(caps)
+    got = ev(a, action, dict(params))
+    assert (got.status, got.code, got.reason) == when_connected
+    enable_plugin(connected=False)
+    got = ev(a, action, dict(params))
+    assert (got.status, got.code, got.reason) == when_not
+    assert got.decision == "deny" and got.cap is None and got.scope is None
+
+
+def test_without_authority_connected_and_not_connected_look_the_same(echo_local, make_agent):
+    # Every field an agent sees is identical, not just the status.
+    a = make_agent([cap(["list_items"])])
+    calls = [("post_item", {"room": "r1", "text": "x"}),
+             ("post_item", {"room": "lobby", "text": "x"}),
+             ("delete_item", {"item_id": "i1"})]
+    connected = [ev(a, action, dict(params)) for action, params in calls]
+    enable_plugin(connected=False)
+    unconnected = [ev(a, action, dict(params)) for action, params in calls]
+    shown = lambda d: (d.status, d.message, d.code, d.hint)  # noqa: E731
+    assert [shown(d) for d in connected] == [shown(d) for d in unconnected]
+    assert {shown(d) for d in connected} == {
+        (403, "not covered by any of your grants", "out_of_grant", "request_permission")}
+
+
+def test_covered_hidden_resource_while_not_connected_is_503(echo_local, make_agent):
+    # Covered: the key could act here, so it hears "not connected" whether
+    # or not the resource is hidden; the hidden 404 needs a connected plugin.
+    a = make_agent([cap(["post_item"])])
+    hidden.add("echo", "room", "r2")
+    assert ev(a, "post_item", {"room": "r2", "text": "x"}).status == 404
+    enable_plugin(connected=False)
+    for room in ("r2", "r3"):
+        d = ev(a, "post_item", {"room": room, "text": "x"})
+        assert (d.status, d.code) == (503, "not_connected")
+
+
+def test_not_connected_coverage_never_allows(echo_local, make_agent):
+    # Coverage while not connected is computed as if the plugin were; that
+    # hypothetical set decides 503 versus 403 and nothing else.
+    a = make_agent([cap(["post_item", "list_items"])])
+    enable_plugin(connected=False)
+    for action, params in (("post_item", {"room": "r1", "text": "x"}), ("list_items", {})):
+        for kw in ({}, {"as_draft": action == "post_item"}, {"scheduled": action == "post_item"}):
+            d = ev(a, action, dict(params), **kw)
+            assert d.decision == "deny" and d.status == 503 and d.cap is None
+
+
+def test_a_disabled_plugin_is_404_even_if_it_is_not_connected(echo_local, make_agent):
+    a = make_agent([cap(["list_items"])])
+    enable_plugin(connected=False)
+    settings.set_enabled("echo", False)
+    assert (ev(a, "list_items", {}).status, ev(make_agent(), "list_items", {}).status) == (
+        404, 404)
+
+
+def _unreachable_normalize(echo_local, monkeypatch):
+    def down(kind, value):
+        raise AdapterError(503, "plugin service unreachable")
+    monkeypatch.setattr(echo_local.impl, "normalize", down)
+
+
+def test_unreachable_plugin_during_normalization_is_503_only_when_covered(
+        echo_local, make_agent, monkeypatch):
+    covered = make_agent(R1)
+    outside = make_agent([cap(["post_item"], selector={"room": ["r9"]})])
+    unrelated = make_agent([cap(["list_items"])])
+    _unreachable_normalize(echo_local, monkeypatch)
+    d = ev(covered, "post_item", dict(POST_R1))
+    assert (d.status, d.code, d.reason) == (503, "unavailable", "plugin_unavailable")
+    for a in (outside, unrelated):
+        d = ev(a, "post_item", dict(POST_R1))
+        assert (d.status, d.code, d.message) == (
+            403, "out_of_grant", "not covered by any of your grants")
+
+
+def test_no_authority_never_reaches_the_plugin(echo_local, make_agent, monkeypatch):
+    # The 403 for a key without authority for the action comes before the
+    # plugin is asked to normalize anything.
+    asked = []
+    monkeypatch.setattr(echo_local.impl, "normalize",
+                        lambda kind, value: asked.append((kind, value)) or value)
+    d = ev(make_agent([cap(["list_items"])]), "post_item", {"room": "r1", "text": "x"})
+    assert d.status == 403 and asked == []

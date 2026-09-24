@@ -8,9 +8,11 @@ name: aab
 # The broker holds NO target credential; each plugin service holds its own,
 # encrypted in its own secret volume under its own PLUGIN_SECRETS_KEY_<SERVICE>.
 #
-#   edge_net     edge <-> broker            (edge exists only in the public overlay)
-#   broker_net   broker <-> plugin services (the edge can never reach a plugin)
-#   wa_internal  plugin-whatsapp <-> whatsapp-sidecar (the broker can't reach the sidecar)
+#   edge_net      edge <-> broker            (edge exists only in the public overlay)
+#   net_whatsapp  broker <-> plugin-whatsapp  \  one network per plugin service: the
+#   net_github    broker <-> plugin-github     > edge can never reach a plugin, and no
+#   net_google    broker <-> plugin-google    /  plugin can reach another plugin
+#   wa_internal   plugin-whatsapp <-> whatsapp-sidecar (the broker can't reach the sidecar)
 #
 # Env split: there is deliberately no env_file. .env holds every value, but
 # each service below receives only the variables it names, so no container
@@ -24,8 +26,9 @@ name: aab
 
 services:
   # The only thing agents ever talk to: REST + MCP, owner console, grants,
-  # decision record, Telegram cards. Reaches plugins over broker_net with a
-  # per-service X-Plugin-Token; holds no target credential itself.
+  # decision record, Telegram cards. Reaches each plugin service over that
+  # service's own network with a per-service X-Plugin-Token; holds no target
+  # credential itself. The only container on every plugin network.
   broker:
     build:
       context: ./broker
@@ -36,7 +39,7 @@ services:
     restart: unless-stopped
     # No depends_on on the plugins: a plugin that is down shows as unhealthy
     # in the console; it does not keep the broker from starting.
-    networks: [edge_net, broker_net]
+    networks: [edge_net, net_whatsapp, net_github, net_google]
     ports:
       - "127.0.0.1:${BROKER_PORT:-8080}:8080"   # loopback only; the public overlay removes it
     volumes:
@@ -58,7 +61,7 @@ services:
       CF_ACCESS_ALLOWED_EMAILS: ${CF_ACCESS_ALLOWED_EMAILS:-}
       ALLOW_INSECURE_ADMIN: ${ALLOW_INSECURE_ADMIN:-false}
       MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-localhost:*,127.0.0.1:*}
-      # Where each plugin service answers (broker_net) and the token the
+      # Where each plugin service answers (on its own network) and the token the
       # broker presents to it. Keyed by service, not plugin id: plugin-google
       # hosts gmail, gcal and gdrive behind one URL and one token.
       PLUGIN_URL_WHATSAPP: http://plugin-whatsapp:8090
@@ -78,13 +81,14 @@ services:
         runtime: ./plugin-runtime   # the aab-plugin-runtime package
     restart: unless-stopped
     depends_on: [whatsapp-sidecar]
-    networks: [broker_net, wa_internal]
+    networks: [net_whatsapp, wa_internal]   # the broker, and its sidecar; no other plugin
     volumes:
-      # Sidecar-owned archive + session; read-only here. SQLite reads the WAL
-      # archive through the sidecar's -shm file. A clean sidecar stop removes
-      # -wal/-shm, so archive reads answer 503 until it is back; after a crash
-      # they return the last committed rows. Never stale or partial data
-      # (docs/plugins/whatsapp.md, "Read-only WAL archive").
+      # The sidecar-owned archive (messages.db only), read-only here. The
+      # WhatsApp session is in wa_session, which this container never mounts.
+      # SQLite reads the WAL archive through the sidecar's -shm file. A clean
+      # sidecar stop removes -wal/-shm, so archive reads answer 503 until it is
+      # back; after a crash they return the last committed rows. Never stale
+      # or partial data (docs/plugins/whatsapp.md, "Read-only WAL archive").
       - wa_data:/data:ro
       - whatsapp_secrets:/secrets   # this plugin's own encrypted secret store
     # Inside the container the names are generic (aab_plugin_runtime.from_env
@@ -100,17 +104,22 @@ services:
       SIDECAR_TOKEN: ${SIDECAR_TOKEN:?run 'python scripts/init_secrets.py' to create .env}
       MESSAGES_DB: /data/messages.db
 
-  # Speaks the WhatsApp multi-device protocol (whatsmeow). Holds the session.
-  # Deliberately "dumb": no policy, no agent-facing API. Only plugin-whatsapp
-  # can reach it (wa_internal); never published to the host.
+  # Speaks the WhatsApp multi-device protocol (whatsmeow). Holds the session,
+  # the one container that can read it. Deliberately "dumb": no policy, no
+  # agent-facing API. Only plugin-whatsapp can reach it (wa_internal); never
+  # published to the host.
   whatsapp-sidecar:
     build: ./sidecars/whatsapp
     restart: unless-stopped
     networks: [wa_internal]
     volumes:
-      - wa_data:/data   # read-write: session.db (plaintext, whatsmeow's store) + messages.db
+      - wa_data:/data           # read-write: messages.db, the archive plugin-whatsapp reads
+      - wa_session:/session     # read-write, this container only: session.db (plaintext, whatsmeow's store)
     environment:
       SIDECAR_TOKEN: ${SIDECAR_TOKEN:?run 'python scripts/init_secrets.py' to create .env}
+      # Where session.db lives: the wa_session mount above (the image sets the
+      # same default; set here so the session can never land in /data).
+      SESSION_DIR: /session
       # Shown in WhatsApp > Linked devices. Takes effect on the next (re-)link.
       DEVICE_NAME: ${DEVICE_NAME:-AAB}
       TZ: ${TZ:-UTC}
@@ -125,7 +134,7 @@ services:
       additional_contexts:
         runtime: ./plugin-runtime   # the aab-plugin-runtime package
     restart: unless-stopped
-    networks: [broker_net]
+    networks: [net_github]         # the broker only; no other plugin can reach it
     volumes:
       - github_secrets:/secrets     # this plugin's own encrypted secret store
       # Optional file-based alternative to pasting the App private key in the
@@ -161,7 +170,7 @@ services:
       additional_contexts:
         runtime: ./plugin-runtime   # the aab-plugin-runtime package
     restart: unless-stopped
-    networks: [broker_net]
+    networks: [net_google]         # the broker only; no other plugin can reach it
     volumes:
       - google_secrets:/secrets     # this plugin's own encrypted secret store
     # Generic names inside the container (aab_plugin_runtime.from_env). No
@@ -176,17 +185,25 @@ services:
 # None of these is `internal: true`: the broker (Telegram, Cloudflare JWKS),
 # the plugins (GitHub, Google) and the sidecar (WhatsApp) all need egress.
 # Isolation here is about which containers can reach which, not the internet.
+# One network per plugin service, not one shared by all of them: a
+# compromised plugin can reach the broker (whose API wants an agent key or
+# an owner credential, as from anywhere) and plugin-whatsapp its sidecar,
+# but never another plugin's API.
 networks:
   edge_net: {}
-  broker_net: {}
+  net_whatsapp: {}
+  net_github: {}
+  net_google: {}
   wa_internal: {}
 
 # Named volumes (not bind mounts): SQLite WAL locking is unreliable over
 # Docker Desktop's NTFS file sharing; named volumes live on ext4 inside WSL2.
-# Each secret volume is mounted by exactly one service.
+# Each secret volume is mounted by exactly one service, and so is wa_session
+# (the WhatsApp session, whatsapp-sidecar only).
 volumes:
   broker_data: {}
   wa_data: {}
+  wa_session: {}
   whatsapp_secrets: {}
   github_secrets: {}
   google_secrets: {}

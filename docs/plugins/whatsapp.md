@@ -6,9 +6,9 @@ The broker reaches it over the internal plugin API (`docs/plugin-api.md`) and
 never touches WhatsApp, the Go sidecar or the message archive itself.
 
 ```
-broker ──(broker_net, X-Plugin-Token)──> plugin-whatsapp ──(wa_internal, X-Internal-Token)──> whatsapp-sidecar ──> WhatsApp
-                                               │
-                                               └── reads /data/messages.db (wa_data, mounted read-only)
+broker ──(net_whatsapp, X-Plugin-Token)──> plugin-whatsapp ──(wa_internal, X-Internal-Token)──> whatsapp-sidecar ──> WhatsApp
+                                                 │
+                                                 └── reads /data/messages.db (wa_data, mounted read-only)
 ```
 
 - **Package:** `plugins/whatsapp/aab_plugin_whatsapp/`. It is served by
@@ -124,15 +124,18 @@ token, so the healthcheck only checks that the port accepts a TCP connection.
 ## Pairing (connect flow)
 
 The WhatsApp session belongs to the sidecar. It is whatsmeow's own
-`session.db` in `wa_data`, and it is the one credential not encrypted at rest
-(see `docs/architecture.md`). The plugin relays the pairing flow and never
-holds the session:
+`session.db` in `wa_session`, a volume only the sidecar mounts, and it is the
+one credential not encrypted at rest (see `docs/architecture.md`). This
+container mounts only the archive (`wa_data`, read-only), so it cannot read
+the session. The plugin relays the pairing flow and never holds the session:
 
 1. The owner enables the plugin in the console. With nothing to configure,
    enabling runs `/configure` (a no-op) and then reads `/status`. Before
    pairing, the plugin reports `connected: false` and `health: "waiting for
-   QR pairing"`. It is enabled but not usable, and every agent call returns
-   `503 not_connected`.
+   QR pairing"`. It is enabled but not usable: every agent call that a
+   key's grant covers returns `503 not_connected`, and any other call the
+   same `403 out_of_grant` it gets once paired (a key without authority
+   cannot tell whether WhatsApp is paired).
 2. The console calls `POST /v1/admin/plugins/whatsapp/connect/start` and gets
    `{"kind": "qr"}`. After pairing, the same call returns `{"kind": "none"}`.
 3. The console shows `GET /v1/admin/plugins/whatsapp/connect/qr.png`. The
@@ -213,8 +216,9 @@ up.
     results.
 
   The mount stays read-only on purpose. A read-write mount (WA_GW's setup,
-  with `mode=ro` in the URI) would give this container write access to
-  `session.db`, the WhatsApp session. `?immutable=1` would make SQLite
+  with `mode=ro` in the URI) would let this container write the archive the
+  sidecar owns (and, before the session moved to `wa_session`, the
+  WhatsApp session itself). `?immutable=1` would make SQLite
   ignore the WAL and the sidecar's locks, so reads could be stale or torn
   while the sidecar writes. A separate writable place for the `-shm` does
   not exist: SQLite keeps it beside the database, and it must be the very

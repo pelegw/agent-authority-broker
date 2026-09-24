@@ -44,12 +44,15 @@ func (c *Client) fatalReason() string {
 	return c.fatal
 }
 
-// New opens the whatsmeow session store (session.db holds the account
-// credentials — guard that file) and prepares a client. Call Run to connect.
+// New opens the whatsmeow session store (sessionDir/session.db holds the
+// account credentials — guard that file) and prepares a client. Call Run to
+// connect. sessionDir is its own volume in compose, mounted by the sidecar
+// alone; the archive (st) lives elsewhere, in the volume plugin-whatsapp
+// reads.
 //
 // deviceName is what shows up under WhatsApp > Linked devices. It is sent
 // during pairing, so changing it only takes effect on the next (re-)link.
-func New(ctx context.Context, dataDir, deviceName string, st *store.Store) (*Client, error) {
+func New(ctx context.Context, sessionDir, deviceName string, st *store.Store) (*Client, error) {
 	// Present a friendly name + a known platform type; otherwise WhatsApp
 	// labels the linked device "Other Device".
 	if deviceName != "" {
@@ -57,7 +60,7 @@ func New(ctx context.Context, dataDir, deviceName string, st *store.Store) (*Cli
 	}
 	wmstore.DeviceProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
 
-	dsn := "file:" + dataDir + "/session.db?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)"
+	dsn := "file:" + sessionDir + "/session.db?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)"
 	container, err := sqlstore.New(ctx, "sqlite3", dsn, waLog.Stdout("SessionDB", "WARN", true))
 	if err != nil {
 		return nil, fmt.Errorf("open session store: %w", err)

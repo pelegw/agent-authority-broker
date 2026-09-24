@@ -8,7 +8,7 @@ credential: the App's private key, the installation and every minted token
 live only here.
 
 ```
-broker ──(broker_net, X-Plugin-Token)──> plugin-github ──(HTTPS, per-call installation token)──> api.github.com
+broker ──(net_github, X-Plugin-Token)──> plugin-github ──(HTTPS, per-call installation token)──> api.github.com
                                                │
                                                └── /secrets (github_secrets): App key, installation id,
                                                    connect state, encrypted under PLUGIN_SECRETS_KEY
@@ -143,7 +143,8 @@ agent it had not.
    `/proc/self/environ`. A key set in `private_key_pem` wins over the file.
 2. **Enable** the plugin. Before installation it reports `connected: false`,
    `health: "App configured but not installed: use connect"`, and every
-   agent call is `503 not_connected`.
+   agent call that a key's grant covers is `503 not_connected` (any other
+   call is the usual `403 out_of_grant`).
 3. **Connect**: the console gets `{"kind": "install", "url":
    "https://github.com/apps/<slug>/installations/new?state=…", "state"}`.
    The `state` nonce is generated and stored by the plugin: single use,

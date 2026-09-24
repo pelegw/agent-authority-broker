@@ -6,24 +6,45 @@ decision before acting). Order, each step failing closed:
   1. the plugin is registered AND enabled, else a 404-shaped deny (a
      disabled plugin looks exactly like one that does not exist);
   2. the action exists (404) and its params validate (400); scheduling and
-     `as_draft` are only accepted where the manifest allows them (400);
-  3. the plugin is connected (else 503: nothing could be performed);
-  4. the selector param is normalized by the plugin;
-  5. the key's effective capabilities are computed live (with their grant
-     chains); the first capability covering target + action + resource
-     wins, direct before draft. A hidden or denied resource (or one under a
-     hidden folder) is then a 404 identical to missing. The hidden check
-     comes after coverage on purpose: without authority the answer is the
-     same 403 whether the resource is hidden or does not exist, so the
-     status can never reveal that a hidden resource exists. A capability only covers an action whose
-     modes include the mode it would run at (a draft-only authority cannot
-     reach an action that cannot be drafted), and a selector dimension only
-     restricts the actions in its `applies_to`. Dimensions the broker cannot
-     check itself (list reads, a room restriction on an item) become
-     `allow_only` in the CallScope for the plugin to enforce;
-  6. none covers: 403 `out_of_grant`. Capability mode draft, or the caller's
-     `as_draft`: draft. Otherwise allow, with `enforced_where` per bounding
-     dimension from the manifest and the connection's live mode.
+     `as_draft` are only accepted where the manifest allows them (400); a
+     selector param, when given, is a non-empty string (400). All of this
+     comes from the manifest alone, never from the plugin's state;
+  3. the plugin is connected. When it is not, nothing could be performed,
+     but only a key that could act here is told so: the key's capabilities
+     are computed as if the plugin were connected and checked against the
+     raw (trimmed) selector value, because normalizing needs the plugin.
+     Some capability covers: 503 `not_connected`. None does: the same 403
+     step 7 gives while connected, so a key without authority cannot tell
+     a paired plugin from an unpaired one. A selector sent in a
+     non-canonical form (" R1 ", a phone number for a JID) matches nothing
+     raw and gets the 403, the fail-closed side. Nothing computed in this
+     step can ever allow;
+  4. the key's effective capabilities are computed live (with their grant
+     chains). When none reaches the action at a mode it can run, whatever
+     the resource, the 403 comes now, before the plugin is asked anything:
+     a key without authority for the action never sees an answer that
+     depends on the plugin (a 400 for a malformed selector, a 503);
+  5. the selector param is normalized by the plugin (400 malformed, 404).
+     A plugin that cannot be reached is 503 `plugin_unavailable` under the
+     rule of step 3: only when some capability covers the raw value, else
+     the 403;
+  6. the first capability covering target + action + resource wins, direct
+     before draft. A hidden or denied resource (or one under a hidden
+     folder) is then a 404 identical to missing. The hidden check comes
+     after coverage on purpose: without authority the answer is the same
+     403 whether the resource is hidden or does not exist, so the status
+     can never reveal that a hidden resource exists. A capability only
+     covers an action whose modes include the mode it would run at (a
+     draft-only authority cannot reach an action that cannot be drafted),
+     and a selector dimension only restricts the actions in its
+     `applies_to`. Dimensions the broker cannot check itself (list reads, a
+     room restriction on an item) become `allow_only` in the CallScope for
+     the plugin to enforce;
+  7. none covers: 403 `out_of_grant` (reason `mode_unsupported` when the
+     only authority is draft-only over an action that cannot be drafted).
+     Capability mode draft, or the caller's `as_draft`: draft. Otherwise
+     allow, with `enforced_where` per bounding dimension from the manifest
+     and the connection's live mode.
 """
 
 from __future__ import annotations
@@ -157,68 +178,143 @@ def evaluate(auth, target: str, action: str, params: Any, now: int, *,
     if as_draft and "draft" not in act.effective_modes:
         return _deny(400, "draft_unsupported", "this action cannot be drafted",
                      "draft_unsupported", side_effect=act.side_effect)
+    raw = _raw_selector(act, clean)
+    if isinstance(raw, Decision):
+        return raw
+
     states = reg.plugin_states()
+    lattice = reg.lattice()
+    dims = selector_dims(manifest, action)
     if not any(m.id == target and connected for m, _, connected in states):
-        return _deny(503, "not_connected", "target is not connected", "not_connected",
-                     side_effect=act.side_effect)
+        return _unconnected(auth, target, action, act, raw, clean, now, states, lattice, dims,
+                            as_draft)
+
+    # Connected: from here on the live plugin states decide.
+    candidates = _candidates(auth, target, action, now, states, lattice)
+    # Authority for the action at all, whatever the resource ("" skips every
+    # selector), before the plugin is asked to normalize anything.
+    reach = _first_cover(candidates, act, "", dims, lattice, as_draft)
+    if isinstance(reach, str):
+        return _uncovered(reach, act, raw, clean)
 
     resource_id = ""
-    if act.selector_param and act.selector_param in clean:
+    if raw:
         normalized = _normalize(manifest, act, adapter, clean[act.selector_param])
         if isinstance(normalized, Decision):
+            if normalized.reason == "plugin_unavailable":
+                return _only_if_covered(normalized, candidates, act, raw, clean, dims, lattice,
+                                        as_draft)
             return normalized
         resource_id = clean[act.selector_param] = normalized
 
-    lattice = reg.lattice()
     deny = deny_sets(auth, target)
     hidden_resource = bool(resource_id and act.resource and is_denied(
         deny.get(act.resource, set()), resource_id, act.resource, lattice.ancestors))
 
-    dims = selector_dims(manifest, action)
-    candidates = [(c, chain) for c, chain in effective_with_chains(auth, now, states, lattice)
-                  if c.target == target and action in c.actions]
-    # Direct authority first: the least interrupting capability that covers wins.
-    candidates.sort(key=lambda cc: (-MODE_RANK[cc[0].mode], cc[0]))
+    found = _first_cover(candidates, act, resource_id, dims, lattice, as_draft)
+    if isinstance(found, str):
+        return _uncovered(found, act, resource_id, clean)
+    cap, chain, mode = found
+    if hidden_resource:
+        # Checked only once some capability covers the call: a key with no
+        # authority here gets the same 403 for a hidden resource as for a
+        # nonexistent one, and a key with authority the same 404.
+        return _deny(404, "hidden", NOT_FOUND, "not_found", resource=resource_id,
+                     params=clean, side_effect=act.side_effect)
+    scope = CallScope(
+        request_id=request_id,
+        visibility=_visibility(manifest, deny, cap, dims),
+        constraints={k: v for k, v in cap.constraints.items()
+                     if _constraint_applies(manifest, k, action)},
+        credential=_credential(manifest, act, cap, dims))
+    return Decision(
+        "draft" if mode == "draft" else "allow", 202 if mode == "draft" else 200,
+        "as_draft" if as_draft else ("draft_mode" if mode == "draft" else "covered"),
+        cap=cap, grant_chain_ids=chain, resource=resource_id,
+        enforced_where=enforced_where(manifest, action, reg.last_health(target)),
+        scope=scope, params=clean, side_effect=act.side_effect)
+
+
+def _raw_selector(act: Action, clean: dict) -> str | Decision:
+    """The selector value as sent, trimmed ("" when the action has none or
+    the call omits it). A value that is not a non-empty string is a 400 here,
+    from the params alone, before the plugin's state matters."""
+    if not act.selector_param or act.selector_param not in clean:
+        return ""
+    raw = clean[act.selector_param]
+    if not isinstance(raw, str) or not raw.strip():
+        return _deny(400, "invalid_resource", f"{act.selector_param} must be a non-empty string",
+                     "invalid_params", side_effect=act.side_effect)
+    return raw.strip()
+
+
+def _candidates(auth, target: str, action: str, now: int, states, lattice) -> list:
+    """The key's effective capabilities naming this target and action, with
+    their grant chains, direct before draft (the least interrupting
+    capability that covers wins)."""
+    out = [(c, chain) for c, chain in effective_with_chains(auth, now, states, lattice)
+           if c.target == target and action in c.actions]
+    out.sort(key=lambda cc: (-MODE_RANK[cc[0].mode], cc[0]))
+    return out
+
+
+def _first_cover(candidates: list, act: Action, resource_id: str, dims: dict[str, str],
+                 lattice, as_draft: bool) -> tuple[Capability, tuple[str, ...], str] | str:
+    """The first capability covering the call as (cap, chain, run mode), or
+    why none does: "mode_unsupported" when some capability named the action
+    but only at a mode it cannot run, else "out_of_grant"."""
     mode_blocked = False
     for cap, chain in candidates:
         mode = run_mode(cap.mode, act, as_draft)
         if mode is None:
             mode_blocked = True
             continue
-        if not _covers(cap, act, resource_id, dims, lattice):
-            continue
-        if hidden_resource:
-            # Checked only once some capability covers the call: a key with
-            # no authority here gets the same 403 for a hidden resource as
-            # for a nonexistent one, and a key with authority the same 404.
-            return _deny(404, "hidden", NOT_FOUND, "not_found", resource=resource_id,
-                         params=clean, side_effect=act.side_effect)
-        scope = CallScope(
-            request_id=request_id,
-            visibility=_visibility(manifest, deny, cap, dims),
-            constraints={k: v for k, v in cap.constraints.items()
-                         if _constraint_applies(manifest, k, action)},
-            credential=_credential(manifest, act, cap, dims))
-        return Decision(
-            "draft" if mode == "draft" else "allow", 202 if mode == "draft" else 200,
-            "as_draft" if as_draft else ("draft_mode" if mode == "draft" else "covered"),
-            cap=cap, grant_chain_ids=chain, resource=resource_id,
-            enforced_where=enforced_where(manifest, action, reg.last_health(target)),
-            scope=scope, params=clean, side_effect=act.side_effect)
-    if mode_blocked:
-        return _deny(403, "mode_unsupported",
-                     "your authority for this action is draft-only, and it cannot be drafted",
-                     "out_of_grant", hint="request_permission", resource=resource_id,
-                     params=clean, side_effect=act.side_effect)
-    return _deny(403, "out_of_grant", "not covered by any of your grants", "out_of_grant",
-                 hint="request_permission", resource=resource_id, params=clean,
-                 side_effect=act.side_effect)
+        if _covers(cap, act, resource_id, dims, lattice):
+            return cap, chain, mode
+    return "mode_unsupported" if mode_blocked else "out_of_grant"
 
 
-def _normalize(manifest: Manifest, act: Action, adapter, raw: Any) -> str | Decision:
-    if not isinstance(raw, str) or not raw.strip():
-        return _deny(400, "invalid_resource", f"{act.selector_param} must be a non-empty string",
-                     "invalid_params", side_effect=act.side_effect)
+def _uncovered(reason: str, act: Action, resource_id: str, clean: dict) -> Decision:
+    """The one 403 for "your authority does not reach this", whichever step
+    found it, so its text never says which step that was."""
+    message = ("your authority for this action is draft-only, and it cannot be drafted"
+               if reason == "mode_unsupported" else "not covered by any of your grants")
+    return _deny(403, reason, message, "out_of_grant", hint="request_permission",
+                 resource=resource_id, params=clean, side_effect=act.side_effect)
+
+
+def _only_if_covered(unavailable: Decision, candidates: list, act: Action, raw: str,
+                     clean: dict, dims: dict[str, str], lattice, as_draft: bool) -> Decision:
+    """`unavailable` (a 503) for a key some capability covers on the raw
+    selector value; the 403 for everyone else. Either way a deny."""
+    found = _first_cover(candidates, act, raw, dims, lattice, as_draft)
+    if isinstance(found, str):
+        return _uncovered(found, act, raw, clean)
+    return unavailable
+
+
+def _unconnected(auth, target: str, action: str, act: Action, raw: str, clean: dict,
+                 now: int, states, lattice, dims: dict[str, str], as_draft: bool) -> Decision:
+    """The answer while the target is not connected: always a deny.
+
+    The owner ceiling holds only connected plugins, so the key's live
+    effective set is empty here and would give every key the same 403,
+    including one that could act the moment the phone is paired. Coverage is
+    therefore computed as if the target were connected, and used for one
+    thing only: choosing between 503 `not_connected` (a key that could act
+    here) and the 403 (any other key). The capabilities it yields never
+    leave this function, so they can never reach an allow."""
+    as_if = [(m, enabled, bool(connected) or m.id == target) for m, enabled, connected in states]
+    candidates = _candidates(auth, target, action, now, as_if, lattice)
+    return _only_if_covered(
+        _deny(503, "not_connected", "target is not connected", "not_connected",
+              side_effect=act.side_effect),
+        candidates, act, raw, clean, dims, lattice, as_draft)
+
+
+def _normalize(manifest: Manifest, act: Action, adapter, raw: str) -> str | Decision:
+    """The plugin's canonical id for a selector value that `_raw_selector`
+    already checked is a non-empty string."""
     res = manifest.resources.get(act.resource or "")
     if res is None or not res.normalize:
         return raw.strip()

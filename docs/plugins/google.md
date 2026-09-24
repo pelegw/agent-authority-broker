@@ -6,7 +6,7 @@ reaches the service over the internal plugin API (`docs/plugin-api.md`) and
 never holds a Google credential of any kind.
 
 ```
-broker ──(broker_net, X-Plugin-Token, X-Plugin-Id: gmail|gcal|gdrive)──> plugin-google ──(HTTPS)──> oauth2.googleapis.com
+broker ──(net_google, X-Plugin-Token, X-Plugin-Id: gmail|gcal|gdrive)──> plugin-google ──(HTTPS)──> oauth2.googleapis.com
                                                                               │                     gmail / calendar / drive APIs
                                                                               └── /secrets (google_secrets): client id + secret,
                                                                                   refresh token, connect state (encrypted)

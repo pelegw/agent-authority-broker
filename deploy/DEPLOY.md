@@ -23,7 +23,8 @@ to boot** in public mode if Access isn't configured. Agent routes are not
 behind Access: agents authenticate with their `aab_` key.
 
 Inside the host, the edge (Caddy) sits on `edge_net` with the broker only; the
-plugin containers sit on `broker_net` with the broker only; the WhatsApp
+plugin containers each sit on their own network with the broker only
+(`net_whatsapp`, `net_github`, `net_google`: no plugin can reach another); the WhatsApp
 sidecar sits on `wa_internal` with `plugin-whatsapp` only. The broker holds no
 target credential: each plugin container keeps its own, encrypted in its own
 volume.
@@ -206,7 +207,8 @@ verification.
   | What | Holds | Needs, to be useful |
   |---|---|---|
   | `broker_data` volume | owner account, keys, grants, decision record, console settings, Telegram bot token (encrypted) | `DECISION_SIGNING_KEY` (old rows verify only under it), `BROKER_SECRETS_KEY` (else re-enter the Telegram token) |
-  | `wa_data` volume | WhatsApp session (**plaintext**: a backup is the live account) + message archive | nothing: treat the backup itself as a credential |
+  | `wa_session` volume | WhatsApp session (**plaintext**: a backup is the live account) | nothing: treat the backup itself as a credential |
+  | `wa_data` volume | WhatsApp message archive | nothing (message content: keep it as private as the account) |
   | `whatsapp_secrets` volume | nothing today (plugin-whatsapp has no config to store) | `PLUGIN_SECRETS_KEY_WHATSAPP` |
   | `github_secrets` volume | GitHub plugin config (App id and slug, the key if pasted, the PAT if used) and the installation (encrypted) | `PLUGIN_SECRETS_KEY_GITHUB` |
   | `google_secrets` volume | Google OAuth client id and secret, refresh token (encrypted) | `PLUGIN_SECRETS_KEY_GOOGLE` |
@@ -222,7 +224,7 @@ verification.
   C="docker compose -f docker-compose.yml -f docker-compose.public.yml"
   mkdir -p ~/aab-backup && chmod 700 ~/aab-backup
   $C stop
-  for v in broker_data wa_data whatsapp_secrets github_secrets google_secrets; do
+  for v in broker_data wa_session wa_data whatsapp_secrets github_secrets google_secrets; do
     docker run --rm -v aab_$v:/v:ro -v ~/aab-backup:/b alpine tar czf /b/$v.tgz -C /v .
   done
   $C start
