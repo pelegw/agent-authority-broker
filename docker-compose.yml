@@ -81,8 +81,10 @@ services:
     networks: [broker_net, wa_internal]
     volumes:
       # Sidecar-owned archive + session; read-only here. SQLite reads the WAL
-      # archive through the sidecar's -shm file, so archive reads answer 503
-      # while the sidecar is down (never stale or partial data).
+      # archive through the sidecar's -shm file. A clean sidecar stop removes
+      # -wal/-shm, so archive reads answer 503 until it is back; after a crash
+      # they return the last committed rows. Never stale or partial data
+      # (docs/plugins/whatsapp.md, "Read-only WAL archive").
       - wa_data:/data:ro
       - whatsapp_secrets:/secrets   # this plugin's own encrypted secret store
     # Inside the container the names are generic (aab_plugin_runtime.from_env

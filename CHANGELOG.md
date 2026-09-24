@@ -3,6 +3,34 @@
 All notable changes to this project are documented here. The version number
 lives only in `VERSION`.
 
+## [Unreleased]
+
+### Fixed
+- The WhatsApp sidecar never closed its databases on a graceful stop: its
+  shutdown ended in `os.Exit(0)`, which skips deferred calls, so
+  `messages.db` was not checkpointed and its `-wal` and `-shm` stayed
+  behind. plugin-whatsapp then kept reading through them instead of
+  answering the documented `503` while the sidecar was stopped. `main` now
+  returns an exit code from `run()`, and its defers close `session.db`
+  (new `wa.Client.Close`) and then `messages.db`. Tests cover the store's
+  final checkpoint and file removal, the session store's close, and that
+  `run()` returns instead of exiting.
+
+### Documentation
+- 0.2.0 verified under Docker (Engine 29.7.2, Compose v5.5.0): all five
+  images build (broker 269 MB, each Python plugin about 257 MB, sidecar
+  55 MB), every container runs as uid 10001, only the broker is published,
+  the env split and network isolation match `docs/deployment.md`, setup
+  and login, plugin discovery and rediscovery, WhatsApp QR connect, the
+  credential-less GitHub and Google refusals, MCP, the skill doc and the
+  decision chain all behave as documented. The read-only WAL archive was
+  exercised with a stand-in writer (1,000 plugin reads against 3,000
+  commits and several checkpoints, all 200 and never going backwards),
+  then with a clean stop (503) and a SIGKILL (last committed rows).
+  `docs/deployment.md` > Verify after `docker compose up` now lists the
+  exact expected outputs, and `docs/plugins/whatsapp.md` records why the
+  mount stays read-only (no read-write mount, no `immutable=1`).
+
 ## [0.2.0] - 2026-09-24
 
 First release as the Agent Authority Broker, the successor of WA_GW 0.1.0.
@@ -404,9 +432,11 @@ decision is recorded in a hash-chained log.
   each.
 
 ### Known limitations
-- Not yet verified with Docker running: the image builds, and
-  plugin-whatsapp reading the sidecar's WAL-mode archive through its
-  read-only mount (`docs/deployment.md` lists the checks).
+- Verified under Docker after the release, except with a paired phone:
+  pairing and reads of a live, paired archive were not exercised (the
+  read-only WAL path was, with a stand-in writer). The same run found that
+  a stopped sidecar left `-wal` and `-shm` behind, so archive reads did not
+  answer `503` as documented; fixed under [Unreleased].
 - Google downscoped refresh is not yet verified against the real token
   endpoint; if Google ignores the requested subset, the `scopes` narrowing
   moves to `proxy`.

@@ -791,10 +791,10 @@ What remains before the tag:
 
 | Item | Target | Status |
 |---|---|---|
-| No CI job builds an image (the `compose` job runs `docker compose config` only); the broker, sidecar, `plugin-whatsapp`, `plugin-github` and `plugin-google` images have not been verified by a build | `docker compose build` and a local run verified (`docs/deployment.md` > Verify after `docker compose up`) | Unverified |
-| `plugin-whatsapp` reads the sidecar's WAL-mode `messages.db` from a read-only mount (`mode=ro`, `query_only`, through the sidecar's `-shm` file); no test covers that across two containers | Verified in a real compose run, including the 503 while the sidecar is stopped | Unverified |
+| No CI job builds an image (the `compose` job runs `docker compose config` only) | `docker compose build` and a local run verified (`docs/deployment.md` > Verify after `docker compose up`) | Verified after the tag: all five images build and the checklist passes; CI still builds no image |
+| `plugin-whatsapp` reads the sidecar's WAL-mode `messages.db` from a read-only mount (`mode=ro`, `query_only`, through the sidecar's `-shm` file); no test covers that across two containers | Verified in a real compose run, including the 503 while the sidecar is stopped | Verified after the tag with a stand-in writer (no paired phone). The 503 needed a sidecar fix: it never closed the archive on SIGTERM |
 | Google downscoped refresh (`scope=<subset>` on the refresh request) is exercised only against the tests' fake token endpoint | Verified once against Google's real endpoint; if Google ignores the subset, the manifests' `scopes` narrowing moves to `proxy` (section 4.2) | Unverified |
-| An intermittent SQLite failure seen in test runs (the "SQLite flake") | Fixed, with a regression test | In progress |
+| An intermittent SQLite failure seen in test runs (the "SQLite flake") | Fixed, with a regression test | Fixed (CHANGELOG 0.2.0) |
 
 ---
 
