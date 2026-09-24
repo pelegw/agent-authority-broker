@@ -199,6 +199,10 @@ ENV_ONLY: tuple[dict, ...] = (
      "category": "exposure",
      "why": "The base Host allowlist for /mcp. The console can add hosts "
             "(mcp_allowed_hosts_extra) but never remove these."},
+    {"name": "SITE_DOMAIN", "field": None, "secret": False, "category": "exposure",
+     "why": "Fixes the host of the OAuth redirect URI in public mode "
+            "(https://<SITE_DOMAIN>/oauth/callback/<service>); a session must not be "
+            "able to send an authorization code to another host."},
     {"name": "BROKER_DB", "field": "broker_db", "secret": False, "category": "deployment",
      "why": "Where the database lives; it has to be known before the database can be read."},
     {"name": "PLUGIN_URL_<SERVICE>, PLUGIN_TOKEN_<SERVICE>", "field": None, "secret": True,
@@ -208,7 +212,7 @@ ENV_ONLY: tuple[dict, ...] = (
     {"name": "PLUGIN_SECRETS_KEY_<SERVICE>, SIDECAR_TOKEN", "field": None, "secret": True,
      "category": "bootstrap",
      "why": "Held by the plugin containers only; the broker never receives them."},
-    {"name": "SITE_DOMAIN, BROKER_PORT, TZ, DEVICE_NAME, GITHUB_APP_KEY_DIR", "field": None,
+    {"name": "BROKER_PORT, TZ, DEVICE_NAME, GITHUB_APP_KEY_DIR", "field": None,
      "secret": False, "category": "compose",
      "why": "Read by Docker Compose, the edge or other containers, not by the broker."},
 )

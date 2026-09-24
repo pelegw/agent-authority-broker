@@ -122,6 +122,16 @@ def test_describe_never_contains_secret_values(env, monkeypatch):
         assert rows[name]["why"], name
 
 
+def test_site_domain_is_an_exposure_setting(env):
+    # The broker reads SITE_DOMAIN itself (services/plugins_admin.py) to build
+    # the public OAuth redirect URI, so it is exposure, not compose-only.
+    rows = {e["name"]: e for e in rs.describe()["env_only"]}
+    assert rows["SITE_DOMAIN"]["category"] == "exposure"
+    assert "OAuth" in rows["SITE_DOMAIN"]["why"]
+    assert not any("SITE_DOMAIN" in e["name"] for e in rs.ENV_ONLY
+                   if e["category"] == "compose")
+
+
 def test_describe_reports_the_source_of_each_value(env, monkeypatch):
     monkeypatch.setenv("DRAFT_TTL_HOURS", "12")
     get_settings.cache_clear()
