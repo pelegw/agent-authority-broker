@@ -85,9 +85,11 @@ Sessions are managed the same way: `GET /v1/admin/sessions` and
 
 ## The guard: `require_admin`
 
-Every route in `routers/admin.py` (all of `/v1/admin/*` and `/auth/me`) sits
-behind a router-level `require_admin` dependency, and a test asserts that every
-admin path the app serves is on that router. The guard:
+Every admin route (all of `/v1/admin/*` and `/auth/me`) is on one of the
+routers listed in `main.ADMIN_ROUTERS` (`routers/admin.py`, `admin_plugins.py`,
+`admin_keys.py`, `admin_ops.py`, `admin_telegram.py`, `admin_settings.py`),
+each behind a router-level `require_admin` dependency, and a test asserts that
+every admin path the app serves is on one of those routers. The guard:
 
 1. When Cloudflare Access is enabled, requires a valid Access JWT first
    (**403**, reason not echoed). Checked before any credential lookup, so a
@@ -119,11 +121,42 @@ the same rule when it carries a cookie.
 
 In public mode the broker refuses to boot unless Access is enabled (or
 `ALLOW_INSECURE_ADMIN=true`). With Access enabled, the Access JWT is required on
-`/auth/*` and on every admin route, in addition to the owner credential, so a
-stolen session cookie or admin token is useless without the SSO identity too.
-Point the Access application at `/admin*`, `/auth*` and `/v1/admin*`
-(`deploy/DEPLOY.md`). The CLI passes `CF_ACCESS_CLIENT_ID` /
-`CF_ACCESS_CLIENT_SECRET` (an Access service token) when set.
+the console page (`/admin`), on `/auth/*`, on every admin route and on the
+OAuth callback page (`/oauth/callback/{service}`), in addition to the owner
+credential wherever one applies, so a stolen session cookie or admin token is
+useless without the SSO identity too. Point the Access application at
+`/admin*`, `/auth*`, `/v1/admin*` and `/oauth*` (`deploy/DEPLOY.md`). Without
+`/oauth*` Cloudflare adds no Access JWT to the callback page, the broker
+refuses it, and connecting Google or GitHub fails in public mode. The CLI
+passes `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` (an Access service
+token) when set.
+
+## The OAuth callback page
+
+`GET /oauth/callback/{service}` (`routers/oauth.py`) is where Google and GitHub
+send the owner back after consent or an App installation. It is served
+**without** an owner credential, and has to be: the owner arrives by a
+cross-site redirect from google.com or github.com, and because the
+`aab_session` cookie is `SameSite=Strict` the browser does not send it on that
+navigation. An owner-guarded page would answer 401 and a connect could never
+finish. Cloudflare Access still applies in public mode, as for the console
+page and `/auth/*`.
+
+The page is safe without a credential because it holds nothing and can do
+nothing by itself. The server fills in only the validated service name and a
+CSP nonce, never anything from the URL. Its script strips `code`, `state` and
+`installation_id` from the address bar and history, then POSTs them to
+`/v1/admin/plugins/{service}/connect/finish`. That POST is same-origin, so the
+Strict cookie **is** sent, and it keeps the full guard: `require_admin` and the
+CSRF header. Without a live session it is a 401, and the page asks the owner
+to log in to the console in another tab and retry, keeping the code in memory
+only. The plugin checks `state` (single use, 10 minutes), so a code planted by
+someone else cannot complete a connection. The page is left out of the
+OpenAPI schema and sent with `Cache-Control: no-store`,
+`Referrer-Policy: no-referrer`, `frame-ancestors 'none'` and a nonce CSP. The
+authorization code does appear once in the broker's access log line for the
+GET (uvicorn logs the query string); it is single-use, expires within minutes
+and is useless without the client secret, which only the plugin holds.
 
 ## Later additions
 
