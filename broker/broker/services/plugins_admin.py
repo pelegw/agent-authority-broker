@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from ..audit import audit
 from ..errors import PolicyError
-from ..plugins import settings
+from ..plugins import manifest_view, settings
 from ..plugins.adapter import AdapterError
 from ..plugins.registry import get_registry, plugin_rows
 
@@ -51,6 +51,8 @@ def view(plugin_id: str) -> dict:
         "config_schema": settings.schema_view(m),
         "connection": {"kind": m.connection.kind, "enforcement": m.connection.enforcement},
         "actions": sorted(m.action_names),
+        # What the console derives its editors and approval cards from.
+        "manifest": manifest_view.admin_view(m),
     }
 
 
