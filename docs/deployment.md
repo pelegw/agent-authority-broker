@@ -7,14 +7,13 @@ secret. The step-by-step public runbook (EC2, Cloudflare) is
 `docs/architecture.md` section 2. What lives in files versus the console, and
 every console setting with its bounds, is `docs/configuration.md`.
 
-> Status (0.2.0): `plugin-whatsapp` (plugin `whatsapp`) and `plugin-google`
-> (plugins `gmail`, `gcal`, `gdrive`) are real plugin services.
-> `plugin-github` is a real service once the GitHub plugin (phase 6) merges;
-> until then it is a placeholder image that only idles, and GitHub does not
-> appear in the console. The topology, networks, volumes and env split below
-> are final. The images and the read-only `wa_data` mount have not yet been
-> verified by a real build and run: do the checks in
-> [Verify after `docker compose up`](#verify-after-docker-compose-up).
+> Status (0.2.0): all three plugin services are real: `plugin-whatsapp`
+> (plugin `whatsapp`), `plugin-github` (plugin `github`) and `plugin-google`
+> (plugins `gmail`, `gcal`, `gdrive`). The Telegram bot token and every
+> plugin credential are entered in the console. The topology, networks,
+> volumes and env split below are final. The images and the read-only
+> `wa_data` mount have not yet been verified by a real build and run: do the
+> checks in [Verify after `docker compose up`](#verify-after-docker-compose-up).
 
 ## Containers, networks, volumes
 
@@ -42,8 +41,8 @@ every console setting with its bounds, is `docs/configuration.md`.
   vendored copies and pins every manifest a service offers against them.
 - Each plugin image runs one uvicorn worker on `:8090` with a TCP
   healthcheck (every plugin API route needs the token, so the check only
-  opens the port; the `plugin-github` placeholder has none); the broker's
-  healthcheck calls `/health`. The sidecar has no Docker healthcheck.
+  opens the port); the broker's healthcheck calls `/health`. The sidecar
+  has no Docker healthcheck.
 
 ## Local run
 
@@ -96,9 +95,8 @@ after any change to the images or compose files. In public mode add
 and use `https://<SITE_DOMAIN>` instead of `http://127.0.0.1:8080`.
 
 1. **Containers.** `docker compose ps`: every service is running, and
-   `broker`, `plugin-whatsapp` and `plugin-google` turn `healthy` within a
-   minute. The sidecar has no healthcheck; the `plugin-github`
-   placeholder only idles until the GitHub plugin merges.
+   `broker`, `plugin-whatsapp`, `plugin-github` and `plugin-google` turn
+   `healthy` within a minute. The sidecar has no healthcheck.
    `docker compose logs broker` shows no boot refusal.
 2. **Published ports.** `docker compose ps` shows a host port only for the
    broker (`127.0.0.1:8080->8080/tcp`), or in public mode only for `edge`
@@ -110,8 +108,8 @@ and use `https://<SITE_DOMAIN>` instead of `http://127.0.0.1:8080`.
    (`GET /auth/status` answers `"setup_completed": false`), then the login
    page.
 5. **Plugin health cards.** After logging in, the Overview has one card per
-   discovered plugin: `whatsapp`, `gmail`, `gcal` and `gdrive` (`github`
-   once its plugin merges), all disabled on first boot. A service that was
+   discovered plugin: `whatsapp`, `github`, `gmail`, `gcal` and `gdrive`,
+   all disabled on first boot. A service that was
    down at boot is not listed yet: the broker retries discovery at most every
    30 seconds and logs that the service is not reachable yet. If one stays
    missing, the container is down or its token does not match the broker's
@@ -163,10 +161,9 @@ plugin container the names are generic: `aab_plugin_runtime.from_env` reads
 maps the service's own values onto them (`PLUGIN_TOKEN:
 ${PLUGIN_TOKEN_WHATSAPP}`, `PLUGIN_SECRETS_KEY:
 ${PLUGIN_SECRETS_KEY_WHATSAPP}`, `PLUGIN_SECRETS_DIR: /secrets`), so the
-image does not depend on which service it runs as. `plugin-whatsapp` and
-`plugin-google` are wired this way; `plugin-github` is wired the same way
-when the GitHub plugin merges (until then its placeholder image reads
-nothing).
+image does not depend on which service it runs as. All three plugin
+services (`plugin-whatsapp`, `plugin-github`, `plugin-google`) are wired
+this way.
 
 Third-party credentials are not in the env split at all (`docs/configuration.md`):
 the owner enters them in the console. The Telegram bot token is stored in

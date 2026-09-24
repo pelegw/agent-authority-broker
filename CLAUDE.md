@@ -96,7 +96,7 @@ session's attribution trailers.
 - [x] 1. Identity: owner setup/login/sessions, admin tokens, `require_admin` -> `AdminContext`
 - [x] 2. Authority core: capabilities, grants, `narrow()`, roles, `aab_` keys, hypothesis suite
 - [x] 3. Engine: plugin runtime + registry, policy, decisions, ledger, actions, REST, MCP (parity-tested), Telegram approvals, console-managed settings, per-plugin containers + env split
-- [ ] 4. WhatsApp plugin service (done) + admin console (pass 1 done; pass 2 — channels, settings, delegations — in progress)
+- [x] 4. WhatsApp plugin service + admin console (setup/login, plugins with connect panels and the shared Google account card, keys with the capability editor, requests, scheduled, hidden, decisions, delegations tree, channels, settings, account)
 - [x] 5. Delegation + generated skill doc (CI drift job is real) + draft-mode default for agent requests
 - [x] 6. GitHub plugin service (App installation tokens per call; PAT fallback reported as proxy)
 - [x] 7. Google plugin service (Gmail, Calendar, Drive over one OAuth connection) + `docs/platform-thesis.md`
