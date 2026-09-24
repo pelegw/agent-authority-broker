@@ -221,6 +221,31 @@ def test_connect_start_and_finish_with_the_computed_redirect_uri(gg, client, adm
         assert secret not in text                          # relayed once, recorded nowhere
 
 
+def test_state_round_trip_through_the_callback_page(gg, client, admin_headers, owner):
+    """The owner's browser lands on the callback page with no session cookie
+    (the provider's redirect is cross-site), the page's POST is refused until
+    the owner logs in, and the same code + state then finish the connect."""
+    from tests.conftest import CSRF_HEADERS
+    configure_and_enable(client, admin_headers)
+    gg.google.expected_redirect = REDIRECT
+    start = client.post("/v1/admin/plugins/google/connect/start",
+                        headers={**admin_headers, "Host": LOCAL_HOST})
+    state = parse_qs(urlsplit(start.json()["url"]).query)["state"][0]
+    page = client.get(f"/oauth/callback/google?code={fg.AUTH_CODE}&state={state}")
+    assert page.status_code == 200 and "history.replaceState" in page.text
+    finish = "/v1/admin/plugins/google/connect/finish"
+    body = {"code": fg.AUTH_CODE, "state": state}            # what the page POSTs
+    assert client.post(finish, json=body, headers=CSRF_HEADERS).status_code == 401
+    assert client.post("/auth/login", json={"username": owner.username,
+                                            "password": owner.password}).status_code == 200
+    assert client.post(finish, json=body).status_code == 403  # no CSRF header
+    # Neither refusal reached the plugin, so the single-use state is intact.
+    r = client.post(finish, json=body, headers=CSRF_HEADERS)
+    assert r.status_code == 200 and r.json()["connected"] is True
+    assert all(get_registry().plugin_rows()[p]["connected"] == 1 for p in PLUGINS)
+    assert client.post(finish, json=body, headers=CSRF_HEADERS).status_code == 400  # used
+
+
 def test_consent_asks_for_the_enabled_plugins_only(gg, client, admin_headers):
     configure_and_enable(client, admin_headers, plugins=["gdrive"])
     start = client.post("/v1/admin/plugins/google/connect/start",

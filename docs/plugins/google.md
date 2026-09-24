@@ -127,9 +127,20 @@ actions that need it answer `403 scopes not granted; reconnect` and
 2. **Enable** the plugins you want. Enabling needs the client id.
 3. **Connect** (one button for the whole service). The consent page opens;
    after you approve, Google redirects to the broker's
-   `/oauth/callback/google` page (admin plane, behind Cloudflare Access in
-   public mode), which relays `code` and `state` once to plugin-google. The
-   plugin checks the state and exchanges the code itself.
+   `/oauth/callback/google` page. That page needs no owner credential
+   (Google's redirect is cross-site, so the SameSite=Strict session cookie is
+   not sent on it; Cloudflare Access still applies in public mode) and holds
+   no data: it strips `code` and `state` from the address bar and POSTs them,
+   same origin, with your session cookie and the CSRF header, to the
+   admin-guarded `connect/finish`, which relays them once to plugin-google.
+   If your console session has expired, the page says "log in to the console
+   in another tab, then retry" and keeps the code in memory only. The plugin
+   checks the state and exchanges the code itself.
+
+   The authorization code appears once in the broker's access log, in the
+   line for that `GET /oauth/callback/google?code=...` (uvicorn logs the
+   query string). It is single-use, expires within minutes, and is useless
+   without the client secret, which only plugin-google holds.
 4. **Enabling another Google plugin later** shows it as
    `reconnect needed: scopes missing` until you connect again.
 5. **Disconnect** revokes the refresh token at Google (best effort) and

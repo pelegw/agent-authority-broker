@@ -89,6 +89,16 @@ scalar only: `range` (integer >= 0), `flag` (boolean), `level` (with
 `values`). A set-valued rule is either an allow-list (declare it as a
 narrowing) or a deny (it belongs in denies, outside the lattice).
 
+**Name a flag for the permission it grants: `true` must be the permissive
+side.** The algebra treats an absent flag as `true`, treats `true` as top
+and drops it at normalization (docs/grant-algebra.md). A flag whose `true`
+*restricts* (`hide_private`, `metadata_only`, `own_events_only`) would
+therefore vanish from every grant and fail open. Write `private_events`,
+`file_content`, `others_events` instead, restricting with `false`. The same
+holds for a `level`: its last value is top, so order values from most
+restrictive to most permissive. The Google plugins' tests lint their flag
+names for this.
+
 `default` is what the console pre-fills when the owner builds a capability. In
 the algebra an **absent** constraint means unrestricted; the default is not
 applied implicitly.

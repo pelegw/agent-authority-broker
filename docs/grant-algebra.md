@@ -66,7 +66,7 @@ match).
 | form | `≤` |
 |---|---|
 | `range` | parent absent, or child present and `child ≤ parent` |
-| `flag` | parent `false` ⇒ child `false` (absent = `true`) |
+| `flag` | parent `false` ⇒ child `false` (absent = `true`). `true` is top, so a flag must be named for the permission it grants (`attachments`, `file_content`, not `metadata_only`); see below |
 | `level` | `rank(child) ≤ rank(parent)` in the manifest's `values` order |
 
 Anything the table cannot interpret (unknown target, a dimension the
@@ -196,6 +196,20 @@ resolution-time check the policy engine applies to the concrete resource.
 
 CI runs 200 derandomized examples per property; `HYPOTHESIS_PROFILE=dev`
 runs 1000 random ones.
+
+## Flag polarity (a rule for manifest authors)
+
+`true` is top for a `flag`: an absent flag means `true`, normalization drops
+`true`, and `meet` drops a result equal to `true`. So a flag can only ever
+restrict by being `false`, and it must be **named for the permission it
+grants**. A flag named for a restriction (`hide_private: true`,
+`metadata_only: true`) would be dropped as top and restrict nothing: the
+grant would fail open without any error. The Google manifests therefore use
+`private_events`, `others_events` and `file_content` (restricting with
+`false`) where the plan said `hide_private`, `own_events_only` and
+`metadata_only`, and their tests lint flag names. Likewise a `level`'s last
+value is top, so its values run from most restrictive to most permissive
+(`[freebusy, full]`, `[draft, direct]`).
 
 ## Known conservative choices
 

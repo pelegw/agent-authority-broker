@@ -64,13 +64,17 @@ api = FastAPI(
 # Every router whose routes form the admin plane; each is guarded router-wide
 # by require_admin (tests/identity/test_admin_tokens.py walks this list).
 ADMIN_ROUTERS = (admin.router, admin_plugins.router, admin_keys.router, admin_ops.router,
-                 oauth.router, admin_telegram.router, admin_settings.router)
+                 admin_telegram.router, admin_settings.router)
 
 api.include_router(health.router)
 # Pre-login owner endpoints (status/setup/login/logout): outside require_admin.
 api.include_router(auth.router)
 # The owner console page: a data-free shell; its data comes from the admin API.
 api.include_router(console.router)
+# The OAuth callback page: data-free too, and reached by a cross-site redirect
+# that carries no SameSite=Strict session cookie, so it cannot require one;
+# the connect/finish POST it makes is admin-guarded (routers/oauth.py).
+api.include_router(oauth.router)
 for _r in ADMIN_ROUTERS:
     api.include_router(_r)
 # The agent surface (aab_ keys). These routers never import deps.py/identity.
