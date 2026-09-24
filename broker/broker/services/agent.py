@@ -233,19 +233,24 @@ def resolve_resource(auth, target: str, kind: str, query: str, limit: int = 20) 
 
 # ---- permission requests -------------------------------------------------------------
 
-def _grant_view(g) -> dict:
-    return {"id": g.id, "kind": g.kind, "status": g.status,
-            "capabilities": [to_json(c) for c in g.capabilities],
+def _grant_view(g, auth=None) -> dict:
+    """A grant as JSON. With `auth` (every agent-facing answer) its
+    capabilities go through visible_caps, so an id the owner hid, or the key
+    was denied, after the grant was made never appears. Without it (the
+    owner's notification card) the capabilities are shown as stored."""
+    caps = [to_json(c) for c in g.capabilities] if auth is None else \
+        visible_caps(auth, g.capabilities)
+    return {"id": g.id, "kind": g.kind, "status": g.status, "capabilities": caps,
             "created_at": g.created_at, "decided_at": g.decided_at,
             "expires_at": g.expires_at}
 
 
-def _clipped_error(requested, narrowed_caps) -> PolicyError:
-    return PolicyError(
-        400, "exceeds what your parent can give", "clipped",
-        hint="request only the allowed capabilities, or ask the owner directly",
-        extra={"clipped": [to_json(c) for c in requested],
-               "allowed": [to_json(c) for c in narrowed_caps]})
+def _clipped_error(auth, requested, narrowed_caps) -> PolicyError:
+    # `allowed` is derived from the parent's grants, so it is filtered like
+    # any capability this surface did not receive from the caller.
+    return clipped_error("exceeds what your parent can give",
+                         "request only the allowed capabilities, or ask the owner directly",
+                         requested, visible_caps(auth, narrowed_caps))
 
 
 def clipped_error(message: str, hint: str, requested, allowed: list[dict]) -> PolicyError:
@@ -293,7 +298,7 @@ def request_permission(auth, capabilities: list, reason: str = "",
         if auth.parent_key_id is None:
             narrowed = narrow(ceiling(auth.principal_id, reg.plugin_states()), requested, lattice)
             if clipped(requested, narrowed):
-                raise _clipped_error(clipped(requested, narrowed), narrowed.capabilities)
+                raise _clipped_error(auth, clipped(requested, narrowed), narrowed.capabilities)
             grant = store.insert_root_grant(auth.principal_id, auth.key_id,
                                             narrowed.capabilities, "pending", reason,
                                             expires_at, kind="expansion")
@@ -306,7 +311,7 @@ def request_permission(auth, capabilities: list, reason: str = "",
                 pooled = [c for n in options for c in n.capabilities]
                 clip = [r for r in requested if not any(lattice.le(r, c) for c in pooled)] \
                     or list(requested)
-                raise _clipped_error(clip, pooled)
+                raise _clipped_error(auth, clip, pooled)
             grant = store.insert_child_grant(auth.principal_id, auth.key_id, "expansion",
                                              best, reason, expires_at, auth.key_id)
     except (ValueError, TypeError, GrantInvariantError) as exc:
@@ -322,7 +327,7 @@ def get_permission_status(auth, grant_id: str) -> dict:
     g = store.get(grant_id)
     if g is None or g.key_id != auth.key_id:
         raise PolicyError(404, "no such permission request", "not_found")
-    return _grant_view(g)
+    return _grant_view(g, auth)
 
 
 def list_my_permissions(auth, limit: int = 50, cursor: int | None = None) -> dict:
@@ -338,7 +343,7 @@ def list_my_permissions(auth, limit: int = 50, cursor: int | None = None) -> dic
         rows = conn.execute(sql, args).fetchall()
     more = len(rows) > limit
     rows = rows[:limit]
-    items = [_grant_view(g) for g in (store.get(r["id"]) for r in rows) if g is not None]
+    items = [_grant_view(g, auth) for g in (store.get(r["id"]) for r in rows) if g is not None]
     return {"items": items, "next_cursor": rows[-1]["r"] if more and rows else None}
 
 
