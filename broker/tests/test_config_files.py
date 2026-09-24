@@ -4,11 +4,14 @@ table is identical in docs/deployment.md and docs/architecture.md section
 credentials that moved to the console appear in no file. Compose also keeps
 the isolation docs/architecture.md section 2 describes: the WhatsApp session
 volume is mounted by the sidecar alone, the archive read-only elsewhere, and
-each plugin service has a network of its own."""
+each plugin service has a network of its own. Logging (docs/logging.md):
+every service's log is rotated, every service gets the log settings, and
+no image runs uvicorn with its access log on."""
 
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[2]
@@ -125,3 +128,36 @@ def test_each_plugin_service_has_a_network_of_its_own():
     env = _compose("docker-compose.yml")["services"]["broker"]["environment"]
     for service in ("whatsapp", "github", "google"):
         assert env[f"PLUGIN_URL_{service.upper()}"] == f"http://plugin-{service}:8090"
+
+
+PYTHON_SERVICES = ("broker", "plugin-whatsapp", "plugin-github", "plugin-google")
+
+
+def test_every_service_logs_through_the_rotated_json_file_driver():
+    """docs/logging.md: at most 5 x 10 MB per container, in both files (the
+    public overlay's edge included)."""
+    for rel in ("docker-compose.yml", "docker-compose.public.yml"):
+        for name, svc in _compose(rel)["services"].items():
+            assert svc.get("logging") == {
+                "driver": "json-file", "options": {"max-size": "10m", "max-file": "5"}}, \
+                (rel, name)
+
+
+def test_log_level_and_format_reach_every_service_that_reads_them():
+    services = _compose("docker-compose.yml")["services"]
+    for name in PYTHON_SERVICES:
+        env = services[name]["environment"]
+        assert env["LOG_LEVEL"] == "${LOG_LEVEL:-INFO}", name
+        assert env["LOG_FORMAT"] == "${LOG_FORMAT:-text}", name
+    sidecar = services["whatsapp-sidecar"]["environment"]
+    assert sidecar["LOG_LEVEL"] == "${LOG_LEVEL:-INFO}" and "LOG_FORMAT" not in sidecar
+
+
+@pytest.mark.parametrize("dockerfile", ["broker/Dockerfile", "plugins/whatsapp/Dockerfile",
+                                        "plugins/github/Dockerfile",
+                                        "plugins/google/Dockerfile"])
+def test_every_uvicorn_cmd_turns_off_uvicorns_access_log(dockerfile):
+    """Its line would carry the query string (the OAuth callback's code);
+    the services write their own access line without it."""
+    [cmd] = [line for line in _read(dockerfile).splitlines() if line.startswith("CMD ")]
+    assert '"uvicorn"' in cmd and '"--no-access-log"' in cmd

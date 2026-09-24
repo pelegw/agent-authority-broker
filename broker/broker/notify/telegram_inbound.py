@@ -23,12 +23,18 @@ The poll loop resumes from the persisted offset so a restart doesn't replay
 buffered taps, backs off on errors, and never logs the token. `supervise()`
 runs in the app lifespan and starts or stops the loop whenever the stored
 token appears, changes, or is cleared, so no restart is ever needed.
+
+Each update is handled under its own `tg-<hex>` request id: a tap's approval,
+the delivery it triggers and the decision rows that delivery records all
+carry it. Log lines never hold a message's text, a link code or a callback's
+raw data.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import secrets
 
 import anyio.to_thread
@@ -40,8 +46,12 @@ from ..authority import store
 from ..deps import AdminContext
 from ..errors import PolicyError
 from ..identity import principals
+from ..logging_setup import bind, kv, new_request_id
 from ..services import admin
 from . import cards, telegram
+
+log = logging.getLogger(__name__)
+PREFIX = "tg-"
 
 POLL_TIMEOUT = 25                # getUpdates long-poll seconds
 SUPERVISE_INTERVAL = 2.0         # how quickly a stored/cleared token takes effect
@@ -88,6 +98,7 @@ def _try_link(msg: dict) -> None:
     audit(pending["username"], "telegram.linked", "telegram",
           {"chat_id": chat_id, "user_id": user_id},
           actor_principal=pending["principal_id"], actor_via="telegram")
+    log.info("telegram chat linked %s", kv(owner=pending["username"]))
     with contextlib.suppress(telegram.TelegramError):
         telegram._api_send_message("✅ This chat is now linked for Agent Authority Broker "
                                    "approvals. Enable the channel in the console to receive cards.")
@@ -99,6 +110,7 @@ def _refuse(cb_id: str, chat_id, from_id: str, why: str) -> None:
     telegram._answer_callback(cb_id, "not authorized")
     audit("system", "telegram.rejected_chat", "telegram",
           {"chat_id": str(chat_id), "from_id": from_id, "why": why}, result="denied")
+    log.warning("telegram tap refused %s", kv(reason=why))
 
 
 def _owner_ctx(from_id: str) -> AdminContext | None:
@@ -140,6 +152,7 @@ def _handle_callback(cq: dict) -> None:
     # The kill switch: while the channel is disabled no tap is honoured.
     if not telegram.enabled():
         telegram._answer_callback(cb_id, "approvals are disabled")
+        log.info("telegram tap refused %s", kv(reason="channel disabled"))
         return
     message = cq.get("message") or {}
     chat_id = (message.get("chat") or {}).get("id")
@@ -158,14 +171,18 @@ def _handle_callback(cq: dict) -> None:
     parsed = cards.parse_callback(cq.get("data"))
     if parsed is None:
         telegram._answer_callback(cb_id, "bad request")
+        log.warning("telegram tap refused %s", kv(reason="unparseable callback"))
         return
     kind, verb, item_id = parsed
+    what = {"kind": "action" if kind == "a" else "grant", "id": item_id, "verb": verb}
     if verb == "approve" and not _fits(kind, item_id):
         telegram._answer_callback(cb_id, "Review and approve the complete request in the console")
+        log.info("telegram tap refused %s", kv(reason="too long to approve in chat", **what))
         return
     try:
         status = _decide(ctx, kind, verb, item_id)
     except PolicyError as exc:
+        log.info("telegram tap not applied %s", kv(status=exc.status, code=exc.code, **what))
         if exc.status in _KEEP_BUTTONS or exc.code == "held":
             # Still pending (released, or held while its plugin is off): the
             # card keeps its buttons so the owner can try again.
@@ -183,16 +200,18 @@ def _handle_callback(cq: dict) -> None:
             telegram._edit_message(message_id, cards.outcome_text(kind, label, item_id))
         return
     telegram._answer_callback(cb_id, status)
+    log.info("telegram tap accepted %s", kv(result=status, by=ctx.username, **what))
     if message_id is not None:
         telegram._edit_message(message_id, cards.outcome_text(kind, status, item_id))
 
 
 def _handle_update(update: dict) -> None:
     """Dispatch one Telegram update. Sync (the loop runs it in a thread)."""
-    if update.get("message"):
-        _try_link(update["message"])
-    elif update.get("callback_query"):
-        _handle_callback(update["callback_query"])
+    with bind(new_request_id(PREFIX)):
+        if update.get("message"):
+            _try_link(update["message"])
+        elif update.get("callback_query"):
+            _handle_callback(update["callback_query"])
 
 
 # ---- the loop ---------------------------------------------------------------------
@@ -200,6 +219,7 @@ def _handle_update(update: dict) -> None:
 async def poll_loop() -> None:
     """Long-poll getUpdates and dispatch; runs while a token is stored."""
     telegram.poll_running(True)
+    log.info("telegram poll loop started")
     offset = int(db.get_config(telegram.CFG_OFFSET, "0") or "0")
     backoff = 1
     with contextlib.suppress(Exception):
@@ -215,6 +235,7 @@ async def poll_loop() -> None:
                     telegram._get_updates, offset, POLL_TIMEOUT, abandon_on_cancel=True)
                 if telegram.poll_ok():
                     audit("system", "telegram.poll_recovered", "telegram")
+                    log.info("telegram poll recovered")
                 backoff = 1
                 for u in updates or []:
                     uid = u.get("update_id") if isinstance(u, dict) else None
@@ -226,6 +247,7 @@ async def poll_loop() -> None:
                     except Exception as exc:        # one bad update never stops the loop
                         audit("system", "telegram.update_error", "telegram",
                               {"error": type(exc).__name__}, result="error")
+                        log.error("telegram update failed %s", kv(error=type(exc).__name__))
                 if updates:
                     await anyio.to_thread.run_sync(db.set_config, telegram.CFG_OFFSET,
                                                    str(offset))
@@ -239,10 +261,17 @@ async def poll_loop() -> None:
                     audit("system", "telegram.poll_error", "telegram",
                           {"error": type(exc).__name__, "status": getattr(exc, "status", None)},
                           result="error")
-                await asyncio.sleep(min(backoff, MAX_BACKOFF))
+                wait = min(backoff, MAX_BACKOFF)
+                # Every failure, but the class, status and backoff only (the
+                # log is rotated; the audit table is not).
+                log.warning("telegram poll failed %s", kv(
+                    error=type(exc).__name__, status=getattr(exc, "status", None),
+                    streak=streak, backoff_seconds=wait))
+                await asyncio.sleep(wait)
                 backoff = min(backoff * 2, MAX_BACKOFF)
     finally:
         telegram.poll_running(False)
+        log.info("telegram poll loop stopped")
 
 
 async def _stop(loop: background.Loop | None) -> None:
@@ -270,9 +299,14 @@ async def supervise(interval: float | None = None) -> None:
             except Exception:
                 want = None               # state unreadable: stop, never guess
             if loop is not None and loop.done():
+                log.warning("telegram poll loop ended unexpectedly; restarting")
                 await _stop(loop)
                 loop, current = None, None
             if want != current:
+                # Why, without the token or its fingerprint.
+                log.info("telegram supervisor %s", kv(
+                    change="token present" if current is None else
+                    "token cleared" if want is None else "token changed"))
                 await _stop(loop)
                 loop = background.Loop(poll_loop) if want is not None else None
                 current = want

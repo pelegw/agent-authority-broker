@@ -14,6 +14,7 @@ the import graph): an agent has no path to approving anything.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Mapping
 
@@ -31,12 +32,15 @@ from ..engine import adapter_error
 from ..errors import PolicyError
 from ..hidden import deny_sets, is_denied
 from ..ledger import remaining
+from ..logging_setup import kv
 from ..plugins.adapter import AdapterError
 from ..plugins.manifest import ManifestError
 from ..plugins.registry import get_registry
 from ..policy import enforced_where, run_mode
 from ..runtime_settings import runtime_settings
 from ..skill.generator import KeyContext, render
+
+log = logging.getLogger(__name__)
 
 
 def _caps_by_target(auth) -> dict[str, list[tuple[Capability, tuple[str, ...]]]]:
@@ -249,6 +253,7 @@ def _grant_view(g, auth=None) -> dict:
 def _clipped_error(auth, requested, narrowed_caps) -> PolicyError:
     # `allowed` is derived from the parent's grants, so it is filtered like
     # any capability this surface did not receive from the caller.
+    log.info("permission request clipped %s", kv(key=auth.name, clipped=len(requested)))
     return clipped_error("exceeds what your parent can give",
                          "request only the allowed capabilities, or ask the owner directly",
                          requested, visible_caps(auth, narrowed_caps))
@@ -348,6 +353,10 @@ def request_permission(auth, capabilities: list, reason: str = "",
     except (ValueError, TypeError, GrantInvariantError) as exc:
         raise PolicyError(400, str(exc), "invalid_capabilities") from exc
     audit(auth.name, "permission.requested", grant.id, {"expires_at": expires_at})
+    # The reason is the agent's free text for the owner: never logged.
+    log.info("permission requested %s", kv(grant=grant.id, key=auth.name,
+                                           capabilities=len(grant.capabilities),
+                                           expires_at=expires_at))
     notify.notify_grant_request({**_grant_view(grant), "key_id": auth.key_id,
                                  "key_name": auth.name, "reason": reason})
     return {"id": grant.id, "status": grant.status}

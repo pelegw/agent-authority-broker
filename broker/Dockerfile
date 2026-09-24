@@ -26,4 +26,6 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4).status == 200 else 1)"]
 # Single worker on purpose: in-process rate limiter + SQLite single-writer.
-CMD ["uvicorn", "broker.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
+# --no-access-log: the broker writes its own access line (request id, actor,
+# path without the query string, which can carry an OAuth code); docs/logging.md.
+CMD ["uvicorn", "broker.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log"]

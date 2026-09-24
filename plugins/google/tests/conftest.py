@@ -23,6 +23,7 @@ try:
 except ImportError:
     sys.path.insert(0, str(_RUNTIME))
 
+from aab_plugin_runtime import logging_setup  # noqa: E402
 from cryptography.fernet import Fernet  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -30,6 +31,11 @@ from aab_plugin_google.main import build_adapters  # noqa: E402
 from aab_plugin_runtime import serve  # noqa: E402
 
 from . import fake_google as fg  # noqa: E402
+
+# Logging is configured once, at collection, as the plugin process does when
+# it builds its app: serve() inside a test then leaves the handlers alone
+# instead of swapping them under a running log capture.
+logging_setup.configure("plugin-google")
 
 PLUGIN_TOKEN = "google-plugin-token-0123456789abcdef"
 NOW = 1_790_000_000.0                  # a fixed "now" (2026-09-21)

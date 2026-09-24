@@ -17,13 +17,23 @@ HTTP answers from the sidecar map onto the same contract (`_raise_for`).
 `SidecarError` is an `AdapterError`, so the runtime answers the broker with
 exactly the status decided here. The token is a request header only: it is
 never part of an error message, a log line or this object's repr.
+
+Every call carries the broker's request id (X-Request-Id), which the
+sidecar puts on its own request log line, and logs one line here: method,
+path (never the query: /media's names a chat and a message), status,
+duration. Never a message text.
 """
 
 import json
+import logging
+import time
 
 import httpx
 
 from aab_plugin_runtime import AdapterError
+from aab_plugin_runtime.logging_setup import current_request_id, kv
+
+log = logging.getLogger("aab_plugin_whatsapp.sidecar")
 
 # Below the broker's 30 s plugin timeout (PLUGIN_TIMEOUT_SECONDS): if the
 # sidecar hangs, this plugin reports its own clean 502 before the broker
@@ -68,18 +78,25 @@ class SidecarClient:
     def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
         """One sidecar call; network-level failures become SidecarError(503|502)
         so callers uniformly see the contract instead of a raw 500."""
+        rid = current_request_id()
+        if rid:
+            kwargs["headers"] = {**(kwargs.get("headers") or {}), "X-Request-Id": rid}
+        started = time.perf_counter()
         try:
             with self._client() as c:
                 resp = c.request(method, path, **kwargs)
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            _log_call(method, path, None, started, type(e).__name__)
             # Never reached the sidecar -> definitely not delivered -> retryable.
             raise SidecarError(503, f"sidecar unreachable ({type(e).__name__})") from e
         except httpx.HTTPError as e:
+            _log_call(method, path, None, started, type(e).__name__)
             # Request was already on the wire (e.g. read timeout): the send may have
             # gone through. Surface as 502 so a queued action is NOT auto-retried —
             # re-sending could double-send. The human investigates.
             raise SidecarError(502, "sidecar request failed with unknown outcome "
                                     f"({type(e).__name__})") from e
+        _log_call(method, path, resp.status_code, started)
         _raise_for(resp)
         return resp
 
@@ -113,6 +130,14 @@ class SidecarClient:
         resp = self._request("GET", "/media", params={"chat_jid": chat_jid,
                                                       "message_id": message_id})
         return resp.content, resp.headers.get("content-type", "application/octet-stream")
+
+
+def _log_call(method: str, path: str, status: int | None, started: float,
+              error: str | None = None) -> None:
+    ok = status is not None and 200 <= status < 300
+    log.log(logging.INFO if ok else logging.WARNING, "sidecar call %s", kv(
+        method=method, path=path, status=status, error=error,
+        duration_ms=round((time.perf_counter() - started) * 1000)))
 
 
 def _json(resp: httpx.Response):

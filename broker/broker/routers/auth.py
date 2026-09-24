@@ -8,6 +8,8 @@ plane (deploy/DEPLOY.md puts /auth* behind the Access application too).
 the router-wide guard.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field
 
@@ -15,8 +17,10 @@ from ..audit import audit
 from ..deps import CSRF_HEADER, CSRF_VALUE, client_ip, require_cf_access
 from ..errors import PolicyError
 from ..identity import principals, ratelimit, sessions, setup
+from ..logging_setup import kv, set_actor
 
 router = APIRouter(prefix="/auth", dependencies=[Depends(require_cf_access)])
+log = logging.getLogger(__name__)
 
 
 class SetupBody(BaseModel):
@@ -46,6 +50,7 @@ def status(request: Request) -> dict:
 @router.post("/setup")
 def do_setup(body: SetupBody, request: Request) -> dict:
     owner = setup.run(body.setup_token, body.username, body.password, client_ip(request))
+    set_actor(f"owner:{owner.username}")
     return {"username": owner.username, "setup_completed": True}
 
 
@@ -65,11 +70,15 @@ def login(body: LoginBody, request: Request, response: Response) -> dict:
         audit("anonymous", "auth.login_failed",
               detail={"username": _loggable_username(body.username), "ip": ip},
               result="denied")
+        log.warning("owner login failed %s",
+                    kv(username=_loggable_username(body.username), ip=ip))
         raise PolicyError(401, "invalid username or password", "unauthorized")
     value, _ = sessions.create(owner.id, ip, request.headers.get("user-agent", ""))
     sessions.set_cookie(response, value)
     audit(owner.username, "auth.login", detail={"ip": ip},
           actor_principal=owner.id, actor_via="session")
+    set_actor(f"owner:{owner.username}")
+    log.info("owner logged in %s", kv(username=owner.username, ip=ip))
     session = sessions.lookup(value)
     return {"username": owner.username, "expires_at": session.expires_at()}
 
@@ -86,5 +95,7 @@ def logout(request: Request, response: Response) -> dict:
         if live:
             audit(live.username, "auth.logout", detail={"ip": client_ip(request)},
                   actor_principal=live.principal_id, actor_via="session")
+            set_actor(f"owner:{live.username}")
+            log.info("owner logged out %s", kv(username=live.username, ip=client_ip(request)))
     sessions.clear_cookie(response)
     return {"ok": True}

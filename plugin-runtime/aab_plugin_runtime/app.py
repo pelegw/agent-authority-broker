@@ -15,12 +15,19 @@ Security properties this module owns:
   * adapter failures map onto the broker's contract (AdapterError status
     passthrough; unreadable secrets = 503, not performed; anything
     unexpected = 502, unknown outcome, with no internals in the body).
+
+Logging (docs/logging.md): `serve()` configures it for the process as
+`plugin-<service>`. Every request runs under the broker's X-Request-Id
+(request_log.RequestContextMiddleware), so this service's lines carry the id
+of the broker request that caused them; each `/perform` logs its action,
+status and duration. Never params, results, secret values or tokens.
 """
 
 import base64
 import hmac
 import inspect
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -29,15 +36,17 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from . import logging_setup
 from .adapter import PluginAdapter, Result
 from .errors import AdapterError
+from .logging_setup import current_request_id, kv, set_actor
+from .request_log import RequestContextMiddleware, client_ip
 from .secret_store import SecretsUnreadable, SecretStore
 
 log = logging.getLogger("aab_plugin_runtime")
 
 TOKEN_HEADER = "x-plugin-token"
 PLUGIN_HEADER = "x-plugin-id"
-REQUEST_ID_HEADER = "x-request-id"
 
 
 class _Body(BaseModel):
@@ -125,9 +134,29 @@ class SharedAwareReader:
         return f"SharedAwareReader(slot={self._own!r}, shared={self._shared!r})"
 
 
+def _service_name(adapters: list[PluginAdapter], service: str | None) -> str:
+    """The name this process logs as: given by the plugin package (its
+    compose service, e.g. `google`), else the ids it hosts."""
+    if service:
+        return service
+    ids = sorted(str(a.manifest.get("id")) for a in adapters
+                 if isinstance(getattr(a, "manifest", None), dict))
+    return "+".join(ids) or "unknown"
+
+
+def _unexpected_response(exc: Exception) -> JSONResponse:
+    # The request may already have reached the target: unknown outcome.
+    # Only the exception type is logged; its text could carry a secret.
+    log.error("unexpected adapter failure %s", kv(error=type(exc).__name__))
+    return JSONResponse({"error": "internal plugin error"}, status_code=502)
+
+
 def serve(adapters: list[PluginAdapter], token: str, secrets_dir: str | Path,
-          secrets_key: str | None) -> FastAPI:
+          secrets_key: str | None, *, service: str | None = None) -> FastAPI:
     """Build the plugin API app. Raises at boot on any unsafe configuration."""
+    service = _service_name(adapters, service)
+    # First, so a boot refusal below is logged in the service's own format.
+    logging_setup.configure(f"plugin-{service}")
     if not isinstance(token, str) or not token.strip():
         raise RuntimeError("plugin token is empty; refusing to serve an open plugin API")
     by_id: dict[str, PluginAdapter] = {}
@@ -142,6 +171,7 @@ def serve(adapters: list[PluginAdapter], token: str, secrets_dir: str | Path,
     store = SecretStore(secrets_dir, secrets_key)
     _bind(by_id, store)
     expected = token.encode()
+    actor = f"plugin:{service}"
 
     app = FastAPI(title="aab plugin runtime", docs_url=None, redoc_url=None,
                   openapi_url=None)
@@ -153,12 +183,23 @@ def serve(adapters: list[PluginAdapter], token: str, secrets_dir: str | Path,
         # compare_digest: no early exit on the first differing byte, so the
         # response time does not leak how much of a guessed token was right.
         if not hmac.compare_digest(supplied, expected):
+            log.warning("plugin API call refused: bad or missing X-Plugin-Token %s",
+                        kv(path=request.url.path, ip=client_ip(request.scope),
+                           header_present=bool(supplied)))
             return JSONResponse({"error": "unauthorized"}, status_code=401)
-        response = await call_next(request)
-        rid = request.headers.get(REQUEST_ID_HEADER)
-        if rid:
-            response.headers["X-Request-Id"] = rid[:128]
-        return response
+        set_actor(actor)
+        try:
+            return await call_next(request)
+        except Exception as exc:
+            # Mapped here, inside the request context, rather than by an
+            # Exception handler (which Starlette runs outside every
+            # middleware): the 502 then carries X-Request-Id and the access
+            # line and the error line carry the request id.
+            return _unexpected_response(exc)
+
+    # Added last, so it is the outermost middleware: the 401 above gets an
+    # access line and a request id too.
+    app.add_middleware(RequestContextMiddleware, access_logger="aab_plugin_runtime.access")
 
     @app.exception_handler(AdapterError)
     async def _adapter_error(_: Request, exc: AdapterError):
@@ -175,10 +216,8 @@ def serve(adapters: list[PluginAdapter], token: str, secrets_dir: str | Path,
 
     @app.exception_handler(Exception)
     async def _unexpected(_: Request, exc: Exception):
-        # The request may already have reached the target: unknown outcome.
-        # Only the exception type is logged; its text could carry a secret.
-        log.error("unexpected adapter failure: %s", type(exc).__name__)
-        return JSONResponse({"error": "internal plugin error"}, status_code=502)
+        # Belt and braces: _auth maps these first.
+        return _unexpected_response(exc)
 
     def pick(request: Request) -> tuple[str, PluginAdapter]:
         pid = request.headers.get(PLUGIN_HEADER)
@@ -226,12 +265,22 @@ def serve(adapters: list[PluginAdapter], token: str, secrets_dir: str | Path,
             store.write(slot, common)       # once, in the connection's shared slot
         reader = SharedAwareReader(store, pid, slot, names) if names else store.reader(pid)
         adapter.configure(body.config, reader)
+        # Field NAMES only, never a value (secret or not).
+        log.info("plugin configured %s", kv(plugin=pid, config_fields=sorted(body.config),
+                                            secret_fields=sorted(body.secrets)))
         return {"ok": True}      # never echo secret values
 
     @app.post("/normalize")
     def normalize(body: NormalizeBody, request: Request) -> dict:
-        _, adapter = pick(request)
-        return {"id": adapter.normalize(body.kind, body.value)}
+        pid, adapter = pick(request)
+        try:
+            return {"id": adapter.normalize(body.kind, body.value)}
+        except AdapterError as exc:
+            if exc.status == 400:
+                # The kind only: the value is agent input.
+                log.info("normalize refused %s", kv(plugin=pid, kind=body.kind,
+                                                    status=exc.status))
+            raise
 
     @app.post("/resolve")
     def resolve(body: ResolveBody, request: Request) -> dict:
@@ -250,32 +299,69 @@ def serve(adapters: list[PluginAdapter], token: str, secrets_dir: str | Path,
 
     @app.post("/perform")
     def perform(body: PerformBody, request: Request) -> Any:
-        _, adapter = pick(request)
+        pid, adapter = pick(request)
         scope = dict(body.scope)
-        scope.setdefault("request_id", request.headers.get(REQUEST_ID_HEADER, ""))
-        return _encode(adapter.perform(body.action, body.params, scope))
+        scope.setdefault("request_id", current_request_id() or "")
+        started, status = time.perf_counter(), 502
+        try:
+            out = _encode(adapter.perform(body.action, body.params, scope))
+            status = 200
+            return out
+        except AdapterError as exc:
+            status = exc.status
+            raise
+        except SecretsUnreadable:
+            status = 503
+            raise
+        finally:
+            # One line per call: what was asked and how it ended, never the
+            # params or the result.
+            log.log(logging.WARNING if status >= 500 else logging.INFO, "perform %s", kv(
+                plugin=pid, action=body.action, status=status,
+                duration_ms=round((time.perf_counter() - started) * 1000)))
 
     @app.post("/connect/start")
     def connect_start(body: ConnectStartBody, request: Request) -> dict:
+        pid, _ = pick(request)
         conn = connection(request)
         if body.redirect_uri is not None and _accepts(conn.start, "redirect_uri"):
-            return conn.start(body.enabled_plugins, redirect_uri=body.redirect_uri)
-        return conn.start(body.enabled_plugins)
+            out = conn.start(body.enabled_plugins, redirect_uri=body.redirect_uri)
+        else:
+            out = conn.start(body.enabled_plugins)
+        # The kind only: an OAuth or install URL carries the state nonce.
+        log.info("connect started %s", kv(plugin=pid, kind=out.get("kind")
+                                          if isinstance(out, dict) else None))
+        return out
 
     @app.get("/connect/qr.png")
     def connect_qr(request: Request) -> Response:
+        pid, _ = pick(request)
         png = connection(request).qr_png()
+        log.info("pairing QR served %s", kv(plugin=pid))
         # A QR is a pairing secret while valid: never cache it anywhere.
         return Response(png, media_type="image/png",
                         headers={"Cache-Control": "no-store"})
 
     @app.post("/connect/finish")
     def connect_finish(body: ConnectFinishBody, request: Request) -> dict:
-        return connection(request).finish(body.code, body.state, body.installation_id)
+        pid, _ = pick(request)
+        try:
+            out = connection(request).finish(body.code, body.state, body.installation_id)
+        except AdapterError as exc:
+            log.warning("connect finish failed %s", kv(plugin=pid, status=exc.status))
+            raise
+        log.info("connect finished %s", kv(plugin=pid))
+        return out
 
     @app.post("/disconnect")
     def disconnect(request: Request) -> dict:
-        return connection(request).disconnect()
+        pid, _ = pick(request)
+        out = connection(request).disconnect()
+        log.info("disconnected %s", kv(plugin=pid))
+        return out
+
+    log.info("plugin service ready %s", kv(service=service, plugins=sorted(by_id),
+                                           secrets_key="set" if secrets_key else "unset"))
 
     return app
 

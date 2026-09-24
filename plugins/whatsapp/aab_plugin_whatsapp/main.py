@@ -41,4 +41,4 @@ def build_adapter(environ: Mapping[str, str]) -> WhatsAppAdapter:
 
 def create_app(environ: Mapping[str, str] | None = None) -> FastAPI:
     env = os.environ if environ is None else environ
-    return from_env([build_adapter(env)], dict(env))
+    return from_env([build_adapter(env)], dict(env), service="whatsapp")

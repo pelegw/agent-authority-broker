@@ -3,6 +3,97 @@
 All notable changes to this project are documented here. The version number
 lives only in `VERSION`.
 
+## [Unreleased]
+
+### Added
+- Operational logging for every service (`docs/logging.md`). One setup,
+  `logging_setup.configure(service)`, kept byte-identical in the broker and
+  the plugin runtime by a test: one handler to stdout, UTC millisecond
+  timestamps, `<ts>Z <LEVEL> <logger> [<service> <request id>] <message>`,
+  or one JSON object per line with `LOG_FORMAT=json`; `LOG_LEVEL` sets the
+  level (a bad value warns and falls back to INFO). uvicorn's server lines
+  go through the same handler. Messages are a fixed text plus logfmt
+  `key=value` pairs (`kv()`), quoted and escaped so a value can never break
+  or forge a line.
+- Request ids end to end. Every request gets one (a well-formed
+  `X-Request-Id` from the caller, else a fresh one; the broker refuses the
+  `sched-` and `tg-` prefixes of its own background jobs), echoed in the
+  response header. The decision record's `request_id` is that id, the
+  broker sends it on every plugin call (not only `/perform`), the plugin
+  runtime runs the call under it and plugin-whatsapp forwards it to the
+  sidecar, so one agent call is one id in all four places. Each scheduler
+  tick and each delivery run under `sched-<hex>` ids, each Telegram update
+  under a `tg-<hex>` id.
+- One access line per request in the broker and the plugin runtime: method,
+  path without the query string, status, duration, actor (`key:<name>`,
+  `owner:<username>`, `plugin:<service>` or `-`) and client ip; health
+  probes skipped, 5xx at WARNING.
+- Deliberate lines at the operational seams: boot (settings summary with
+  secrets named as set/unset, WAL mode, the plugin registry), every decision
+  and outcome (with status, duration and chain length), budget refusals
+  naming the exhausted grant, agent and admin authentication failures with a
+  reason class, owner login/setup/password/tokens/sessions, keys, grants,
+  the action lifecycle, delegations, permission requests, plugin
+  discovery/health/enforcement changes and console operations (configure
+  logs field names only), Telegram (supervisor, poll errors with backoff,
+  taps accepted or refused, cards), the scheduler (only when something was
+  due), secret-store writes by slot and field name, decision-chain
+  verification (ERROR when broken), origin-guard refusals. In the plugins:
+  each `/perform` (action, status, duration), connect steps, the pairing QR
+  served, normalize refusals, each sidecar call, each minted GitHub
+  installation token and Google access token by scope and source (cached or
+  fresh), and GitHub/Google refusals by status class.
+- WhatsApp sidecar: UTC microsecond timestamps, a request line per API call
+  with the caller's request id (no bodies, no query string), send results by
+  message id, QR events, connection states; `LOG_LEVEL` sets whatsmeow's
+  level and WARNING/ERROR drop the request lines; whatsmeow's colour codes
+  are off.
+- Compose: every service in both files logs through an `x-logging` anchor
+  (`json-file`, 5 x 10 MB per container); every Python service gets
+  `LOG_LEVEL` and `LOG_FORMAT`, the sidecar `LOG_LEVEL`. Both are in
+  `.env.example` (from `scripts/init_secrets.py`) and in the console's
+  env-only list (category `ops`).
+- Tests: the setup (format, levels, JSON, uvicorn, filters), the redaction
+  table (every pattern, and no false positives on uuids, hashes, request and
+  resource ids), request ids from the broker through the runtime into the
+  decision record (REST, MCP, the scheduler, a Telegram tap), access lines
+  without query strings, the seam lines, and a secrets-in-logs sweep that
+  drives every secret-handling flow at DEBUG and fails on any secret value
+  in any record or output line. Go tests for the sidecar's request log.
+
+### Changed
+- uvicorn's own access log is off: it logged every request with its query
+  string. The images pass `--no-access-log`, and the logging setup leaves
+  `uvicorn.access` no handler path, which is what that flag means to
+  uvicorn (it writes an access line only when the logger has one), so it
+  stays off even when uvicorn is started without the flag.
+- The `aab` CLI logs to stderr, at WARNING unless `LOG_LEVEL` says
+  otherwise: `aab simulate` and `aab skill build` run broker code in-process,
+  and the CLI's stdout is its output.
+- The plugin runtime maps an unexpected adapter failure to its 502 inside
+  the middleware stack, so that response now carries `X-Request-Id` too.
+- The existing log lines use the new format, e.g. the broker's
+  `plugin service not reachable yet; will retry service=google status=503
+  retry_seconds=30` (docs/deployment.md updated).
+
+### Security
+- The OAuth authorization code (and GitHub's installation id and state) no
+  longer reach any log line; the access-log caveat is gone from
+  `docs/auth.md`, `docs/deployment.md`, `docs/architecture.md` and the
+  GitHub and Google plugin pages.
+- A redaction backstop on the handler (`SECRET_PATTERNS`: agent keys, admin
+  tokens, bearer values, Telegram bot tokens, Google and GitHub tokens,
+  Fernet keys, PEM blocks, session cookies, values after secret field
+  names). It rewrites a copy of each record, in messages and tracebacks.
+- Third-party loggers that log URLs with query strings (`httpx`: a Gmail
+  search, the bot token in the Telegram API path), protocol payloads (`mcp`)
+  or form fields are held at WARNING whatever `LOG_LEVEL` says.
+
+### Upgrade notes
+- No `.env` change is required (compose defaults both to `INFO` / `text`);
+  add `LOG_LEVEL` / `LOG_FORMAT` to change them. `docker compose up -d`
+  recreates the containers with the new logging options.
+
 ## [0.2.0] - 2026-09-24
 
 ### Hardening after the Docker verification (same day, before the tag)

@@ -19,6 +19,7 @@ try:
 except ImportError:
     sys.path.insert(0, str(_RUNTIME))
 
+from aab_plugin_runtime import logging_setup  # noqa: E402
 from cryptography.fernet import Fernet  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -27,6 +28,11 @@ from aab_plugin_whatsapp.adapter import WhatsAppAdapter  # noqa: E402
 from aab_plugin_whatsapp.archive import Archive  # noqa: E402
 
 from .fakes import FakeSidecar, seed_archive  # noqa: E402
+
+# Logging is configured once, at collection, as the plugin process does when
+# it builds its app: serve() inside a test then leaves the handlers alone
+# instead of swapping them under a running log capture.
+logging_setup.configure("plugin-whatsapp")
 
 PLUGIN_TOKEN = "whatsapp-plugin-token-0123456789abcdef"
 

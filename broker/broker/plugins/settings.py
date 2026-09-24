@@ -17,12 +17,16 @@ relayed once and stored once, in that slot, by the plugin runtime.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any
 
 from .. import db
 from ..errors import PolicyError
+from ..logging_setup import kv
 from .manifest import ConfigField, Manifest
+
+log = logging.getLogger(__name__)
 
 
 def _type_ok(f: ConfigField, value: Any) -> bool:
@@ -125,11 +129,26 @@ def set_enabled(plugin_id: str, enabled: bool) -> None:
                      (1 if enabled else 0, int(time.time()), plugin_id))
 
 
+def _previous(conn, plugin_id: str) -> tuple[bool | None, Any]:
+    """(connected, enforcement) as last stored, for the change log line."""
+    row = conn.execute("SELECT connected, last_health FROM plugins WHERE id = ?",
+                       (plugin_id,)).fetchone()
+    if row is None:
+        return None, None
+    try:
+        health = json.loads(row["last_health"] or "{}")
+    except ValueError:
+        health = {}
+    return bool(row["connected"]), health.get("enforcement") if isinstance(health, dict) else None
+
+
 def set_health(plugin_id: str, health: dict, connected: bool | None) -> None:
     """Store a health answer. `connected=None` keeps the last known value:
     an unreachable plugin is unhealthy, but only a real answer (or a
-    disconnect) changes whether it is connected."""
+    disconnect) changes whether it is connected. A change of `connected` or
+    of the reported enforcement is logged: both change what agents are told."""
     with db.connect() as conn:
+        was_connected, was_enforcement = _previous(conn, plugin_id)
         if connected is None:
             conn.execute("UPDATE plugins SET last_health = ?, updated_at = ? WHERE id = ?",
                          (json.dumps(health, sort_keys=True), int(time.time()), plugin_id))
@@ -137,6 +156,14 @@ def set_health(plugin_id: str, health: dict, connected: bool | None) -> None:
             conn.execute("UPDATE plugins SET last_health = ?, connected = ?, updated_at = ?"
                          " WHERE id = ?", (json.dumps(health, sort_keys=True),
                                            1 if connected else 0, int(time.time()), plugin_id))
+    enforcement = health.get("enforcement") if isinstance(health, dict) else None
+    if connected is not None and connected != was_connected:
+        log.info("plugin connection changed %s", kv(
+            plugin=plugin_id, connected=connected, healthy=health.get("healthy") is True,
+            enforcement=enforcement))
+    elif enforcement != was_enforcement and enforcement is not None:
+        log.info("plugin enforcement changed %s", kv(
+            plugin=plugin_id, enforcement=enforcement, previous=was_enforcement))
 
 
 # The `enforcement` values a plugin may report (docs/plugin-api.md, /status);
@@ -167,4 +194,5 @@ def set_health_failure(plugin_id: str, error: str, status: int) -> dict:
             health["enforcement"] = kept
         conn.execute("UPDATE plugins SET last_health = ?, updated_at = ? WHERE id = ?",
                      (json.dumps(health, sort_keys=True), int(time.time()), plugin_id))
+    log.warning("plugin health check failed %s", kv(plugin=plugin_id, status=status))
     return health

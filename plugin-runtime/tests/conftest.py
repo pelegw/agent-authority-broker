@@ -12,7 +12,12 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
-from aab_plugin_runtime import serve
+from aab_plugin_runtime import logging_setup, serve
+
+# Logging is configured once, at collection, as a plugin process does when it
+# builds its app: serve() inside a test then leaves the handlers alone
+# instead of swapping them under a running log capture.
+logging_setup.configure("plugin-test")
 
 ECHO_DIR = Path(__file__).resolve().parents[2] / "broker" / "tests" / "fixtures" / "echo"
 TOKEN = "test-plugin-token-0123456789"

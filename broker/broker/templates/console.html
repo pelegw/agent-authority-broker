@@ -3213,7 +3213,7 @@ $("settingsForm").onsubmit = async (e) => {
     toast(`Saved: ${names.join(", ")}.`);
   } catch (err) { showErr(err); }
 };
-const ENV_KIND = { bootstrap: "accent", exposure: "warn", deployment: "", compose: "" };
+const ENV_KIND = { bootstrap: "accent", exposure: "warn", deployment: "", compose: "", ops: "" };
 function envValue(v) {
   if (v === null || v === undefined || v === "") return h("span", { class: "sub" }, "not set");
   if (typeof v === "boolean") return badge(String(v), v ? "accent" : "");

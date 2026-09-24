@@ -6,6 +6,7 @@ runtime), and an agent-key factory.
 in phase 3 so every suite can act as the owner; names are unchanged.
 """
 
+import logging
 import sys
 import types
 from pathlib import Path
@@ -22,6 +23,14 @@ if _RUNTIME.is_dir() and str(_RUNTIME) not in sys.path:
         import aab_plugin_runtime  # noqa: F401
     except ImportError:
         sys.path.insert(0, str(_RUNTIME))
+
+# Logging is configured once, at collection, as broker.main does at import.
+# Configuring it later (the first `from broker.main import app` inside a
+# test, or a plugin app's serve()) would swap the root handlers under a
+# test's running log capture; after this, those calls are no-ops.
+from broker import logging_setup  # noqa: E402
+
+logging_setup.configure("broker")
 
 OWNER_USERNAME = "owner"
 OWNER_PASSWORD = "correct horse battery staple"
@@ -64,6 +73,17 @@ def env(tmp_path, monkeypatch):
 def client(env):
     from broker.main import app
     return TestClient(app)
+
+
+@pytest.fixture()
+def logs_to_stderr(monkeypatch):
+    """For tests that run the `aab` CLI and the broker in this one process:
+    the CLI's stdout is its JSON output, and in production the broker's log
+    lines are another process's. The CLI sends its own logging to stderr
+    (cli/aab.py), but here logging was set up for the broker first."""
+    for handler in logging.getLogger().handlers:
+        if hasattr(handler, "stream_name"):          # logging_setup.ConsoleHandler
+            monkeypatch.setattr(handler, "stream_name", "stderr")
 
 
 # ---- owner ---------------------------------------------------------------------

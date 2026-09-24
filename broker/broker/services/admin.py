@@ -10,6 +10,7 @@ graph), which is what makes "agents cannot approve" structural.
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 from .. import auth, db, hidden
@@ -20,16 +21,25 @@ from ..authority.capability import caps_to_json, from_json, normalize_all, to_js
 from ..authority.denies import parse_denies
 from ..authority.roles import check_role
 from ..errors import PolicyError
+from ..logging_setup import kv
 from ..plugins.adapter import AdapterError
 from ..plugins.manifest import ManifestError
 from ..plugins.registry import get_registry
 from .deny_input import normalize_denies
+
+log = logging.getLogger(__name__)
+_GRANT_VERBS = {"active": "approved", "rejected": "rejected", "revoked": "revoked"}
 
 
 def _audit(ctx, action: str, resource: str = "", detail: dict | None = None,
            result: str = "ok") -> None:
     audit(ctx.username, action, resource, detail, result,
           actor_principal=ctx.principal_id, actor_via=ctx.via)
+
+
+def _by(ctx) -> dict:
+    """Who acted, through which surface (session | token | telegram)."""
+    return {"by": ctx.username, "via": ctx.via}
 
 
 # ---- capability / deny input ---------------------------------------------------------
@@ -94,6 +104,9 @@ def create_key(ctx, name: str, role: str, rate_per_min: int, expires_at: int | N
     _audit(ctx, "key.create", str(new.key_id),
            {"name": name, "role": role, "rate_per_min": rate_per_min,
             "expires_at": expires_at, "grant_id": grant_id})
+    log.info("key created %s", kv(key_id=new.key_id, name=name, role=role,
+                                  rate_per_min=rate_per_min, expires_at=expires_at,
+                                  grant=grant_id, capabilities=len(caps), **_by(ctx)))
     return {"id": new.key_id, "name": name, "key": new.plaintext, "role": role,
             "expires_at": expires_at, "grant_id": grant_id,
             "note": "store this key now; it is never shown again"}
@@ -222,6 +235,8 @@ def update_key(ctx, key_id: int, *, role: str | None = None, rate_per_min: int |
             store.set_root_capabilities(root.id, caps)
         detail["capabilities"] = caps_to_json(caps)
     _audit(ctx, "key.update", str(key_id), detail)
+    log.info("key updated %s", kv(key_id=key_id, name=row["name"], fields=sorted(detail),
+                                  disabled=disabled, **_by(ctx)))
     return get_key(key_id)
 
 
@@ -231,6 +246,7 @@ def rotate_key(ctx, key_id: int) -> dict:
     except KeyError as exc:
         raise PolicyError(404, "no such key", "not_found") from exc
     _audit(ctx, "key.rotate", str(key_id))
+    log.info("key rotated %s", kv(key_id=key_id, **_by(ctx)))
     return {"id": key_id, "key": plaintext,
             "note": "the previous secret keeps working until the grace window ends"}
 
@@ -268,7 +284,10 @@ def decide_grant(ctx, grant_id: str, status: str) -> dict:
         g = store.get(grant_id)
         raise PolicyError(409, f"grant is {g.status!r}; cannot become {status!r}", "conflict")
     _audit(ctx, f"grant.{status}", grant_id)
-    return _grant_view(store.get(grant_id))
+    g = store.get(grant_id)
+    log.info("grant decided %s", kv(decision=_GRANT_VERBS.get(status, status), grant=grant_id,
+                                    key_id=g.key_id, kind=g.kind, **_by(ctx)))
+    return _grant_view(g)
 
 
 # ---- queued actions -------------------------------------------------------------------
@@ -286,10 +305,15 @@ def approve_action(ctx, action_id: str) -> dict:
         if not deliver.claim(action_id, "scheduled", now, ctx=ctx):
             raise deliver.conflict(action_id)
         _audit(ctx, "action.approve", action_id, {"run_at": row["run_at"]})
+        log.info("action approved %s", kv(action_id=action_id, target=row["target"],
+                                          action=row["action"], run_at=row["run_at"],
+                                          **_by(ctx)))
         return {"id": action_id, "status": "scheduled", "run_at": row["run_at"]}
     if not deliver.claim(action_id, "sending", now, ctx=ctx):
         raise deliver.conflict(action_id)
     _audit(ctx, "action.approve", action_id)
+    log.info("action approved %s", kv(action_id=action_id, target=row["target"],
+                                      action=row["action"], **_by(ctx)))
     return deliver.deliver_claimed(action_id, queue.get_row(action_id), "pending",
                                    ctx.username, ctx=ctx)
 
@@ -299,6 +323,7 @@ def reject_action(ctx, action_id: str) -> dict:
     if not deliver.claim(action_id, "rejected", int(time.time()), ctx=ctx):
         raise deliver.conflict(action_id)
     _audit(ctx, "action.reject", action_id)
+    log.info("action rejected %s", kv(action_id=action_id, **_by(ctx)))
     return {"id": action_id, "status": "rejected"}
 
 
@@ -308,6 +333,7 @@ def cancel_action(ctx, action_id: str) -> dict:
                          ctx=ctx):
         raise deliver.conflict(action_id, expected="scheduled")
     _audit(ctx, "action.cancel", action_id)
+    log.info("action canceled %s", kv(action_id=action_id, **_by(ctx)))
     return {"id": action_id, "status": "canceled"}
 
 
@@ -341,6 +367,8 @@ def add_hidden(ctx, target: str, kind: str, resource_id: str, label: str = "",
     out = hidden.add(target, kind, rid, label[:200], reason[:500])
     get_registry().clear_cache()
     _audit(ctx, "hidden.add", f"{target}:{kind}:{rid}", {"reason": reason[:200]})
+    # The id only: the label and the owner's reason stay in the database.
+    log.info("resource hidden %s", kv(target=target, kind=kind, resource=rid, **_by(ctx)))
     return out
 
 
@@ -348,4 +376,6 @@ def remove_hidden(ctx, target: str, kind: str, resource_id: str) -> dict:
     if not hidden.remove(target, kind, resource_id):
         raise PolicyError(404, "that resource is not hidden", "not_found")
     _audit(ctx, "hidden.remove", f"{target}:{kind}:{resource_id}")
+    log.info("resource unhidden %s", kv(target=target, kind=kind, resource=resource_id,
+                                        **_by(ctx)))
     return {"target": target, "kind": kind, "resource_id": resource_id, "removed": True}

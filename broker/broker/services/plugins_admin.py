@@ -20,21 +20,29 @@ it for the code exchange.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 
 from ..audit import audit
 from ..config import get_settings
 from ..errors import PolicyError
+from ..logging_setup import kv
 from ..plugins import manifest_view, settings
 from ..plugins.adapter import AdapterError
 from ..plugins.registry import get_registry, plugin_rows
+
+log = logging.getLogger(__name__)
 
 
 def _audit(ctx, action: str, resource: str, detail: dict | None = None,
            result: str = "ok") -> None:
     audit(ctx.username, action, resource, detail, result,
           actor_principal=ctx.principal_id, actor_via=ctx.via)
+
+
+def _by(ctx) -> dict:
+    return {"by": ctx.username, "via": ctx.via}
 
 
 def _entry(plugin_id: str):
@@ -99,11 +107,17 @@ def patch_config(ctx, plugin_id: str, patch: dict) -> dict:
             e.adapter.configure(settings.effective_config(e.manifest, stored), secrets)
         except AdapterError as exc:
             _audit(ctx, "plugin.config", plugin_id, {"fields": sorted(patch)}, "error")
+            log.warning("plugin configure refused by the plugin %s", kv(
+                plugin=plugin_id, status=exc.status, fields=sorted(patch), **_by(ctx)))
             raise _relay_error(exc) from exc
     settings.store_config(plugin_id, stored)
     _propagate_shared(e.manifest, updates)
     _audit(ctx, "plugin.config", plugin_id,
            {"fields": sorted(updates), "secret_fields": sorted(secrets)})
+    # Field NAMES only; a secret's value went to the plugin and nowhere else.
+    log.info("plugin configured %s", kv(plugin=plugin_id, fields=sorted(updates),
+                                        secret_fields=sorted(secrets),
+                                        relayed=bool(secrets or enabled or shared), **_by(ctx)))
     return view(plugin_id)
 
 
@@ -131,10 +145,15 @@ def enable(ctx, plugin_id: str) -> dict:
         e.adapter.configure(config, {})
     except AdapterError as exc:
         _audit(ctx, "plugin.enable", plugin_id, {"error": exc.status}, "error")
+        log.warning("plugin enable refused: configure failed %s",
+                    kv(plugin=plugin_id, status=exc.status, **_by(ctx)))
         raise _relay_error(exc) from exc
     health = refresh_health(plugin_id)
     settings.set_enabled(plugin_id, True)
     _audit(ctx, "plugin.enable", plugin_id, {"healthy": health.get("healthy")})
+    log.info("plugin enabled %s", kv(plugin=plugin_id, healthy=health.get("healthy") is True,
+                                     connected=health.get("connected") is True,
+                                     enforcement=health.get("enforcement"), **_by(ctx)))
     return view(plugin_id)
 
 
@@ -142,6 +161,7 @@ def disable(ctx, plugin_id: str) -> dict:
     _entry(plugin_id)
     settings.set_enabled(plugin_id, False)
     _audit(ctx, "plugin.disable", plugin_id)
+    log.info("plugin disabled %s", kv(plugin=plugin_id, **_by(ctx)))
     return view(plugin_id)
 
 
@@ -207,8 +227,14 @@ def connect_start(ctx, name: str, request_host: str = "") -> dict:
     try:
         out = e.adapter.connect_start(enabled, redirect)
     except AdapterError as exc:
+        log.warning("plugin connect start failed %s",
+                    kv(service=e.service, status=exc.status, **_by(ctx)))
         raise _relay_error(exc) from exc
     _audit(ctx, "plugin.connect_start", e.service, {"plugins": enabled})
+    # The kind only: an OAuth URL carries the state nonce.
+    log.info("plugin connect started %s", kv(
+        service=e.service, connection=e.manifest.connection.kind,
+        kind=out.get("kind") if isinstance(out, dict) else None, plugins=enabled, **_by(ctx)))
     return out
 
 
@@ -219,12 +245,16 @@ def connect_finish(ctx, name: str, code: str | None, state: str | None,
         out = e.adapter.connect_finish(code, state, installation_id)
     except AdapterError as exc:
         _audit(ctx, "plugin.connect_finish", e.service, {"error": exc.status}, "error")
+        log.warning("plugin connect finish failed %s",
+                    kv(service=e.service, status=exc.status, **_by(ctx)))
         raise _relay_error(exc) from exc
     for pid in siblings:
         refresh_health(pid)
     # The authorization code is relayed once and recorded nowhere.
     _audit(ctx, "plugin.connect_finish", e.service,
            {"installation": installation_id is not None})
+    log.info("plugin connect finished %s",
+             kv(service=e.service, installation=installation_id is not None, **_by(ctx)))
     return out
 
 
@@ -241,10 +271,13 @@ def disconnect(ctx, name: str) -> dict:
     try:
         out = e.adapter.disconnect()
     except AdapterError as exc:
+        log.warning("plugin disconnect failed %s",
+                    kv(service=e.service, status=exc.status, **_by(ctx)))
         raise _relay_error(exc) from exc
     for pid in siblings:
         refresh_health(pid)
     _audit(ctx, "plugin.disconnect", e.service)
+    log.info("plugin disconnected %s", kv(service=e.service, **_by(ctx)))
     return out
 
 

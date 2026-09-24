@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 type Config struct {
@@ -20,6 +21,11 @@ type Config struct {
 	InternalToken string
 	// DeviceName is shown in WhatsApp > Linked devices (set at pairing time).
 	DeviceName string
+	// LogLevel is LOG_LEVEL normalized to whatsmeow's names (DEBUG, INFO,
+	// WARN, ERROR); the same variable the Python services read. Anything
+	// else is INFO, and LogLevelInvalid says so (main logs a warning).
+	LogLevel        string
+	LogLevelInvalid bool
 }
 
 // DefaultSessionDir is where session.db lives when neither SESSION_DIR nor
@@ -34,6 +40,7 @@ func FromEnv() (Config, error) {
 		InternalToken: os.Getenv("SIDECAR_TOKEN"),
 		DeviceName:    getenv("DEVICE_NAME", "AAB"),
 	}
+	c.LogLevel, c.LogLevelInvalid = logLevel(os.Getenv("LOG_LEVEL"))
 	if c.InternalToken == "" {
 		return c, fmt.Errorf("SIDECAR_TOKEN is required (shared secret with the gateway)")
 	}
@@ -54,6 +61,24 @@ func sessionDir() string {
 		return v
 	}
 	return DefaultSessionDir
+}
+
+// logLevel maps LOG_LEVEL (case-insensitive; WARNING and CRITICAL as the
+// Python services spell them) onto whatsmeow's level names.
+func logLevel(raw string) (string, bool) {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case "":
+		return "INFO", false
+	case "DEBUG":
+		return "DEBUG", false
+	case "INFO":
+		return "INFO", false
+	case "WARN", "WARNING":
+		return "WARN", false
+	case "ERROR", "CRITICAL":
+		return "ERROR", false
+	}
+	return "INFO", true
 }
 
 func getenv(key, fallback string) string {

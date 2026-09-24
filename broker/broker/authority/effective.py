@@ -17,6 +17,7 @@ can never out-rank an ancestor whose role was lowered after delegation.
 import logging
 from collections.abc import Iterable, Mapping, Sequence
 
+from ..logging_setup import kv
 from ..plugins.manifest import Manifest
 from . import store
 from .capability import Ancestors, Capability, dedupe, no_ancestry
@@ -102,7 +103,7 @@ def effective(auth, now: int, plugin_states: Iterable[PluginState],
         for g in store.list_active_for_key(auth.key_id, now):
             granted.extend(chain_meet(g, store.chain(g.id), lattice, now, chain_ids))
     except ValueError:
-        log.warning("unparseable grant for key %s; failing closed", auth.key_id)
+        log.warning("unparseable grant; failing closed %s", kv(key_id=auth.key_id))
         return []
     caps = _meet_all(granted, ceiling_caps, lattice)
     for role in roles:
@@ -137,7 +138,7 @@ def effective_with_chains(auth, now: int, plugin_states: Iterable[PluginState],
             for c in dedupe(_unexpired(caps, now)):
                 out.setdefault(c, tuple(link.id for link in chain))
     except ValueError:
-        log.warning("unparseable grant for key %s; failing closed", auth.key_id)
+        log.warning("unparseable grant; failing closed %s", kv(key_id=auth.key_id))
         return []
     return sorted(out.items(), key=lambda kv: kv[0])
 

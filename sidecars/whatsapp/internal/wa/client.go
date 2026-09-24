@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -20,6 +21,10 @@ import (
 
 	"aab/sidecars/whatsapp/internal/store"
 )
+
+// LogLevel is whatsmeow's minimum log level (DEBUG, INFO, WARN, ERROR),
+// set by main from LOG_LEVEL before New is called.
+var LogLevel = "INFO"
 
 type Client struct {
 	WM *whatsmeow.Client
@@ -61,7 +66,8 @@ func New(ctx context.Context, sessionDir, deviceName string, st *store.Store) (*
 	wmstore.DeviceProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
 
 	dsn := "file:" + sessionDir + "/session.db?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)"
-	container, err := sqlstore.New(ctx, "sqlite3", dsn, waLog.Stdout("SessionDB", "WARN", true))
+	// Colour off: these lines end up in log files and log shippers.
+	container, err := sqlstore.New(ctx, "sqlite3", dsn, waLog.Stdout("SessionDB", "WARN", false))
 	if err != nil {
 		return nil, fmt.Errorf("open session store: %w", err)
 	}
@@ -70,7 +76,7 @@ func New(ctx context.Context, sessionDir, deviceName string, st *store.Store) (*
 		return nil, fmt.Errorf("get device: %w", err)
 	}
 	c := &Client{
-		WM:        whatsmeow.NewClient(device, waLog.Stdout("WhatsApp", "INFO", true)),
+		WM:        whatsmeow.NewClient(device, waLog.Stdout("WhatsApp", LogLevel, false)),
 		st:        st,
 		container: container,
 	}
@@ -94,8 +100,10 @@ func (c *Client) Close() error {
 // batch of QR codes expires — exit and let Docker restart us for fresh codes.
 func (c *Client) Run(ctx context.Context) error {
 	if c.WM.Store.ID != nil {
+		log.Printf("whatsapp session found; connecting")
 		return c.WM.Connect() // already paired; whatsmeow reconnects on drops
 	}
+	log.Printf("whatsapp not paired; waiting for a QR scan")
 
 	qrChan, err := c.WM.GetQRChannel(ctx)
 	if err != nil {
@@ -109,6 +117,9 @@ func (c *Client) Run(ctx context.Context) error {
 		switch item.Event {
 		case "code":
 			c.setQR(item.Code)
+			// The event only; the code itself is printed below as the QR
+			// block the operator scans, never as a log value.
+			log.Printf("qr event=code")
 			fmt.Println("\n==== Scan this QR with WhatsApp (Settings > Linked devices) ====")
 			qrterminal.GenerateHalfBlock(item.Code, qrterminal.L, os.Stdout)
 			fmt.Println("(also available as PNG via the broker: GET /v1/admin/plugins/whatsapp/connect/qr.png)")
@@ -120,10 +131,11 @@ func (c *Client) Run(ctx context.Context) error {
 			// therefore misread every successful scan as expiry.
 			paired = true
 			c.setQR("")
+			log.Printf("qr event=success")
 			fmt.Println("==== WhatsApp login successful ====")
 		default:
 			// "timeout" (codes expired) and "err-*" land here.
-			fmt.Printf("QR event: %s\n", item.Event)
+			log.Printf("qr event=%s", strconvQuoteIfNeeded(item.Event))
 		}
 	}
 	c.setQR("")
@@ -160,6 +172,16 @@ func (c *Client) waitConnected(ctx context.Context, timeout time.Duration) error
 		case <-ticker.C:
 		}
 	}
+}
+
+// strconvQuoteIfNeeded keeps an event name from whatsmeow on one line.
+func strconvQuoteIfNeeded(s string) string {
+	for _, r := range s {
+		if r <= ' ' || r == '"' || r == '=' || r == '\\' || r > '~' {
+			return fmt.Sprintf("%q", s)
+		}
+	}
+	return s
 }
 
 func (c *Client) setQR(code string) {

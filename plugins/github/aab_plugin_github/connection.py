@@ -51,6 +51,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from aab_plugin_runtime import AdapterError
+from aab_plugin_runtime.logging_setup import kv
 
 from .api import NOT_FOUND, GitHubAPI, GitHubError
 from .app_jwt import KEY_DIR, BadKeyPath, InvalidKey, app_jwt, load_private_key, read_key_file
@@ -264,6 +265,9 @@ class GitHubAppConnection:
             self._state.set("installation_account", info["account"])
             self.reset()
             self._installation = (self._clock(), installation_id, info)
+        log.info("github app installation recorded %s", kv(
+            installation=installation_id, account=info["account"],
+            repository_selection=info["repository_selection"]))
         return {"ok": True, "mode": "app", "account": info["account"],
                 "repository_selection": info["repository_selection"],
                 "installed_permissions": info["permissions"]}
@@ -373,6 +377,7 @@ class GitHubAppConnection:
         "resources": {"repo": [ids]}}); see the module docstring."""
         mode = self.mode()
         if mode == "pat":
+            log.info("github credential %s", kv(mode="pat", enforcement="proxy"))
             return GitHubToken("pat", None, (), self.pat())
         if mode is None:
             raise GitHubError(503, "GitHub is not configured")
@@ -386,9 +391,14 @@ class GitHubAppConnection:
             raise GitHubError(403, f"installation lacks permission {', '.join(lacking)}")
         names = self._names(repos, info["account"])
         key = (inst, names, tuple(sorted(perms.items())))
+        # What the token is FOR (permission and repository names), never
+        # the token.
+        scope = {"permissions": [f"{k}:{v}" for k, v in sorted(perms.items())],
+                 "repos": "all" if names is None else list(names)}
         now = self._clock()
         hit = self._tokens.get(key, now)
         if hit is not None:
+            log.info("github installation token %s", kv(source="cache", **scope))
             return hit
         body: dict = {"permissions": dict(sorted(perms.items()))}
         if names is not None:
@@ -401,6 +411,7 @@ class GitHubAppConnection:
         data = self.api.json(resp, before_effect=True)
         token = _accept(data, perms, names)
         self._tokens.put(key, token, now, _expiry(data.get("expires_at")))
+        log.info("github installation token %s", kv(source="minted", **scope))
         return token
 
     def _names(self, repos: list[str] | None, account: str) -> tuple[str, ...] | None:
@@ -481,8 +492,8 @@ def _accept(data, perms: dict[str, str], names: tuple[str, ...] | None) -> GitHu
     # metadata:read is part of every installation token, asked for or not.
     allowed = {**perms, "metadata": perms.get("metadata", "read")}
     if not isinstance(got, dict) or not within(got, allowed):
-        log.warning("refusing an installation token wider than requested (units: %s)",
-                    sorted(got) if isinstance(got, dict) else "?")
+        log.warning("refusing an installation token wider than requested %s",
+                    kv(units=sorted(got) if isinstance(got, dict) else "?"))
         raise GitHubError(503, "GitHub issued a token wider than requested; refused")
     if names is not None:
         repos = data.get("repositories")

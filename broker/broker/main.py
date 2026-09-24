@@ -2,25 +2,68 @@
 
 Run with exactly ONE uvicorn worker: rate limiting is in-process and SQLite
 writes assume a single writer per database.
+
+Logging is configured first, at import, before the app (or anything that
+logs while it is built) exists: uvicorn imports this module after setting up
+its own handlers, and configure() replaces them (docs/logging.md).
 """
 
+import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from . import logging_setup
 
-from . import __version__, background, crypto, db, mcp_server, openapi_doc
-from .actions import scheduler
-from .config import get_settings, validate_exposure
-from .errors import PolicyError
-from .notify import telegram_inbound
-from .origin import OriginGuardMiddleware
-from .plugins.registry import get_registry, init_registry
-from .routers import (actions, admin, admin_keys, admin_ops, admin_plugins, admin_settings,
-                      admin_telegram, auth, delegations, health, me, oauth, permissions, skill,
-                      targets)
-from .routers import console
+logging_setup.configure("broker")
+
+from fastapi import FastAPI, Request  # noqa: E402
+from fastapi.exceptions import RequestValidationError  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
+
+from . import __version__, background, crypto, db, mcp_server, openapi_doc  # noqa: E402
+from .actions import scheduler  # noqa: E402
+from .config import get_settings, plugin_services, validate_exposure  # noqa: E402
+from .errors import PolicyError  # noqa: E402
+from .logging_setup import kv  # noqa: E402
+from .notify import telegram_inbound  # noqa: E402
+from .origin import OriginGuardMiddleware  # noqa: E402
+from .plugins.registry import get_registry, init_registry  # noqa: E402
+from .request_log import RequestContextMiddleware  # noqa: E402
+from .routers import (actions, admin, admin_keys, admin_ops, admin_plugins,  # noqa: E402
+                      admin_settings, admin_telegram, auth, delegations, health, me, oauth,
+                      permissions, skill, targets)
+from .routers import console  # noqa: E402
+
+log = logging.getLogger(__name__)
+# Request ids the broker's own background jobs use (actions/scheduler.py,
+# notify/telegram_inbound.py). An inbound X-Request-Id with one of these
+# prefixes is replaced, so no caller can pass itself off as the scheduler.
+BACKGROUND_ID_PREFIXES = ("sched-", "tg-")
+
+
+def log_boot(journal_mode: str) -> None:
+    """One line of what this broker runs with. Secrets by NAME only, as set
+    or unset (their names are values here, never keys: a `name=value` pair
+    with a secret's name is what the redaction backstop masks)."""
+    s = get_settings()
+    secrets = {"setup_token": s.setup_token, "broker_secrets_key": s.broker_secrets_key,
+               "decision_signing_key": s.decision_signing_key,
+               "origin_secret": s.origin_secret}
+    log.info("broker starting %s", kv(
+        version=__version__, public_mode=s.public_mode(), cf_access=s.cf_access_enabled,
+        allow_insecure_admin=s.allow_insecure_admin, db=s.broker_db,
+        journal_mode=journal_mode, secrets_set=sorted(n for n, v in secrets.items() if v),
+        secrets_unset=sorted(n for n, v in secrets.items() if not v),
+        mcp_allowed_hosts=s.mcp_allowed_hosts, plugin_services=sorted(plugin_services())))
+    if journal_mode != "wal":
+        log.warning("database is not in WAL mode; concurrent reads will block %s",
+                    kv(journal_mode=journal_mode))
+
+
+def log_registry() -> None:
+    reg = get_registry()
+    log.info("plugin registry ready %s", kv(
+        plugins=sorted(reg.entries()), enabled=reg.enabled_plugins(),
+        unreachable=reg.pending_services(), refused=sorted(reg.refused)))
 
 
 @asynccontextmanager
@@ -28,12 +71,13 @@ async def lifespan(app: FastAPI):
     # Fail closed at boot on unsafe internet-exposure configs (e.g. public mode
     # with the admin plane left on the owner password alone).
     validate_exposure(get_settings())
-    db.init()
+    log_boot(db.init())
     # Secrets entered in the console (the Telegram bot token) must stay
     # readable: refuse to boot if they exist but BROKER_SECRETS_KEY is missing.
     crypto.check_boot()
     # Discover plugin services from env; unreachable ones are retried lazily.
     init_registry()
+    log_registry()
     loops = [background.Loop(scheduler.scheduler_loop),
              # Runs the Telegram poll loop while a bot token is stored and
              # stops it when the token is cleared: no restart is ever needed.
@@ -48,6 +92,7 @@ async def lifespan(app: FastAPI):
         # Telegram tap), so no database work outlives the app.
         for loop in loops:
             await loop.stop()
+        log.info("broker stopped")
 
 
 # In public mode the interactive API docs (which reveal the full surface) are
@@ -130,4 +175,8 @@ class BrokerApp:
 
 # OriginGuard runs first on every request, API and MCP alike: it enforces the
 # Cloudflare origin secret and stamps the trusted client IP into scope state.
-app = OriginGuardMiddleware(BrokerApp(api, mcp_server.mcp_app))
+# RequestContext runs next: the request id every line and decision row of the
+# request carries, and the access line (with the ip OriginGuard stamped).
+app = OriginGuardMiddleware(RequestContextMiddleware(
+    BrokerApp(api, mcp_server.mcp_app), access_logger="broker.access",
+    reserved_prefixes=BACKGROUND_ID_PREFIXES))

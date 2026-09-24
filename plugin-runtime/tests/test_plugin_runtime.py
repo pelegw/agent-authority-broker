@@ -3,6 +3,7 @@ connect dispatch, and multi-adapter services."""
 
 import base64
 import hmac
+import logging
 import os
 
 import pytest
@@ -168,7 +169,7 @@ def test_configure_after_a_key_change_replaces_the_unreadable_slot(tmp_path, key
     with pytest.raises(SecretsUnreadable):
         SecretStore(tmp_path, key).read_all("echo")
     # The warning names the slot and nothing else.
-    assert "'echo'" in caplog.text
+    assert "slot=echo" in caplog.text
     assert "secret-value" not in caplog.text
 
 
@@ -188,7 +189,7 @@ def test_a_readable_slot_still_merges_without_a_warning(tmp_path, key, caplog):
         s.write("echo", {"a": "3", "b": None})
         s.write("echo", {"c": "4"})
     assert s.read_all("echo") == {"a": "3", "c": "4"}
-    assert caplog.text == ""
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_an_invalid_write_leaves_an_unreadable_slot_untouched(tmp_path, key):

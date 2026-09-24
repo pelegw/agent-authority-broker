@@ -12,11 +12,16 @@ Both are no-ops until `origin_secret` is configured, so local/dev runs and the
 test suite run without it.
 """
 
+import logging
 import secrets
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .config import get_settings
+from .logging_setup import kv
+from .request_log import request_path
+
+log = logging.getLogger(__name__)
 
 # Health is exempt so container/orchestrator probes work without the secret.
 _EXEMPT_PATHS = frozenset({"/health", "/v1/health"})
@@ -65,6 +70,11 @@ class OriginGuardMiddleware:
             trusted = secrets.compare_digest(
                 supplied.encode("latin1", "ignore"), s.origin_secret.encode())
             if not trusted and scope.get("path") not in _EXEMPT_PATHS:
+                # Outside the request context (it runs first), so this line
+                # has no request id; the socket peer is the only ip there is.
+                log.warning("request refused: did not come through the trusted edge %s",
+                            kv(method=scope.get("method"), path=request_path(scope),
+                               ip=peer, header_present=bool(supplied)))
                 await _deny(send)
                 return
 

@@ -87,9 +87,8 @@ broker serves the callback page without an owner credential (the provider's
 cross-site redirect carries no SameSite=Strict cookie; Access still applies),
 and the page relays the one-time code through the admin-guarded
 `connect/finish` to the plugin; the broker never sees client secrets or
-refresh tokens. The code does appear once in the broker's access log line for
-the callback (uvicorn logs the query string); it is single-use and expires
-within minutes.
+refresh tokens. The code is not logged: the broker's access line carries the
+path without the query string (`docs/logging.md`).
 
 ## Verify after `docker compose up`
 
@@ -117,7 +116,10 @@ gateway, for example), set `BROKER_PORT` in `.env`.
    shows plain `Up`. `docker compose exec <service> id` answers
    `uid=10001(aab) gid=10001(aab) groups=10001(aab)` in all five.
    `docker compose logs broker` shows no boot refusal. Each plugin's log
-   shows `"GET /manifests HTTP/1.1" 200 OK` (the broker's discovery). The
+   shows `request method=GET path=/manifests status=200 ... actor=plugin:<service>`
+   (the broker's discovery), and the broker's shows `plugin registry ready`
+   with all five plugins. Every line carries a request id; `docs/logging.md`
+   has the format, the levels and how to follow one request across services. The
    sidecar's log shows `internal API listening on :8081` and the pairing QR.
 2. **Published ports.** `docker compose ps` shows a host port only for the
    broker (`127.0.0.1:8080->8080/tcp`), or in public mode only for `edge`
@@ -145,8 +147,8 @@ gateway, for example), set `BROKER_PORT` in `.env`.
    all disabled on first boot. `GET /v1/admin/plugins` answers
    `{"items": [...], "refused": []}` with those five, each naming its
    `service`. A service that was down at boot is not listed yet: the broker
-   logs `plugin service google not reachable yet: plugin service unreachable
-   (ConnectError)` and retries discovery at most every 30 seconds (verified:
+   logs `plugin service not reachable yet; will retry service=google status=503
+   retry_seconds=30` and retries discovery at most every 30 seconds (verified:
    the Google plugins were listed again about 30 seconds after
    `docker compose start plugin-google`, with no broker restart). If one
    stays missing, the container is down or its token does not match the
@@ -238,11 +240,11 @@ one token and one key.
 
 | Container | Receives | Must never receive |
 |---|---|---|
-| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `SITE_DOMAIN` (public overlay only: builds the OAuth redirect URI `https://<SITE_DOMAIN>/oauth/callback/<service>`), `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE`, `BROKER_DB`, `TZ` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, the `wa_data` and `wa_session` volumes |
-| `plugin-whatsapp` | `PLUGIN_TOKEN_WHATSAPP`, `PLUGIN_SECRETS_KEY_WHATSAPP`, `SIDECAR_URL` (`http://whatsapp-sidecar:8081`), `SIDECAR_TOKEN`, `MESSAGES_DB` (`/data/messages.db`), `wa_data` (ro) | Other services' tokens/keys, broker secrets (`DECISION_SIGNING_KEY`, `BROKER_SECRETS_KEY`, `SETUP_TOKEN`, `ORIGIN_SECRET`), the `wa_session` volume |
-| `whatsapp-sidecar` | `SIDECAR_TOKEN`, `DEVICE_NAME`, `TZ`, `SESSION_DIR` (`/session`), `wa_data` (rw), `wa_session` (rw; the only container that mounts it) | Everything else |
-| `plugin-github` | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_GITHUB` / `PLUGIN_SECRETS_KEY_GITHUB`); the App id, slug and private key are console config, not env (+ the optional read-only `/run/secrets/github` bind holding the PEM, a file alternative to pasting it) | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN` |
-| `plugin-google` | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_GOOGLE` / `PLUGIN_SECRETS_KEY_GOOGLE`); nothing Google-specific: the OAuth client id and secret are console config, and the broker passes the redirect URI with each connect | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN`, `SITE_DOMAIN` |
+| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `SITE_DOMAIN` (public overlay only: builds the OAuth redirect URI `https://<SITE_DOMAIN>/oauth/callback/<service>`), `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE`, `BROKER_DB`, `TZ`, `LOG_LEVEL`, `LOG_FORMAT` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, the `wa_data` and `wa_session` volumes |
+| `plugin-whatsapp` | `PLUGIN_TOKEN_WHATSAPP`, `PLUGIN_SECRETS_KEY_WHATSAPP`, `SIDECAR_URL` (`http://whatsapp-sidecar:8081`), `SIDECAR_TOKEN`, `MESSAGES_DB` (`/data/messages.db`), `LOG_LEVEL`, `LOG_FORMAT`, `wa_data` (ro) | Other services' tokens/keys, broker secrets (`DECISION_SIGNING_KEY`, `BROKER_SECRETS_KEY`, `SETUP_TOKEN`, `ORIGIN_SECRET`), the `wa_session` volume |
+| `whatsapp-sidecar` | `SIDECAR_TOKEN`, `DEVICE_NAME`, `TZ`, `LOG_LEVEL`, `SESSION_DIR` (`/session`), `wa_data` (rw), `wa_session` (rw; the only container that mounts it) | Everything else |
+| `plugin-github` | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_GITHUB` / `PLUGIN_SECRETS_KEY_GITHUB`), `LOG_LEVEL`, `LOG_FORMAT`; the App id, slug and private key are console config, not env (+ the optional read-only `/run/secrets/github` bind holding the PEM, a file alternative to pasting it) | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN` |
+| `plugin-google` | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_GOOGLE` / `PLUGIN_SECRETS_KEY_GOOGLE`), `LOG_LEVEL`, `LOG_FORMAT`; nothing Google-specific: the OAuth client id and secret are console config, and the broker passes the redirect URI with each connect | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN`, `SITE_DOMAIN` |
 | `edge` | `SITE_DOMAIN`, `ORIGIN_SECRET`, origin certificate + key, Cloudflare origin-pull CA | Every other secret |
 
 The table names the `.env` entries each container is fed from. Inside a
@@ -299,6 +301,19 @@ of them together with `.env`; see `deploy/DEPLOY.md` > Operations > Backups.
 Telegram bot token); a `broker_data` backup restored without it means
 re-entering them, and the broker refuses to boot while encrypted values exist
 and the key is missing.
+
+## Logs
+
+Every service logs to stdout, one line per event, rotated by Docker (the
+`x-logging` anchor in both compose files: five 10 MB `json-file` files per
+container). Each line carries the request id that the broker's decision rows
+for that request also carry, across broker, plugin and sidecar.
+`LOG_LEVEL` and `LOG_FORMAT` (`text` or `json`) in `.env` set the level and
+format; restart to apply. Follow one service with
+`docker compose logs -f --since 10m broker`, one request with
+`docker compose logs --no-log-prefix | grep <request-id>`. The format, the
+never-logged list, the redaction backstop and shipping logs to a collector
+are in [logging.md](logging.md).
 
 ## Rotating secrets
 

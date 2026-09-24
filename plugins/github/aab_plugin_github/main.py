@@ -46,6 +46,6 @@ async def rate_limited(_: Request, exc: RateLimited) -> JSONResponse:
 def create_app(environ: Mapping[str, str] | None = None,
                adapter: GitHubAdapter | None = None) -> FastAPI:
     env = os.environ if environ is None else environ
-    app = from_env([adapter or build_adapter(env)], dict(env))
+    app = from_env([adapter or build_adapter(env)], dict(env), service="github")
     app.add_exception_handler(RateLimited, rate_limited)
     return app

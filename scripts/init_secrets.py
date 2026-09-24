@@ -127,7 +127,15 @@ SECTIONS: list[tuple[str, list[Entry]]] = [
         Entry("BROKER_PORT", "Port the broker publishes on 127.0.0.1 (local run).", default="8080"),
         Entry("DEVICE_NAME", "Name shown under WhatsApp > Linked devices (applied at pairing).",
               default="AAB"),
-        Entry("TZ", "Timezone for logs.", default="UTC"),
+        Entry("TZ", "Container timezone (log timestamps are always UTC).", default="UTC"),
+        Entry("LOG_LEVEL",
+              "Log level of every service: DEBUG, INFO, WARNING or ERROR (docs/logging.md). "
+              "Read at start.",
+              default="INFO"),
+        Entry("LOG_FORMAT",
+              "Log format of the Python services: text, or json (one object per line, for a "
+              "log collector). Read at start.",
+              default="text"),
         Entry("GITHUB_APP_KEY_DIR",
               "Optional file-based alternative to pasting the GitHub App private key in the "
               "console: host directory bind-mounted read-only into plugin-github at "

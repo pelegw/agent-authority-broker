@@ -28,12 +28,14 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import httpx
 
+from ..logging_setup import current_request_id, kv
 from .manifest import Manifest
 
 log = logging.getLogger(__name__)
@@ -159,7 +161,8 @@ class InProcessAdapter:
             if isinstance(status, int) and 400 <= status <= 599:
                 raise AdapterError(status, getattr(exc, "message", str(exc))) from exc
             # Same rule as the runtime: an unexpected failure is an unknown outcome.
-            log.error("in-process plugin %s failed: %s", self.manifest.id, type(exc).__name__)
+            log.error("in-process plugin failed %s", kv(plugin=self.manifest.id,
+                                                        error=type(exc).__name__))
             raise AdapterError(502, "internal plugin error") from exc
 
     def _connection(self):
@@ -339,7 +342,10 @@ def request(base_url: str, token: str, method: str, path: str, *, json_body: Any
             plugin_id: str | None = None, request_id: str | None = None, raw: bool = False,
             timeout: float = 30.0, factory: ClientFactory | None = None):
     """One plugin API call with the error contract applied. Shared by
-    RemoteAdapter and the registry's manifest discovery."""
+    RemoteAdapter and the registry's manifest discovery.
+
+    Every call carries the id of the request (or background job) in progress,
+    so the plugin's log lines for it carry the same id as the broker's."""
     body = None
     if json_body is not None:
         try:
@@ -351,21 +357,26 @@ def request(base_url: str, token: str, method: str, path: str, *, json_body: Any
     headers = {"X-Plugin-Token": token}
     if plugin_id:
         headers["X-Plugin-Id"] = plugin_id
+    request_id = request_id or current_request_id()
     if request_id:
         headers["X-Request-Id"] = request_id
     if body is not None:
         headers["Content-Type"] = "application/json"
+    started = time.perf_counter()
     try:
         with (factory or _default_client)(base_url, headers, timeout) as client:
             resp = client.request(method, path, content=body)
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        _log_call(plugin_id, method, path, 503, started, type(exc).__name__)
         # Never reached the plugin: definitely not performed, retryable.
         raise AdapterError(503, f"plugin service unreachable ({type(exc).__name__})") from exc
     except httpx.HTTPError as exc:
+        _log_call(plugin_id, method, path, 502, started, type(exc).__name__)
         # The request may already be on the wire (read timeout, reset): the
         # action may have happened. Unknown outcome, never auto-retried.
         raise AdapterError(502, f"plugin call failed with unknown outcome "
                                 f"({type(exc).__name__})") from exc
+    _log_call(plugin_id, method, path, resp.status_code, started)
     if resp.status_code >= 400:
         raise AdapterError(_map_status(resp.status_code), _error_text(resp))
     if raw:
@@ -377,6 +388,15 @@ def request(base_url: str, token: str, method: str, path: str, *, json_body: Any
     if not isinstance(body, dict):
         raise AdapterError(502, "plugin returned an unexpected response shape")
     return body
+
+
+def _log_call(plugin_id: str | None, method: str, path: str, status: int, started: float,
+              error: str | None = None) -> None:
+    # DEBUG: the seams that make plugin calls (the engine's outcome line,
+    # discovery, the console's plugin operations) log the result at INFO.
+    log.debug("plugin call %s", kv(plugin=plugin_id, method=method, path=path, status=status,
+                                   duration_ms=round((time.perf_counter() - started) * 1000),
+                                   error=error))
 
 
 def _map_status(status: int) -> int:

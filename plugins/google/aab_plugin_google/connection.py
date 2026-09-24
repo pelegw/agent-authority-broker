@@ -46,6 +46,7 @@ from urllib.parse import urlencode, urlsplit
 
 import httpx
 from aab_plugin_runtime import AdapterError
+from aab_plugin_runtime.logging_setup import kv
 
 from .scopes import manifest_scopes, names, requirement_urls, scope_url
 from .transport import DEFAULT_TIMEOUT_SECONDS, open_client
@@ -149,7 +150,7 @@ class GoogleOAuthConnection:
             "client_id": client_id, "redirect_uri": redirect, "response_type": "code",
             "scope": " ".join(scopes), "access_type": "offline", "prompt": "consent",
             "include_granted_scopes": "true", "state": nonce})
-        log.info("google consent started for %s", enabled)
+        log.info("google consent started %s", kv(plugins=enabled, scopes=len(scopes)))
         return {"kind": "oauth", "url": f"{AUTH_URL}?{query}"}
 
     def finish(self, code: str | None, state: str | None,
@@ -180,7 +181,9 @@ class GoogleOAuthConnection:
         with self._lock:
             self._cache.clear()
             self._widened = self._refused = False
-        log.info("google connected; %d scopes granted", len(granted))
+        log.info("google connected %s", kv(scopes_granted=names(granted),
+                                           scopes_missing=names(set(pending["scopes"])
+                                                                - set(granted))))
         return {"connected": True, "granted_scopes": names(granted),
                 "missing_scopes": names(set(pending["scopes"]) - set(granted))}
 
@@ -196,9 +199,9 @@ class GoogleOAuthConnection:
                 with open_client(self._transport, self._timeout) as c:
                     revoked = c.post(REVOKE_URL, data={"token": refresh}).status_code == 200
             except httpx.HTTPError as exc:
-                log.warning("google token revocation failed: %s", type(exc).__name__)
+                log.warning("google token revocation failed %s", kv(error=type(exc).__name__))
         self._wipe_credential(slot)
-        log.info("google disconnected (revoked at Google: %s)", revoked)
+        log.info("google disconnected %s", kv(revoked_at_google=revoked))
         return {"ok": True, "revoked": revoked}
 
     def _wipe_credential(self, slot) -> None:
@@ -256,6 +259,8 @@ class GoogleOAuthConnection:
             now = self._clock()
             hit = self._cache.get(urls)
             if hit is not None and hit.expires_at - now > REFRESH_MARGIN_SECONDS:
+                # The scope set this call runs with, never the token.
+                log.info("google access token %s", kv(source="cache", scopes=names(urls)))
                 return hit
             slot = self._secrets()
             refresh = slot.get("refresh_token")
@@ -274,7 +279,8 @@ class GoogleOAuthConnection:
             got = set(str(body.get("scope") or "").split())
             if not got or not got <= set(urls):
                 self._widened = True
-                log.error("google returned a token wider than the requested scope set; refused")
+                log.error("google returned a token wider than the requested scope set; "
+                          "refused %s", kv(requested=names(urls)))
                 raise AdapterError(503, "Google returned a token wider than the requested "
                                         "scopes; refusing it")
             ttl = body.get("expires_in")
@@ -282,6 +288,8 @@ class GoogleOAuthConnection:
                 else _MAX_TOKEN_SECONDS
             token = AccessToken(access, now + min(ttl, _MAX_TOKEN_SECONDS), urls)
             self._cache[urls] = token
+            log.info("google access token %s", kv(source="refreshed", scopes=names(urls),
+                                                  expires_in=min(ttl, _MAX_TOKEN_SECONDS)))
             return token
 
     def invalidate(self, requirements: dict) -> None:
@@ -300,6 +308,7 @@ class GoogleOAuthConnection:
             with open_client(self._transport, self._timeout) as c:
                 resp = c.post(TOKEN_URL, data=form, headers={"Accept": "application/json"})
         except httpx.HTTPError as exc:
+            log.warning("google token endpoint unreachable %s", kv(error=type(exc).__name__))
             raise AdapterError(503, f"Google token endpoint unreachable "
                                     f"({type(exc).__name__})") from exc
         try:
@@ -312,6 +321,10 @@ class GoogleOAuthConnection:
         # Only Google's fixed error vocabulary is ever echoed, never a
         # description (which we do not control).
         error = error if isinstance(error, str) and _ERROR_CODE.fullmatch(error) else "error"
+        # Google's fixed error code and the status: never the form sent.
+        log.warning("google token endpoint refused %s", kv(
+            grant="authorization_code" if exchange else "refresh_token",
+            status=resp.status_code, error=error))
         if resp.status_code in (400, 401):
             if exchange:
                 raise AdapterError(400, f"Google refused the authorization code ({error})")

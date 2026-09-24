@@ -12,13 +12,17 @@ only then the username/password rules, so an unauthenticated caller learns
 nothing about them.
 """
 
+import logging
 import secrets
 
 from .. import db
 from ..audit import audit
 from ..config import get_settings
 from ..errors import PolicyError
+from ..logging_setup import kv
 from . import principals, ratelimit
+
+log = logging.getLogger(__name__)
 
 SETUP_COMPLETED = "setup_completed"
 
@@ -44,6 +48,7 @@ def run(setup_token: str, username: str, password: str, ip: str) -> principals.P
                                   expected.encode("utf-8")):
         ratelimit.record_failure(ip)
         audit("anonymous", "auth.setup_failed", detail={"ip": ip}, result="denied")
+        log.warning("owner setup refused: wrong setup token %s", kv(ip=ip))
         raise PolicyError(403, "invalid setup token", "forbidden")
     try:
         owner = principals.create_owner(username, password)
@@ -52,4 +57,6 @@ def run(setup_token: str, username: str, password: str, ip: str) -> principals.P
     db.set_config(SETUP_COMPLETED, "1")
     audit(owner.username, "auth.setup", owner.username, {"ip": ip},
           actor_principal=owner.id, actor_via="setup")
+    log.info("owner setup completed; the setup token is now inert %s",
+             kv(username=owner.username, ip=ip))
     return owner

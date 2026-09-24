@@ -19,6 +19,7 @@ them, so disabling a plugin pauses its queue instead of dropping it.
 from __future__ import annotations
 
 import json
+import logging
 import string
 import time
 import uuid
@@ -26,8 +27,11 @@ import uuid
 from .. import db, notify
 from ..audit import audit
 from ..errors import PolicyError
+from ..logging_setup import kv
 from ..plugins.registry import get_registry
 from ..runtime_settings import runtime_settings
+
+log = logging.getLogger(__name__)
 
 # A `sending` claim older than this is a crashed delivery: fail it rather
 # than leave it dangling (it may have been sent, so never back to pending).
@@ -97,6 +101,10 @@ def create(auth, *, target: str, action: str, params: dict, decision_id: int,
             " :created_at, :expires_at, :decided_at, :run_at, :decision_id)", row)
     audit(auth.name, "action.queued", row["id"],
           {"target": target, "action": action, "status": status, "run_at": run_at})
+    # Never the params, the note or the resource label: the row holds them.
+    log.info("action created %s", kv(action_id=row["id"], status=status, target=target,
+                                     action=action, key=auth.name, run_at=run_at,
+                                     decision_row=decision_id))
     if status == "pending":
         # The owner must hear about every draft; the fan-out is non-fatal.
         manifest = get_registry().manifests().get(target)
@@ -196,6 +204,7 @@ def cancel_for_key(auth, action_id: str) -> dict:
         if cur.rowcount == 0:
             raise PolicyError(404, "no pending or scheduled action with that id", "not_found")
     audit(auth.name, "action.canceled", action_id)
+    log.info("action canceled by its key %s", kv(action_id=action_id, key=auth.name))
     return {"id": action_id, "status": "canceled"}
 
 
@@ -206,11 +215,17 @@ def sweep(now: int | None = None) -> None:
     enabled = get_registry().enabled_plugins()
     marks = ",".join("?" * len(enabled)) or "NULL"
     with db.connect() as conn:
-        conn.execute(
+        expired = conn.execute(
             "UPDATE actions SET status = 'expired', decided_at = ? WHERE status = 'pending'"
-            f" AND expires_at < ? AND target IN ({marks})", (now, now, *enabled))
-        conn.execute(
+            f" AND expires_at < ? AND target IN ({marks})", (now, now, *enabled)).rowcount
+        stale = conn.execute(
             "UPDATE actions SET status = 'failed', result = ? WHERE status = 'sending'"
             " AND decided_at < ?",
             (json.dumps({"error": "delivery interrupted; outcome unknown"}),
-             now - STALE_SENDING_SECONDS))
+             now - STALE_SENDING_SECONDS)).rowcount
+    if expired:
+        log.info("drafts expired undecided %s", kv(count=expired))
+    if stale:
+        # A delivery that never finished: it may have happened. Never retried.
+        log.warning("interrupted deliveries marked failed (outcome unknown) %s",
+                    kv(count=stale))

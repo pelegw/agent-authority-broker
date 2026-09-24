@@ -11,7 +11,7 @@ from .conftest import OWNER_PASSWORD, SETUP_TOKEN
 
 
 @pytest.fixture()
-def cli_app(env, monkeypatch):
+def cli_app(env, monkeypatch, logs_to_stderr):
     """Route the CLI's httpx.Client to the in-process app; records headers sent."""
     from broker.main import app
     seen = []

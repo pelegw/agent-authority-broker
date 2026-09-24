@@ -1,7 +1,8 @@
 """aab_plugin_runtime: hosts Agent Authority Broker plugin adapters.
 
-A plugin container runs `serve([...adapters], token, secrets_dir, key)`
-under uvicorn. The broker talks to it over the internal plugin API
+A plugin container runs `serve([...adapters], token, secrets_dir, key,
+service=...)` under uvicorn; `serve()` also sets up logging for the process
+(logging_setup.py, docs/logging.md). The broker talks to it over the internal plugin API
 (docs/plugin-api.md); credentials stay in this process, encrypted under the
 service's own key.
 """

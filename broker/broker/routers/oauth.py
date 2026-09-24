@@ -21,9 +21,9 @@ That is safe because the page holds nothing and can do nothing by itself:
   * the plugin checks `state` (single use, 10 minutes), so a code planted by
     someone else cannot complete a connection.
 
-The authorization code does appear once in the broker's access log line for
-this GET (uvicorn logs the query string). It is single-use, expires within
-minutes, and is worthless without the plugin's client secret.
+The authorization code is not logged: the broker writes its own access
+line, with the path only and never the query string, and runs uvicorn with
+--no-access-log (docs/logging.md; tests/test_request_log.py checks it).
 """
 
 import json

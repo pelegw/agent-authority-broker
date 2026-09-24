@@ -2,6 +2,7 @@
 resource lookup for pickers, and the decision record.
 """
 
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, Depends
@@ -11,9 +12,11 @@ from .. import decisions, hidden
 from ..actions import queue
 from ..deps import AdminContext, require_admin
 from ..errors import PolicyError
+from ..logging_setup import kv
 from ..services import admin, plugins_admin
 
 router = APIRouter(dependencies=[Depends(require_admin)])
+log = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------ actions
@@ -85,5 +88,11 @@ def list_decisions(key: int | None = None, target: str | None = None,
 
 
 @router.get("/v1/admin/decisions/verify")
-def verify_decisions(from_id: int | None = None) -> dict:
-    return decisions.verify(from_id)
+def verify_decisions(from_id: int | None = None,
+                     ctx: AdminContext = Depends(require_admin)) -> dict:
+    result = decisions.verify(from_id)
+    # A broken chain is the one result an operator must never miss.
+    log.log(logging.INFO if result["ok"] else logging.ERROR, "decision chain verified %s", kv(
+        ok=result["ok"], checked=result["checked"], first_bad_id=result["first_bad_id"],
+        signed=result["signed"], from_id=from_id, by=ctx.username, via=ctx.via))
+    return result

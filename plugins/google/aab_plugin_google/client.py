@@ -22,7 +22,10 @@ at Google, so retrying it is always safe; a write that timed out may have
 happened, and retrying it could send an email twice.
 
 The bearer token goes only into the Authorization header of this one
-request; it is never logged, never in an error, never in a repr.
+request; it is never logged, never in an error, never in a repr. A refusal
+or failure logs one line: the method, Google's status class and reason code
+and what it maps to; never the URL (its query holds a Gmail search or a
+Drive query from the params) or Google's message.
 """
 
 import logging
@@ -30,6 +33,7 @@ from typing import Any
 
 import httpx
 from aab_plugin_runtime import AdapterError
+from aab_plugin_runtime.logging_setup import kv
 
 from .transport import DEFAULT_TIMEOUT_SECONDS, SAFE_METHODS, open_client
 
@@ -67,16 +71,30 @@ class GoogleClient:
                 resp = c.request(method, url, params=_clean(params), json=json,
                                  content=content, headers=hdrs)
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            log.warning("google api unreachable %s", kv(method=method, error=type(exc).__name__,
+                                                        maps_to=503))
             raise AdapterError(503, f"Google unreachable ({type(exc).__name__})") from exc
         except httpx.HTTPError as exc:
+            log.warning("google api call failed %s", kv(method=method, error=type(exc).__name__,
+                                                        maps_to=503 if read else 502))
             if read:
                 raise AdapterError(503, f"Google read failed ({type(exc).__name__})") from exc
             raise AdapterError(502, "Google call failed with unknown outcome "
                                     f"({type(exc).__name__})") from exc
         if resp.status_code == 401:
             self.connection.invalidate(requirements)
+            log.warning("google api refused the access token; dropped from the cache %s",
+                        kv(method=method, maps_to=503))
             raise AdapterError(503, "Google rejected the access token; retry")
-        _raise_for(resp, read)
+        try:
+            _raise_for(resp, read)
+        except AdapterError as exc:
+            status = resp.status_code
+            log.log(logging.WARNING if status >= 500 or exc.status == 429 else logging.INFO,
+                    "google api refused %s", kv(method=method, google_status=status,
+                                                status_class=f"{status // 100}xx",
+                                                reason=_error(resp)[1], maps_to=exc.status))
+            raise
         if raw:
             return resp.content
         if not resp.content:
@@ -108,7 +126,6 @@ def _raise_for(resp: httpx.Response, read: bool) -> None:
     if 400 <= status < 500:
         raise AdapterError(status, f"Google refused: {message}")
     # 3xx (never followed) and 5xx promise nothing about a write.
-    log.warning("google answered %s", status)
     if read:
         raise AdapterError(503, f"Google answered {status}")
     raise AdapterError(502, f"Google answered {status}; outcome unknown")

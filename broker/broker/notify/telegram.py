@@ -39,7 +39,10 @@ import httpx
 from .. import crypto, db
 from ..audit import audit
 from ..errors import PolicyError
+from ..logging_setup import kv
 from . import cards
+
+log = logging.getLogger(__name__)
 
 TOKEN_NAME = "telegram_bot_token"
 LINK_TTL = 300                     # seconds a one-time link code stays valid
@@ -237,18 +240,25 @@ def _get_me() -> str | None:
     return _bot_username
 
 
-def _send_card(card: cards.Card) -> dict:
-    return _api_send_message(card.text, card.keyboard)
+def _send_card(card: cards.Card, kind: str, item_id: str) -> dict:
+    out = _api_send_message(card.text, card.keyboard)
+    # A card too long for Telegram goes out without buttons, pointing at the
+    # console: the owner reviews the full request there.
+    log.info("telegram card sent %s", kv(kind=kind, id=item_id, buttons=card.approvable))
+    if not card.approvable:
+        log.info("telegram card too long to approve in chat; sent a console pointer %s",
+                 kv(kind=kind, id=item_id))
+    return out
 
 
 # ---- Notifier interface (called from notify._fan_out, which swallows errors) -----
 
 def notify_action(action: dict) -> None:
-    _send_card(cards.action_card(action))
+    _send_card(cards.action_card(action), "action", str(action.get("id", "")))
 
 
 def notify_grant_request(grant: dict) -> None:
-    _send_card(cards.grant_card(grant))
+    _send_card(cards.grant_card(grant), "grant", str(grant.get("id", "")))
 
 
 # ---- admin operations (each takes the acting AdminContext) -----------------------
@@ -317,6 +327,8 @@ def set_token(ctx, token: str) -> dict:
     _bot_username = None
     consume_link()
     _audit(ctx, "telegram.token_set", {"bot_id": bot_id, "bot_changed": changed})
+    log.info("telegram bot token stored %s", kv(bot_changed=changed, by=ctx.username,
+                                                via=ctx.via))
     return status()
 
 
@@ -328,6 +340,8 @@ def clear_token(ctx) -> dict:
     _bot_username = None
     consume_link()
     _audit(ctx, "telegram.token_cleared", {"removed": removed})
+    log.info("telegram bot token cleared %s", kv(removed=removed, by=ctx.username,
+                                                 via=ctx.via))
     return status()
 
 
@@ -343,6 +357,9 @@ def start_linking(ctx) -> dict:
              "principal_id": ctx.principal_id, "username": ctx.username}
     username = _get_me()
     _audit(ctx, "telegram.link_started")
+    # Never the one-time code: whoever sends it to the bot becomes the approver.
+    log.info("telegram link started %s", kv(ttl_seconds=LINK_TTL, by=ctx.username,
+                                            via=ctx.via))
     out = {"linking": True, "code": code, "expires_in": LINK_TTL, "bot_username": username,
            "instructions": (f"Within {LINK_TTL // 60} minutes, from your PRIVATE Telegram chat "
                             f"with @{username or 'your bot'}, send: /start {code}")}
@@ -356,6 +373,7 @@ def set_enabled(ctx, value: bool) -> dict:
         raise PolicyError(400, "link a Telegram chat first", "not_linked")
     db.set_config(CFG_ENABLED, "1" if value else "0")
     _audit(ctx, "telegram.enabled" if value else "telegram.disabled")
+    log.info("telegram channel switched %s", kv(enabled=value, by=ctx.username, via=ctx.via))
     return status()
 
 
@@ -365,10 +383,12 @@ def send_test(ctx) -> dict:
     try:
         _api_send_message("✅ Agent Authority Broker test message. Approvals will arrive here.")
     except TelegramError as exc:
+        log.warning("telegram test message failed %s", kv(status=exc.status))
         raise PolicyError(503 if exc.status == 503 else 502,
                           f"Telegram did not accept the message: {exc}", "telegram_error") \
             from None
     _audit(ctx, "telegram.test")
+    log.info("telegram test message sent %s", kv(by=ctx.username, via=ctx.via))
     return {"sent": True}
 
 
@@ -376,4 +396,5 @@ def unlink(ctx) -> dict:
     _clear_link()
     consume_link()
     _audit(ctx, "telegram.unlinked")
+    log.info("telegram chat unlinked %s", kv(by=ctx.username, via=ctx.via))
     return status()

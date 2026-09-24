@@ -8,4 +8,4 @@ import uvicorn
 
 if __name__ == "__main__":
     uvicorn.run("aab_plugin_google.main:create_app", factory=True,
-                host="0.0.0.0", port=8090, workers=1)
+                host="0.0.0.0", port=8090, workers=1, access_log=False)
