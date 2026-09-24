@@ -28,7 +28,7 @@ cd sidecars/whatsapp && go build ./... && go test ./...
 ```
 
 Both must be green before any commit. CI (`.github/workflows/ci.yml`) runs the
-same plus a skill-drift job (a placeholder until phase 5).
+same plus a skill-drift job (`aab skill build` + `git diff --exit-code integrations/`).
 
 ## Conventions
 
@@ -96,8 +96,8 @@ session's attribution trailers.
 - [x] 1. Identity: owner setup/login/sessions, admin tokens, `require_admin` -> `AdminContext`
 - [x] 2. Authority core: capabilities, grants, `narrow()`, roles, `aab_` keys, hypothesis suite
 - [x] 3. Engine: plugin runtime + registry, policy, decisions, ledger, actions, REST, MCP (parity-tested), Telegram approvals, console-managed settings, per-plugin containers + env split
-- [ ] 4. WhatsApp plugin service (done) + admin console (in progress)
-- [ ] 5. Delegation + generated skill doc (+ CI drift check) (in progress)
-- [ ] 6. GitHub plugin (in progress)
-- [ ] 7. Google plugins (Gmail, Calendar, Drive) + `docs/platform-thesis.md` (in progress)
-- [ ] 8. Simulation (done), docs, release 0.2.0
+- [ ] 4. WhatsApp plugin service (done) + admin console (pass 1 done; pass 2 — channels, settings, delegations — in progress)
+- [x] 5. Delegation + generated skill doc (CI drift job is real) + draft-mode default for agent requests
+- [x] 6. GitHub plugin service (App installation tokens per call; PAT fallback reported as proxy)
+- [x] 7. Google plugin service (Gmail, Calendar, Drive over one OAuth connection) + `docs/platform-thesis.md`
+- [ ] 8. Simulation (done), release docs (done), tag 0.2.0 (pending: SQLite flake hunt, Docker verification)
