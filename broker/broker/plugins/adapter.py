@@ -15,11 +15,18 @@ Error contract (the engine depends on it, see CLAUDE.md):
        never retried automatically
 The plugin token is sent as a header and never appears in an error message,
 a log line or a repr.
+
+Encoding: a request body is UTF-8 JSON with no NaN/Infinity (`encodable`).
+Anything else (a lone surrogate from an agent's JSON, say) is a 400 raised
+here, before the network, never an unhandled exception. The engine applies
+the same rule to agent input before evaluating it, so in practice nothing
+unencodable gets this far.
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -39,6 +46,26 @@ class AdapterError(Exception):
         super().__init__(message)
         self.status = status if isinstance(status, int) and 400 <= status <= 599 else 502
         self.message = message
+
+
+UNENCODABLE = "params must be valid UTF-8 JSON (no lone surrogates, NaN or Infinity)"
+
+
+def encode_json(value: Any) -> bytes:
+    """The exact bytes a plugin request carries (httpx's own rules: UTF-8, no
+    NaN/Infinity). Raises TypeError/ValueError when `value` has no such form."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"),
+                      allow_nan=False).encode("utf-8")
+
+
+def encodable(value: Any) -> bool:
+    """Can `value` cross the plugin API at all? (UnicodeEncodeError is a
+    ValueError; RecursionError covers absurd nesting.)"""
+    try:
+        encode_json(value)
+    except (TypeError, ValueError, RecursionError):
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -165,6 +192,9 @@ class InProcessAdapter:
         return dict(self._call(self.impl.label, kind, list(ids)))
 
     def perform(self, action: str, params: dict, scope: CallScope) -> Result:
+        # Same rule as the remote transport, so the two cannot diverge.
+        if not encodable(params):
+            raise AdapterError(400, UNENCODABLE)
         # The JSON round-trip of the scope is deliberate: the plugin sees
         # exactly the shape a remote plugin would, and cannot mutate ours.
         out = self._call(self.impl.perform, action, dict(params), _jsonable(scope.to_json()))
@@ -185,7 +215,6 @@ class InProcessAdapter:
 
 
 def _jsonable(value: Any) -> Any:
-    import json
     return json.loads(json.dumps(value))
 
 
@@ -288,14 +317,24 @@ def request(base_url: str, token: str, method: str, path: str, *, json_body: Any
             timeout: float = 30.0, factory: ClientFactory | None = None):
     """One plugin API call with the error contract applied. Shared by
     RemoteAdapter and the registry's manifest discovery."""
+    body = None
+    if json_body is not None:
+        try:
+            body = encode_json(json_body)
+        except (TypeError, ValueError, RecursionError) as exc:
+            # Nothing was sent: a plain 400, not an unhandled 500 (which
+            # would also leave a write's budget reservation dangling).
+            raise AdapterError(400, UNENCODABLE) from exc
     headers = {"X-Plugin-Token": token}
     if plugin_id:
         headers["X-Plugin-Id"] = plugin_id
     if request_id:
         headers["X-Request-Id"] = request_id
+    if body is not None:
+        headers["Content-Type"] = "application/json"
     try:
         with (factory or _default_client)(base_url, headers, timeout) as client:
-            resp = client.request(method, path, json=json_body)
+            resp = client.request(method, path, content=body)
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
         # Never reached the plugin: definitely not performed, retryable.
         raise AdapterError(503, f"plugin service unreachable ({type(exc).__name__})") from exc

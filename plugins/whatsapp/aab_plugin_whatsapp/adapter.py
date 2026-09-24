@@ -20,8 +20,10 @@ What this module guarantees, whatever the broker already checked:
   * Every chat and message row carries `resource_ref: {"kind": "chat", "id":
     jid}` (contacts: kind "contact"), so the broker's post-filter can drop
     anything this code ever let through by mistake.
-  * Recipients are normalized (`jid.py`) before any comparison or send; a
-    send to a chat outside the scope is refused before the sidecar sees it.
+  * Ids are normalized (`jid.py`) before any comparison or send. Chats the
+    sidecar cannot send to (status@broadcast, broadcast lists, channels) are
+    readable and hideable, but send_message refuses them with a 400; a send
+    to a chat outside the scope is refused before the sidecar sees it.
   * 503 = not performed, 502 = outcome unknown (see sidecar_client.py). Every
     archive read in a handler happens before its sidecar call, so an archive
     failure is always a 503.
@@ -43,7 +45,7 @@ from aab_plugin_runtime import AdapterError, Result
 
 from .archive import Archive
 from .connection import SidecarQRConnection
-from .jid import normalize_jid
+from .jid import normalize_jid, normalize_recipient
 from .scope import is_visible, visibility
 from .sidecar_client import SidecarClient
 
@@ -119,8 +121,10 @@ class WhatsAppAdapter:
     # ---- resources ---------------------------------------------------------------
 
     def normalize(self, kind: str, value: str) -> str:
+        """A chat may be read-only (broadcast, channel); a contact is a person
+        or group, so it takes the recipient rules."""
         _kind(kind)
-        return normalize_jid(value)
+        return normalize_jid(value) if kind == "chat" else normalize_recipient(value)
 
     def resolve(self, kind: str, query: str, limit: int) -> list[dict]:
         """Ported from WA_GW admin_services.resolve_chats: chats first, then
@@ -245,7 +249,10 @@ class WhatsAppAdapter:
         return Result(binary=data, mime=safe_mime(mime))
 
     def _send_message(self, params: dict, scope: dict) -> Result:
-        to = normalize_jid(_str(params, "to", required=True))
+        # Recipient rules, not chat rules: a status/broadcast/channel chat is
+        # a valid chat id but the sidecar cannot send to it (400, not a 502
+        # from the sidecar after the fact).
+        to = normalize_recipient(_str(params, "to", required=True))
         text = _str(params, "text", required=True, strip=False)
         deny, allow_only = self._chat_scope(scope)
         # The recipient may be a chat the archive has never seen, so this is

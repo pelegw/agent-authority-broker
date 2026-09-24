@@ -7,9 +7,9 @@
 
 (scheduling and draft controls are top-level body fields, never headers, so
 one JSON document fully describes the call). Answers: 200 with the plugin's
-data (or raw bytes for binary actions), 202 `{"status": "pending_approval" |
-"scheduled", "action_id"}`, or `{"error", "code", "hint?"}` with 400 / 403 /
-404 / 429 / 502 / 503.
+data (or raw bytes for binary actions, always as a nosniff attachment), 202
+`{"status": "pending_approval" | "scheduled", "action_id"}`, or
+`{"error", "code", "hint?"}` with 400 / 403 / 404 / 429 / 502 / 503.
 
 The long-poll GET is the only `async def` route (ported from WA_GW
 routers/events.py): the wait sits on the event loop and only each short
@@ -55,7 +55,12 @@ def perform(target: str, action: str, body: ActionBody,
     r = engine.perform(auth, target, action, body.params, as_draft=body.as_draft,
                        run_at=body.run_at, delay_seconds=body.delay_seconds, note=body.note)
     if r.binary is not None:
-        return Response(r.binary, media_type=r.mime or "application/octet-stream")
+        # Target content (a WhatsApp attachment, say) was chosen by a third
+        # party: never let a browser sniff it into HTML or render it inline
+        # on the broker's origin. The engine's filename is a safe token.
+        return Response(r.binary, media_type=r.mime or "application/octet-stream", headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": f'attachment; filename="{r.filename or "download"}"'})
     return JSONResponse(r.body, status_code=r.status)
 
 
@@ -87,11 +92,13 @@ def _query_params(target: str, action: str, request: Request) -> dict:
 async def long_poll(target: str, action: str, request: Request, wait: int = 0,
                     auth: AuthContext = Depends(current_auth)) -> dict:
     """For `long_poll` actions: params as query parameters, `wait` seconds
-    to hold the request until something new arrives."""
+    to hold the request until something new arrives. A call without its
+    cursor is a bootstrap and returns at once (engine.is_bootstrap)."""
     params = _query_params(target, action, request)
     poll = await anyio.to_thread.run_sync(engine.open_poll, auth, target, action, params)
     s = get_settings()
-    deadline = time.monotonic() + max(0, min(wait, s.long_poll_max_wait_seconds))
+    wait = 0 if poll.bootstrap else max(0, min(wait, s.long_poll_max_wait_seconds))
+    deadline = time.monotonic() + wait
     while True:
         data = await anyio.to_thread.run_sync(engine.poll_step, auth, poll)
         if not engine.is_empty(data) or time.monotonic() >= deadline:
