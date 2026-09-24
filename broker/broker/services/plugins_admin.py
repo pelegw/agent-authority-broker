@@ -67,9 +67,8 @@ def refresh_health(plugin_id: str) -> dict:
     try:
         status = adapter.status()
     except AdapterError as exc:
-        health = {"healthy": False, "error": exc.message, "status": exc.status}
-        settings.set_health(plugin_id, health, None)
-        return health
+        # Unhealthy, `connected` unchanged, last reported enforcement kept.
+        return settings.set_health_failure(plugin_id, exc.message, exc.status)
     settings.set_health(plugin_id, status, status.get("connected") is True)
     return status
 

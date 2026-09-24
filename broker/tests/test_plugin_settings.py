@@ -131,6 +131,37 @@ def test_health_failure_keeps_last_connected(client, admin_headers, echo_local, 
     assert body["last_health"]["healthy"] is False and body["connected"] is True
 
 
+@pytest.mark.parametrize("reported", ["proxy", "target"])
+def test_health_failure_keeps_the_last_reported_enforcement(client, admin_headers, echo_local,
+                                                            monkeypatch, reported):
+    # A refresh that fails says nothing about how the credential enforces:
+    # the last value the plugin itself reported must survive it.
+    echo_local.impl.enforcement = reported
+    client.post("/v1/admin/plugins/echo/health", headers=admin_headers)
+    assert get_registry().last_health("echo")["enforcement"] == reported
+
+    def down():
+        raise AdapterError(503, "plugin service unreachable")
+    monkeypatch.setattr(echo_local.impl, "status", down)
+    body = client.post("/v1/admin/plugins/echo/health", headers=admin_headers).json()
+    assert body["last_health"] == {"healthy": False, "error": "plugin service unreachable",
+                                   "status": 503, "enforcement": reported}
+    assert body["connected"] is True
+    # Twice in a row: still kept (the failure record carries it forward).
+    client.post("/v1/admin/plugins/echo/health", headers=admin_headers)
+    assert get_registry().last_health("echo")["enforcement"] == reported
+
+
+def test_health_failure_invents_no_enforcement(echo_local):
+    # Nothing reported before (or garbage): nothing is kept, and the policy
+    # then fails closed to proxy for a non-empty record.
+    for previous in ({"connected": True}, {"enforcement": "banana"}):
+        settings.set_health("echo", previous, True)
+        stored = settings.set_health_failure("echo", "down", 503)
+        assert stored == {"healthy": False, "error": "down", "status": 503}
+        assert get_registry().last_health("echo") == stored
+
+
 def test_disable(client, admin_headers, echo_local):
     body = client.post("/v1/admin/plugins/echo/disable", headers=admin_headers).json()
     assert body["enabled"] is False and get_registry().enabled_plugins() == []

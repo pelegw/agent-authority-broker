@@ -29,6 +29,7 @@ import sys
 import types
 from pathlib import Path
 
+import httpx
 import pytest
 
 from broker import db, hidden
@@ -282,6 +283,53 @@ def test_decisions_record_where_each_call_was_enforced(client, gh_app, make_agen
                            " ORDER BY id DESC LIMIT 1").fetchone()
     where = json.loads(row["enforced_where"])
     assert where["repo"] == "target" and where["permissions"] == "target"
+
+
+def _last_decision_where() -> dict:
+    with db.connect() as conn:
+        row = conn.execute("SELECT enforced_where FROM decisions WHERE kind = 'decision'"
+                           " ORDER BY id DESC LIMIT 1").fetchone()
+    return json.loads(row["enforced_where"])
+
+
+class _Unreachable:
+    """A plugin-API client that never connects (the container is down)."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def request(self, *args, **kwargs):
+        raise httpx.ConnectError("plugin-github is down")
+
+
+@pytest.mark.parametrize("mode,expected", [("gh_pat", "proxy"), ("gh_app", "target")])
+def test_a_failed_health_refresh_never_changes_the_reported_enforcement(
+        request, client, admin_headers, make_agent, monkeypatch, mode, expected):
+    """A refresh while plugin-github is unreachable must not let the broker
+    fall back to the manifest's "target": a PAT-mode plugin that comes back
+    without another refresh is still reported as proxy (and an App-mode one
+    still as target)."""
+    request.getfixturevalue(mode)
+    adapter = get_registry().adapter("github")
+    working = adapter._factory
+    monkeypatch.setattr(adapter, "_factory", lambda *args, **kwargs: _Unreachable())
+    view = _admin(client, admin_headers, "POST", "/health")
+    assert view["last_health"]["healthy"] is False
+    assert view["last_health"]["enforcement"] == expected
+    assert view["connected"] is True                     # an outage is not a disconnect
+    # The plugin comes back; nobody refreshes its health.
+    monkeypatch.setattr(adapter, "_factory", working)
+    a = make_agent([gh_cap(["get_file"])])
+    where = client.get("/v1/me", headers=a.headers).json()["targets"]["github"][
+        "enforced_where"]
+    assert where["repo"] == expected and where["permissions"] == expected
+    r = call(client, a, "get_file", {"repo": "octo/a", "path": "README.md"})
+    assert r.status_code == 200, r.text
+    decided = _last_decision_where()
+    assert decided["repo"] == expected and decided["permissions"] == expected
 
 
 # ---- hidden == 404 on every surface ------------------------------------------------------
