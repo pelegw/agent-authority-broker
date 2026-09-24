@@ -3,7 +3,9 @@
 REST (routers/targets.py) and MCP (next lane) both call `perform`, so policy,
 recording, budgets and error mapping can never diverge between surfaces.
 
-  1. scheduling input is validated (400, nothing else happens);
+  1. scheduling input is validated (400, nothing else happens), and agent
+     input that cannot cross the plugin API as UTF-8 JSON (a lone surrogate,
+     NaN) is a recorded 400 deny before anything else looks at it;
   2. `policy.evaluate` decides;
   3. a `decision` row is appended to the hash-chained record BEFORE any side
      effect, for denies too;
@@ -17,10 +19,18 @@ recording, budgets and error mapping can never diverge between surfaces.
 
 `execute` is steps 5 and 6 alone; actions/deliver.py reuses it for queued
 actions after its own re-check.
+
+Long-poll: a `long_poll` action that declares a `cursor` param, called
+without one, is a bootstrap ("start from now"): it is answered at once
+whatever `wait` says, since holding it would skip everything that arrives
+during the wait.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -30,7 +40,8 @@ from . import decisions, ledger
 from .actions import queue
 from .errors import PolicyError
 from .hidden import is_denied
-from .plugins.adapter import AdapterError, CallScope, Result
+from .plugins.adapter import UNENCODABLE, AdapterError, CallScope, Result, encodable
+from .plugins.manifest import Action
 from .plugins.registry import get_registry
 from .policy import NOT_FOUND, Decision, evaluate
 
@@ -48,6 +59,7 @@ class EngineResult:
     body: Any = None              # JSON body (data, or the 202 envelope)
     binary: bytes | None = None
     mime: str | None = None
+    filename: str | None = None   # download name for a binary result
 
 
 def new_request_id() -> str:
@@ -60,8 +72,24 @@ def record_decision(auth, target: str, action: str, params: Any, d: Decision,
     return decisions.record(
         request_id=request_id, kind="decision", auth=auth, target=target, action=action,
         grant_chain=d.grant_chain_ids, resource=d.resource,
-        params=d.params if d.params else params, decision=d.decision, reason=d.reason,
-        enforced_where=d.enforced_where, actor_principal=actor_principal, actor_via=actor_via)
+        p_hash=safe_params_hash(d.params if d.params else params), decision=d.decision,
+        reason=d.reason, enforced_where=d.enforced_where, actor_principal=actor_principal,
+        actor_via=actor_via)
+
+
+def safe_params_hash(params: Any) -> str:
+    """decisions.params_hash, except for input it cannot encode (the very
+    input a 400 deny is about): that is hashed from its ASCII-escaped form,
+    so the deny is still recorded instead of crashing the recorder."""
+    if encodable(params):
+        return decisions.params_hash(params)
+    escaped = json.dumps(params, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                         default=repr)
+    return hashlib.sha256(escaped.encode("ascii")).hexdigest()
+
+
+def _unencodable_deny() -> Decision:
+    return Decision("deny", 400, "invalid_params", UNENCODABLE, "invalid_params")
 
 
 def deny_error(d: Decision) -> PolicyError:
@@ -73,8 +101,14 @@ def perform(auth, target: str, action: str, params: Any, *, as_draft: bool = Fal
             note: str = "") -> EngineResult:
     when = queue.resolve_run_at(run_at, delay_seconds)
     request_id = new_request_id()
-    d = evaluate(auth, target, action, params, int(time.time()), as_draft=as_draft,
-                 scheduled=when is not None, request_id=request_id)
+    if not (encodable(params) and encodable(note)):
+        # Before evaluate: nothing downstream (normalize, the plugin, the
+        # ledger, the queue, notifications) ever sees input that cannot be
+        # sent on, and no budget is reserved for it.
+        d = _unencodable_deny()
+    else:
+        d = evaluate(auth, target, action, params, int(time.time()), as_draft=as_draft,
+                     scheduled=when is not None, request_id=request_id)
     decision_id = record_decision(auth, target, action, params, d, request_id)
     if d.decision == "deny":
         raise deny_error(d)
@@ -82,8 +116,27 @@ def perform(auth, target: str, action: str, params: Any, *, as_draft: bool = Fal
         return _enqueue(auth, target, action, d, decision_id, when, note)
     result = execute(auth, d, target, action, request_id)
     if result.binary is not None:
-        return EngineResult(200, binary=result.binary, mime=result.mime)
+        act = get_registry().manifests()[target].action(action)
+        return EngineResult(200, binary=result.binary, mime=result.mime,
+                            filename=download_name(act, d.params, d.resource))
     return EngineResult(200, body=result.data)
+
+
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._@+-]")
+
+
+def download_name(act: Action, params: dict, resource: str) -> str:
+    """A download name for a binary result, from the manifest alone: the
+    call's most specific id, i.e. the first required string param that is
+    not the selector (WhatsApp get_media: message_id), else the resource id
+    (echo get_blob: item_id), else the action name. Reduced to a safe token
+    so it can never break out of a quoted header value."""
+    props = act.params.get("properties") or {}
+    name = next((params[p] for p in act.params.get("required") or ()
+                 if p != act.selector_param and (props.get(p) or {}).get("type") == "string"
+                 and isinstance(params.get(p), str) and params[p]), None) or resource
+    safe = _UNSAFE_NAME.sub("_", name or "")[:100].strip("._")
+    return safe or act.name
 
 
 def _enqueue(auth, target: str, action: str, d: Decision, decision_id: int,
@@ -213,6 +266,7 @@ class Poll:
     target: str
     action: str
     params: dict
+    bootstrap: bool = False       # no cursor: answer at once, never wait
 
 
 def open_poll(auth, target: str, action: str, params: Any) -> Poll:
@@ -221,14 +275,24 @@ def open_poll(auth, target: str, action: str, params: Any) -> Poll:
     manifest = get_registry().manifests().get(target)
     act = manifest.action(action) if manifest else None
     request_id = new_request_id()
-    d = evaluate(auth, target, action, params, int(time.time()), request_id=request_id)
+    if not encodable(params):
+        d = _unencodable_deny()
+    else:
+        d = evaluate(auth, target, action, params, int(time.time()), request_id=request_id)
     if d.decision != "deny" and not (act and act.long_poll):
         d = Decision("deny", 400, "not_long_poll", "this action does not long-poll",
                      "bad_request", params=d.params, side_effect=d.side_effect)
     record_decision(auth, target, action, params, d, request_id)
     if d.decision == "deny":
         raise deny_error(d)
-    return Poll(request_id, target, action, d.params)
+    return Poll(request_id, target, action, d.params, bootstrap=is_bootstrap(act, d.params))
+
+
+def is_bootstrap(act: Action | None, params: dict) -> bool:
+    """A long-poll call with no cursor although the action takes one: the
+    plugin answers "start from here", which there is no point waiting on."""
+    props = (act.params.get("properties") or {}) if act else {}
+    return "cursor" in props and params.get("cursor") is None
 
 
 def poll_step(auth, poll: Poll) -> Any:
@@ -249,7 +313,7 @@ def poll_step(auth, poll: Poll) -> Any:
 def close_poll(auth, poll: Poll, outcome: str = "ok") -> None:
     decisions.record(request_id=poll.request_id, kind="outcome", auth=auth,
                      target=poll.target, action=poll.action,
-                     p_hash=decisions.params_hash(poll.params), outcome=outcome)
+                     p_hash=safe_params_hash(poll.params), outcome=outcome)
 
 
 def is_empty(data: Any) -> bool:

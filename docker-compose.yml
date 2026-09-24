@@ -76,16 +76,24 @@ services:
       context: ./plugins/whatsapp
       additional_contexts:
         runtime: ./plugin-runtime   # the aab-plugin-runtime package
-        repo: .                     # VERSION and the vendored manifests
     restart: unless-stopped
     depends_on: [whatsapp-sidecar]
     networks: [broker_net, wa_internal]
     volumes:
-      - wa_data:/data:ro            # sidecar-owned archive + session; read-only here
-      - whatsapp_secrets:/secrets   # this plugin's own encrypted config
+      # Sidecar-owned archive + session; read-only here. SQLite reads the WAL
+      # archive through the sidecar's -shm file, so archive reads answer 503
+      # while the sidecar is down (never stale or partial data).
+      - wa_data:/data:ro
+      - whatsapp_secrets:/secrets   # this plugin's own encrypted secret store
+    # Inside the container the names are generic (aab_plugin_runtime.from_env
+    # reads PLUGIN_TOKEN / PLUGIN_SECRETS_KEY / PLUGIN_SECRETS_DIR); the values
+    # are this service's own .env entries, so no other service's token or key
+    # can reach it. SIDECAR_URL / SIDECAR_TOKEN / MESSAGES_DB are deployment
+    # values, deliberately not console config (the manifest declares none).
     environment:
-      PLUGIN_TOKEN_WHATSAPP: ${PLUGIN_TOKEN_WHATSAPP:?run 'python scripts/init_secrets.py' to create .env}
-      PLUGIN_SECRETS_KEY_WHATSAPP: ${PLUGIN_SECRETS_KEY_WHATSAPP:?run 'python scripts/init_secrets.py' to create .env}
+      PLUGIN_TOKEN: ${PLUGIN_TOKEN_WHATSAPP:?run 'python scripts/init_secrets.py' to create .env}
+      PLUGIN_SECRETS_KEY: ${PLUGIN_SECRETS_KEY_WHATSAPP:?run 'python scripts/init_secrets.py' to create .env}
+      PLUGIN_SECRETS_DIR: /secrets
       SIDECAR_URL: http://whatsapp-sidecar:8081
       SIDECAR_TOKEN: ${SIDECAR_TOKEN:?run 'python scripts/init_secrets.py' to create .env}
       MESSAGES_DB: /data/messages.db
