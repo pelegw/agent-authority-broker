@@ -11,9 +11,18 @@ upgrade never requires recreating the database.
 
 Timestamps are unix seconds (INTEGER) throughout. JSON columns hold compact
 JSON text; the owning module is the only writer of each JSON shape.
+
+The file runs in WAL mode, switched on ONCE by init(). journal_mode=WAL is
+persistent (it is recorded in the file header), so connect() never repeats
+it: on a new file the switch needs exclusive access, and when two
+connections attempt it at once SQLite fails one of them immediately
+("database is locked", skipping the busy wait to avoid a deadlock). A
+per-connect pragma turned any two first connections into that race.
 """
 
+import contextlib
 import sqlite3
+import time
 
 from .config import get_settings
 
@@ -249,12 +258,36 @@ TABLES = (
 )
 
 
+# How long a statement waits for another connection's lock before failing.
+BUSY_TIMEOUT_SECONDS = 10.0
+
+
 def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(get_settings().broker_db)
+    # timeout= installs SQLite's busy handler before the first statement runs.
+    # No journal_mode pragma here: init() sets WAL once (see the docstring).
+    conn = sqlite3.connect(get_settings().broker_db, timeout=BUSY_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=10000")
     return conn
+
+
+def _enable_wal(conn: sqlite3.Connection) -> str:
+    """Put the file in WAL mode (a no-op once it is). Returns the mode.
+
+    Switching a new file to WAL upgrades a read lock to an exclusive one.
+    When another connection is mid-switch or mid-write, SQLite fails that
+    upgrade at once with SQLITE_BUSY instead of waiting (the busy handler is
+    skipped to avoid a deadlock), so the waiting is done here, bounded by the
+    same timeout every other statement gets.
+    """
+    deadline = time.monotonic() + BUSY_TIMEOUT_SECONDS
+    while True:
+        try:
+            return conn.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower()
+        except sqlite3.OperationalError as exc:
+            busy = (getattr(exc, "sqlite_errorcode", 0) & 0xFF) == sqlite3.SQLITE_BUSY
+            if not busy or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
 
 
 # Columns added after the first release, as {table: {column: declaration}};
@@ -272,8 +305,10 @@ def _migrate(conn) -> None:
 
 
 def init() -> None:
-    """Create tables if missing and add any new columns. Called at startup."""
-    with connect() as conn:
+    """Switch the file to WAL, create tables if missing and add any new
+    columns. Called at startup, before anything else opens the database."""
+    with contextlib.closing(connect()) as conn, conn:
+        _enable_wal(conn)
         conn.executescript(SCHEMA)
         _migrate(conn)
 

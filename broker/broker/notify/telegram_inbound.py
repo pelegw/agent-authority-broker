@@ -33,7 +33,7 @@ import secrets
 
 import anyio.to_thread
 
-from .. import db
+from .. import background, db
 from ..actions import queue
 from ..audit import audit
 from ..authority import store
@@ -245,12 +245,13 @@ async def poll_loop() -> None:
         telegram.poll_running(False)
 
 
-async def _stop(task: asyncio.Task | None) -> None:
-    if task is None:
+async def _stop(loop: background.Loop | None) -> None:
+    """Stop the poll loop, waiting for a tap it is still deciding. A loop
+    that crashed is only collected here: its error is not the caller's."""
+    if loop is None:
         return
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError, Exception):
-        await task
+    with contextlib.suppress(Exception):
+        await loop.stop()
 
 
 async def supervise(interval: float | None = None) -> None:
@@ -260,7 +261,7 @@ async def supervise(interval: float | None = None) -> None:
     different token restarts it, a cleared or unreadable token stops it. A
     loop that died unexpectedly is restarted on the next tick.
     """
-    task: asyncio.Task | None = None
+    loop: background.Loop | None = None
     current: str | None = None
     try:
         while True:
@@ -268,12 +269,13 @@ async def supervise(interval: float | None = None) -> None:
                 want = await anyio.to_thread.run_sync(telegram.desired_state)
             except Exception:
                 want = None               # state unreadable: stop, never guess
-            if task is not None and task.done():
-                task, current = None, None
+            if loop is not None and loop.done():
+                await _stop(loop)
+                loop, current = None, None
             if want != current:
-                await _stop(task)
-                task = asyncio.create_task(poll_loop()) if want is not None else None
+                await _stop(loop)
+                loop = background.Loop(poll_loop) if want is not None else None
                 current = want
             await asyncio.sleep(SUPERVISE_INTERVAL if interval is None else interval)
     finally:
-        await _stop(task)
+        await _stop(loop)

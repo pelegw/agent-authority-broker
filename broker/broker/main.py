@@ -4,15 +4,13 @@ Run with exactly ONE uvicorn worker: rate limiting is in-process and SQLite
 writes assume a single writer per database.
 """
 
-import asyncio
-import contextlib
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from . import __version__, crypto, db, mcp_server, openapi_doc
+from . import __version__, background, crypto, db, mcp_server, openapi_doc
 from .actions import scheduler
 from .config import get_settings, validate_exposure
 from .errors import PolicyError
@@ -36,20 +34,20 @@ async def lifespan(app: FastAPI):
     crypto.check_boot()
     # Discover plugin services from env; unreachable ones are retried lazily.
     init_registry()
-    tasks = [asyncio.create_task(scheduler.scheduler_loop()),
+    loops = [background.Loop(scheduler.scheduler_loop),
              # Runs the Telegram poll loop while a bot token is stored and
              # stops it when the token is cleared: no restart is ever needed.
-             asyncio.create_task(telegram_inbound.supervise())]
+             background.Loop(telegram_inbound.supervise)]
     try:
         # The MCP session manager MUST run inside the app's lifespan, else
         # /mcp requests die with "Task group is not initialized".
         async with mcp_server.run_session_manager():
             yield
     finally:
-        for task in tasks:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        # Each stop waits for the loop's in-flight thread (a delivery, a
+        # Telegram tap), so no database work outlives the app.
+        for loop in loops:
+            await loop.stop()
 
 
 # In public mode the interactive API docs (which reveal the full surface) are
