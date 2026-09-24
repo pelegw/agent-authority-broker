@@ -4,13 +4,14 @@ clearing it starts or stops the poll loop at runtime, with no restart."""
 
 import asyncio
 import json
+import threading
 import time
 
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
-from broker import crypto, db
+from broker import background, crypto, db
 from broker.config import get_settings
 from broker.notify import telegram as tg
 from broker.notify import telegram_inbound as inbound
@@ -169,7 +170,8 @@ def fake_loop(monkeypatch):
 def test_supervisor_starts_restarts_and_stops_the_loop(secrets_key, admin_ctx, fake_loop,
                                                        no_network):
     async def scenario():
-        sup = asyncio.create_task(inbound.supervise(interval=0.01))
+        # Driven the way the app lifespan drives it (background.Loop).
+        sup = background.Loop(inbound.supervise, 0.01)
 
         async def settle():
             await asyncio.sleep(0.1)
@@ -187,9 +189,7 @@ def test_supervisor_starts_restarts_and_stops_the_loop(secrets_key, admin_ctx, f
         assert fake_loop == {"started": 2, "stopped": 2}
         tg.set_token(admin_ctx, TELEGRAM_TOKEN)
         await settle()
-        sup.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await sup
+        await sup.stop()
         assert fake_loop == {"started": 3, "stopped": 3}         # shutdown stops it too
 
     asyncio.run(scenario())
@@ -205,11 +205,9 @@ def test_supervisor_restarts_a_loop_that_died(secrets_key, admin_ctx, monkeypatc
     tg.set_token(admin_ctx, TELEGRAM_TOKEN)
 
     async def scenario():
-        sup = asyncio.create_task(inbound.supervise(interval=0.01))
+        sup = background.Loop(inbound.supervise, 0.01)
         await asyncio.sleep(0.1)
-        sup.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await sup
+        await sup.stop()
 
     asyncio.run(scenario())
     assert len(runs) >= 2
@@ -235,3 +233,22 @@ def test_the_app_starts_and_stops_the_loop_without_a_restart(admin_headers, secr
         assert c.delete("/v1/admin/telegram/token", headers=admin_headers).status_code == 200
         assert wait_for(lambda: fake_loop["stopped"] == 1)
     assert fake_loop == {"started": 1, "stopped": 1}
+
+
+def test_app_shutdown_waits_for_a_tap_in_flight(fake_telegram, monkeypatch):
+    # Stopping the supervisor stops its poll loop the same way: a tap being
+    # decided in a worker thread finishes before the app is down.
+    monkeypatch.setattr(inbound, "SUPERVISE_INTERVAL", 0.02)
+    started, finished = threading.Event(), threading.Event()
+
+    def slow_handle(update):
+        started.set()
+        time.sleep(0.3)
+        finished.set()
+
+    monkeypatch.setattr(inbound, "_handle_update", slow_handle)
+    fake_telegram["inject"]({"update_id": 1, "message": {"text": "hi"}})
+    from broker.main import app
+    with TestClient(app):
+        assert started.wait(5)
+    assert finished.is_set()

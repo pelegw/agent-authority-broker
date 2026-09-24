@@ -81,8 +81,8 @@ def sandbox(on_disk: bool = False):
 
 
 def _memory_connect(uri: str):
-    """db.connect's contract (Row factory, busy timeout) on the in-memory DB;
-    WAL does not apply to memory databases, so that pragma is dropped."""
+    """db.connect's contract (Row factory, busy timeout) on the in-memory DB.
+    (WAL is set by db.init(); on a memory database that is a no-op.)"""
     def connect() -> sqlite3.Connection:
         conn = sqlite3.connect(uri, uri=True)
         conn.row_factory = sqlite3.Row

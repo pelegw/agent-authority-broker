@@ -1,9 +1,13 @@
 """The scheduler: due scheduled actions fire once, races resolve, transient
 failures retry, disabled plugins hold. Ported from WA_GW test_scheduled."""
 
-import pytest
+import threading
+import time
 
-from broker import auth, db, engine, ledger
+import pytest
+from fastapi.testclient import TestClient
+
+from broker import auth, background, db, engine, ledger
 from broker.actions import queue, scheduler
 from broker.authority import store
 from broker.plugins import settings
@@ -148,14 +152,33 @@ def test_scheduler_loop_survives_errors(monkeypatch, env):
     monkeypatch.setattr(scheduler, "_tick", boom)
 
     async def run():
-        task = asyncio.create_task(scheduler.scheduler_loop())
+        loop = background.Loop(scheduler.scheduler_loop)     # as the lifespan runs it
         await asyncio.sleep(0.05)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        await loop.stop()
 
     asyncio.run(run())
     assert calls
     with db.connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM audit_log WHERE action = 'scheduler.error'"
                             ).fetchone()[0] >= 1
+
+
+def test_app_shutdown_waits_for_a_tick_in_flight(env, monkeypatch):
+    # Regression: the lifespan cancelled the scheduler with a native
+    # Task.cancel(), which returned while the tick's worker thread was still
+    # running, so a tick (a delivery, even) could outlive the app; in the
+    # suite it went on to open the next test's database mid-setup.
+    from broker.main import app
+
+    started, finished = threading.Event(), threading.Event()
+
+    def slow_tick():
+        started.set()
+        time.sleep(0.3)
+        finished.set()
+        return 0
+
+    monkeypatch.setattr(scheduler, "_tick", slow_tick)
+    with TestClient(app):
+        assert started.wait(5)
+    assert finished.is_set()
