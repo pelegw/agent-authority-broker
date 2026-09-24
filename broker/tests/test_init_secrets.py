@@ -1,6 +1,7 @@
 """scripts/init_secrets.py: generates every deployment secret (the broker's
 own plus a token and a key per plugin service), never prints one, refuses to
-clobber, rotates exactly one line, and matches .env.example.
+clobber, rotates exactly one line, and matches .env.example. Third-party
+credentials have no entry at all: they are entered in the console.
 
 The script is run as a subprocess (as an operator would run it), with the
 interpreter running the tests.
@@ -24,9 +25,19 @@ FERNET_KEYS = ["BROKER_SECRETS_KEY", "PLUGIN_SECRETS_KEY_WHATSAPP",
 HEX_TOKENS = ["SIDECAR_TOKEN", "ORIGIN_SECRET", "DECISION_SIGNING_KEY",
               "PLUGIN_TOKEN_WHATSAPP", "PLUGIN_TOKEN_GITHUB", "PLUGIN_TOKEN_GOOGLE"]
 GENERATED = ["SETUP_TOKEN", *HEX_TOKENS, *FERNET_KEYS]
-PLACEHOLDERS = ["GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GOOGLE_OAUTH_CLIENT_ID",
-                "GOOGLE_OAUTH_CLIENT_SECRET", "TELEGRAM_BOT_TOKEN", "CF_ACCESS_TEAM_DOMAIN",
-                "CF_ACCESS_AUD", "SITE_DOMAIN"]
+# Public-mode exposure values: the only hand-filled entries left in the file.
+PLACEHOLDERS = ["CF_ACCESS_TEAM_DOMAIN", "CF_ACCESS_AUD", "SITE_DOMAIN"]
+# Third-party credentials that moved to the console (docs/configuration.md).
+CONSOLE_ONLY = ["GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GOOGLE_OAUTH_CLIENT_ID",
+                "GOOGLE_OAUTH_CLIENT_SECRET", "TELEGRAM_BOT_TOKEN"]
+# Every key the file carries, in order. A new key must be a conscious choice
+# (docs/configuration.md: files hold only what cannot live in the database).
+EXPECTED_KEYS = ["SETUP_TOKEN", "ORIGIN_SECRET", "BROKER_SECRETS_KEY", "DECISION_SIGNING_KEY",
+                 "PLUGIN_TOKEN_WHATSAPP", "PLUGIN_SECRETS_KEY_WHATSAPP", "SIDECAR_TOKEN",
+                 "PLUGIN_TOKEN_GITHUB", "PLUGIN_SECRETS_KEY_GITHUB", "PLUGIN_TOKEN_GOOGLE",
+                 "PLUGIN_SECRETS_KEY_GOOGLE", *PLACEHOLDERS, "BROKER_PORT", "DEVICE_NAME", "TZ",
+                 "GITHUB_APP_KEY_DIR", "MCP_ALLOWED_HOSTS", "CF_ACCESS_ENABLED",
+                 "CF_ACCESS_ALLOWED_EMAILS", "ALLOW_INSECURE_ADMIN"]
 
 
 def run(*args) -> subprocess.CompletedProcess:
@@ -168,7 +179,35 @@ def test_plugin_service_values_are_described_per_container(out):
         assert f"plugin-{svc.lower()}" in comment(f"PLUGIN_SECRETS_KEY_{svc}")
     assert "plugin-whatsapp" in comment("SIDECAR_TOKEN")
     assert "whatsapp-sidecar" in comment("SIDECAR_TOKEN")
-    assert "github plugin container" in comment("GITHUB_APP_PRIVATE_KEY_PATH")
+    assert "plugin-github" in comment("GITHUB_APP_KEY_DIR")
+    assert "optional" in comment("GITHUB_APP_KEY_DIR").lower()
+
+
+def test_the_file_holds_exactly_the_expected_keys(out):
+    run("--out", out)
+    assert list(parse(out)) == EXPECTED_KEYS
+
+
+def test_third_party_credentials_are_not_in_the_file_but_in_the_checklist(out):
+    r = run("--out", out)
+    assert r.returncode == 0, r.stderr
+    text = out.read_text(encoding="utf-8")
+    for name in CONSOLE_ONLY:
+        assert f"{name}=" not in text, name
+    # The checklist says where each one goes instead.
+    assert "Entered in the console" in r.stdout
+    for where in ("Channels > Telegram", "Plugins > GitHub", "Plugins > Google"):
+        assert where in r.stdout, where
+    assert "BotFather" in r.stdout
+
+
+def test_broker_secrets_key_describes_what_it_protects(out):
+    run("--out", out)
+    lines = out.read_text(encoding="utf-8").splitlines()
+    comment = lines[lines.index(next(l for l in lines if l.startswith("BROKER_SECRETS_KEY="))) - 1]
+    assert "Telegram bot token" in comment and "Reserved" not in comment
+    r = run("--out", out, "--rotate", "BROKER_SECRETS_KEY")
+    assert "re-enter" in r.stdout
 
 
 def test_rotate_preserves_hand_edits_byte_for_byte(out):
