@@ -339,6 +339,11 @@ cd sidecars/whatsapp && go build ./... && go test ./...
 
 - The broker runs **one** uvicorn worker on purpose: the per-minute limiter
   is in-process and SQLite has one writer.
+- Logging: every service logs one line per event to stdout, each carrying
+  the request id its decision rows carry, with variable data as `kv(...)`
+  key=value pairs and never params, bodies or secrets. `LOG_LEVEL` and
+  `LOG_FORMAT` (`text` | `json`) set level and format; see
+  [docs/logging.md](docs/logging.md).
 - Conventions (small modules, a test for every behaviour, additive schema
   changes, manifests are data, secrets only through the stores) are in
   [CLAUDE.md](CLAUDE.md). The version lives only in `VERSION`.

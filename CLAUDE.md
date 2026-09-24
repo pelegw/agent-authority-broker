@@ -45,6 +45,12 @@ same plus a skill-drift job (`aab skill build` + `git diff --exit-code integrati
   only: new tables in `SCHEMA`, new columns in `_MIGRATIONS`. Never rename or
   drop a column.
 - Run exactly one uvicorn worker (in-process rate limiter, single SQLite writer).
+- Logging (`docs/logging.md`): `log = logging.getLogger(__name__)`, a fixed
+  message plus `kv(...)` for the variable part; never params, results,
+  message text, labels, notes, secrets or tokens (names of secret fields are
+  fine). `tests/targets/test_secrets_in_logs.py` sweeps every secret flow at
+  DEBUG. `logging_setup.py` and `request_log.py` exist twice (broker and
+  plugin runtime), byte-identical by test: change both.
 - MCP uses the official `mcp` SDK (low-level `Server` +
   `StreamableHTTPSessionManager`), never the third-party `fastmcp` package.
 - The console is a single-file vanilla-JS page (`templates/console.html`) with a

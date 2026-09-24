@@ -137,10 +137,10 @@ actions that need it answer `403 scopes not granted; reconnect` and
    in another tab, then retry" and keeps the code in memory only. The plugin
    checks the state and exchanges the code itself.
 
-   The authorization code appears once in the broker's access log, in the
-   line for that `GET /oauth/callback/google?code=...` (uvicorn logs the
-   query string). It is single-use, expires within minutes, and is useless
-   without the client secret, which only plugin-google holds.
+   The authorization code is not logged: the broker's access line for
+   that `GET /oauth/callback/google` carries the path only, never the query
+   string (`docs/logging.md`). It is single-use, expires within minutes, and
+   is useless without the client secret, which only plugin-google holds.
 4. **Enabling another Google plugin later** shows it as
    `reconnect needed: scopes missing` until you connect again.
 5. **Disconnect** revokes the refresh token at Google (best effort) and

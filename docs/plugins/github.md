@@ -155,10 +155,11 @@ agent it had not.
    `installation_id` and `state`; the callback page (served without the
    owner's credential: it renders nothing from the URL) relays both to
    `POST /v1/admin/plugins/github/connect/finish`, which does require the
-   owner's session and the console's CSRF header. The installation id and
-   state appear once in the broker's access log line for
-   `GET /oauth/callback/github` (uvicorn logs the query string); the state
-   is single-use and expires within minutes.
+   owner's session and the console's CSRF header. Neither the installation
+   id nor the state is logged: the broker's access line for
+   `GET /oauth/callback/github` carries the path only, never the query
+   string (`docs/logging.md`); the state is single-use and expires within
+   minutes.
 5. The plugin checks the state, then verifies the installation with an App
    JWT (`GET /app/installations/{id}`: it must exist and belong to this
    App), and only then stores the installation id and its account. Status

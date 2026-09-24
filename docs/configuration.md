@@ -40,7 +40,9 @@ Plus deployment plumbing that is never edited from the console:
 plugin service live; set in `docker-compose.yml`), `TZ`, and values that only
 Compose or other containers read: `BROKER_PORT`, `DEVICE_NAME`,
 `GITHUB_APP_KEY_DIR` (an optional file-based alternative to pasting the GitHub
-App key).
+App key). And `LOG_LEVEL` / `LOG_FORMAT` (`docs/logging.md`): process-level,
+read once at start by every service, including the plugin containers, which
+have no console.
 
 The console's Settings view lists every env-only key with its reason
 (`GET /v1/admin/settings` → `env_only`); secrets are shown as set/unset,

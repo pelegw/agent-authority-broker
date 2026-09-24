@@ -196,6 +196,10 @@ verification.
   `plugin-github`, `plugin-google`). The WhatsApp pairing QR is shown in the
   console (Plugins > WhatsApp > Connect), printed in the `whatsapp-sidecar`
   log, and served as a PNG at `/v1/admin/plugins/whatsapp/connect/qr.png`.
+  Add `--since 1h` to bound the output and `--no-log-prefix | grep <request-id>`
+  to follow one request across services; `LOG_LEVEL` / `LOG_FORMAT` in `.env`
+  set level and format, and Docker rotates each container's log at 5 x 10 MB
+  (docs/logging.md).
 - **Extra MCP hosts**: a console change to `mcp_allowed_hosts_extra`
   (Settings) takes effect at the next broker start:
   `docker compose -f docker-compose.yml -f docker-compose.public.yml restart broker`.

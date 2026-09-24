@@ -154,9 +154,9 @@ only. The plugin checks `state` (single use, 10 minutes), so a code planted by
 someone else cannot complete a connection. The page is left out of the
 OpenAPI schema and sent with `Cache-Control: no-store`,
 `Referrer-Policy: no-referrer`, `frame-ancestors 'none'` and a nonce CSP. The
-authorization code does appear once in the broker's access log line for the
-GET (uvicorn logs the query string); it is single-use, expires within minutes
-and is useless without the client secret, which only the plugin holds.
+authorization code is not logged: the broker's access line carries the path
+without the query string, and uvicorn's own access log is off
+(`docs/logging.md`).
 
 ## Later additions
 

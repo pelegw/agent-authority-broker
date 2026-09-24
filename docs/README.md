@@ -18,6 +18,7 @@ Design and operator documents, with the phase that added each:
 | `plugins/github.md` | phase 6 | The GitHub plugin service: creating the GitHub App (permissions, Setup URL, install), the private key pasted or read from a file confined to `/run/secrets/github`, per-call installation tokens, what is target- vs proxy-enforced, the PAT fallback's caveats, 503/502. |
 | `plugins/google.md` | phase 7 | The Google plugin service (gmail, gcal, gdrive): OAuth client setup and redirect URIs, consent scopes, per-scope-set tokens, what is target- vs proxy-enforced, every narrowing and constraint. |
 | `platform-thesis.md` | phase 7 | What the second and third plugins cost the platform, measured from the lanes' diffs: engine files touched (zero for each), files touched outside each plugin, code and manifest sizes, the schema features Google needed, what did not generalize, the flag-polarity rule. |
+| `logging.md` | after 0.2.0 | What each service logs and the line format (text or JSON), request ids across broker, plugin and sidecar and their link to the decision record, the access line without query strings, the never-logged list and the redaction backstop, `LOG_LEVEL` / `LOG_FORMAT`, rotation, reading and shipping logs. |
 | `approval-volume.md` | phase 8 | Simulated human interrupts under standing grants vs per-action approval (8-hour reference numbers), budget exhaustion, and what the simulation does not model. |
 
 The public deploy runbook (EC2 + Cloudflare) is `deploy/DEPLOY.md`. The implementation plan is referenced from `CLAUDE.md`.
