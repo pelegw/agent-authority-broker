@@ -96,7 +96,8 @@ def test_default_modes():
 def test_expand_actions_sugar():
     assert ECHO.expand_actions(["*"]) == ECHO.action_names
     assert ECHO.expand_actions(["read_*"]) == {"list_items", "get_item", "get_blob", "watch"}
-    assert ECHO.expand_actions(["write_*", "destructive_*"]) == {"post_item", "delete_item"}
+    assert ECHO.expand_actions(["write_*", "destructive_*"]) == {"post_item", "delete_item",
+                                                                 "touch_item"}
     with pytest.raises(ManifestError):
         ECHO.expand_actions(["post_*"])                # only the documented globs
     with pytest.raises(ManifestError):

@@ -5,6 +5,7 @@ App id, ...) are plugin config stored in the database and edited from the
 console, so adding a plugin never touches this file.
 """
 
+import os
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings
@@ -44,6 +45,24 @@ class Settings(BaseSettings):
     # How often the scheduler looks for due queued actions.
     scheduler_tick_seconds: int = 15
 
+    # --- Engine ----------------------------------------------------------------
+
+    # Plugin API calls give up after this long. A timeout after the request
+    # was sent is an unknown outcome (502), never retried automatically.
+    plugin_timeout_seconds: float = 30.0
+    # How long folder ancestry answers (subtree narrowing) are cached.
+    ancestors_cache_seconds: int = 60
+    # Scheduling bounds for run_at / delay_seconds (ported from WA_GW).
+    schedule_min_lead_seconds: int = 30
+    schedule_max_horizon_days: int = 30
+    # Drafts nobody decides on expire after this long.
+    draft_ttl_hours: int = 24
+    # Longest expansion a permission request may ask for.
+    grant_max_hours: int = 24 * 30
+    # Long-poll bounds for `long_poll` actions over REST (?wait=).
+    long_poll_max_wait_seconds: int = 60
+    long_poll_interval_seconds: float = 1.0
+
     # --- Internet exposure (see deploy/DEPLOY.md) ---------------------------
 
     # Origin lockdown. When origin_secret is set, EVERY request must carry it in
@@ -76,6 +95,32 @@ class Settings(BaseSettings):
     def public_mode(self) -> bool:
         """True once an edge origin secret is configured (internet exposure)."""
         return bool(self.origin_secret)
+
+
+# Plugin services are discovered from env, keyed by SERVICE (one container may
+# host several plugin ids): PLUGIN_URL_<SERVICE> + PLUGIN_TOKEN_<SERVICE>.
+# Read straight from the environment because the set of services is open.
+_PLUGIN_URL_PREFIX = "PLUGIN_URL_"
+_PLUGIN_TOKEN_PREFIX = "PLUGIN_TOKEN_"
+
+
+def plugin_services(environ: dict | None = None) -> dict[str, tuple[str, str]]:
+    """{service: (base_url, token)} for every configured plugin service.
+
+    A service with a URL but no token is skipped (and reported by the
+    registry): talking to a plugin without its token would either fail or,
+    worse, succeed against a plugin that forgot to require one.
+    """
+    env = os.environ if environ is None else environ
+    out: dict[str, tuple[str, str]] = {}
+    for name, url in env.items():
+        if not name.startswith(_PLUGIN_URL_PREFIX) or not url.strip():
+            continue
+        service = name[len(_PLUGIN_URL_PREFIX):].lower()
+        token = env.get(_PLUGIN_TOKEN_PREFIX + service.upper(), "")
+        if service and token.strip():
+            out[service] = (url.strip().rstrip("/"), token.strip())
+    return dict(sorted(out.items()))
 
 
 def validate_exposure(s: "Settings") -> None:

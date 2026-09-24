@@ -111,4 +111,36 @@ def effective(auth, now: int, plugin_states: Iterable[PluginState],
     return dedupe(_unexpired(caps, now))
 
 
-__all__ = ["apply_denies", "chain_meet", "effective", "is_denied", "merged_denies"]
+def effective_with_chains(auth, now: int, plugin_states: Iterable[PluginState],
+                          lattice: Lattice) -> list[tuple[Capability, tuple[str, ...]]]:
+    """Like `effective`, but each capability carries the grant chain (ids,
+    root -> leaf) it came from, which the engine records in the decision and
+    charges in the capacity ledger. Same evaluation, same fail-closed rules;
+    a capability reachable through two grants keeps the first chain.
+    """
+    manifests = {m.id: m for m, _, _ in plugin_states}
+    ceiling_caps = ceiling(auth.principal_id, plugin_states)
+    if not ceiling_caps:
+        return []
+    chain_ids = tuple(auth.chain_key_ids) or (auth.key_id,)
+    roles = tuple(auth.chain_roles) or (auth.role,)
+    role_bounds = [[r for m in manifests.values() for r in role_caps(m, role)]
+                   for role in roles]
+    out: dict[Capability, tuple[str, ...]] = {}
+    try:
+        for g in store.list_active_for_key(auth.key_id, now):
+            chain = store.chain(g.id)
+            caps = _meet_all(chain_meet(g, chain, lattice, now, chain_ids), ceiling_caps, lattice)
+            for bound in role_bounds:
+                caps = _meet_all(caps, bound, lattice)
+            caps = apply_denies(caps, auth.denies, lattice.forms)
+            for c in dedupe(_unexpired(caps, now)):
+                out.setdefault(c, tuple(link.id for link in chain))
+    except ValueError:
+        log.warning("unparseable grant for key %s; failing closed", auth.key_id)
+        return []
+    return sorted(out.items(), key=lambda kv: kv[0])
+
+
+__all__ = ["apply_denies", "chain_meet", "effective", "effective_with_chains", "is_denied",
+           "merged_denies"]

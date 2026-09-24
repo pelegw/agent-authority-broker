@@ -22,6 +22,7 @@ config_schema:
 resources:
   room:
     display: Room
+    normalize: room_id
     resolve: true
     hideable: true
     id_format: "room id, e.g. r1"
@@ -131,6 +132,17 @@ actions:
         item_id: {type: string}
       required: [item_id]
     doc: Delete an item.
+  - name: touch_item         # a write that cannot be drafted (modes: direct only)
+    side_effect: write
+    resource: item
+    selector_param: item_id
+    modes: [direct]
+    params:
+      type: object
+      properties:
+        item_id: {type: string}
+      required: [item_id]
+    doc: Mark an item as seen.
 
 skill:
   addressing: Rooms are addressed by id (r1, r2, ...).

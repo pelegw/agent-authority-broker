@@ -5,9 +5,9 @@ Ported from WA_GW tests/test_security.py key-lifecycle tests."""
 import time
 
 import pytest
-from fastapi import HTTPException
 
 from broker import auth, db
+from broker.errors import PolicyError
 
 from .helpers import bearer
 
@@ -248,8 +248,10 @@ def test_current_auth_dependency(key_factory):
     from broker.deps import current_auth
     k = key_factory()
     assert current_auth(_Req(), bearer(k.plaintext)).key_id == k.key_id
-    with pytest.raises(HTTPException) as e:
+    # PolicyError, so the agent surface answers with the compact
+    # {"error", "code"} body like every other refusal.
+    with pytest.raises(PolicyError) as e:
         current_auth(_Req(), "Bearer aab_nope")
-    assert e.value.status_code == 401
-    with pytest.raises(HTTPException):
+    assert e.value.status == 401 and e.value.code == "unauthorized"
+    with pytest.raises(PolicyError):
         current_auth(_Req(), "Bearer aab_\xff")

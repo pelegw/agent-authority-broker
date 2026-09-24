@@ -1,8 +1,5 @@
-"""Owner-account fixtures: an owner, an admin token, a logged-in console client.
-
-These build on the root `env`/`client` fixtures. Later phases that need an
-authenticated admin can reuse `admin_headers` (bearer token, CSRF-exempt) or
-`session_client` (cookie login; add CSRF_HEADERS on writes).
+"""Identity fixtures: the setup token, the login limiter reset, and a mocked
+Cloudflare Access identity. The owner/admin fixtures are in the root conftest.
 """
 
 import time
@@ -12,10 +9,12 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-OWNER_USERNAME = "owner"
-OWNER_PASSWORD = "correct horse battery staple"
+# owner / admin_token / admin_headers / session_client now live in the root
+# conftest (shared with the engine suites); the constants are re-exported
+# here for the identity tests that import them from this module.
+from ..conftest import CSRF_HEADERS, OWNER_PASSWORD, OWNER_USERNAME  # noqa: F401
+
 SETUP_TOKEN = "test-setup-token-0123456789abcdef"
-CSRF_HEADERS = {"X-Requested-With": "aab-console"}
 
 TEAM = "myteam.cloudflareaccess.com"
 AUD = "test-access-aud"
@@ -37,36 +36,6 @@ def setup_token(env, monkeypatch):
     from broker.config import get_settings
     get_settings.cache_clear()
     return SETUP_TOKEN
-
-
-@pytest.fixture()
-def owner(env):
-    """The owner principal, created directly. Yields id/username/password."""
-    from broker.identity import principals
-    p = principals.create_owner(OWNER_USERNAME, OWNER_PASSWORD)
-    return types.SimpleNamespace(id=p.id, username=p.username, password=OWNER_PASSWORD)
-
-
-@pytest.fixture()
-def admin_token(owner):
-    """A freshly minted aab_admin_ token (plaintext) for the owner."""
-    from broker.identity import admin_tokens
-    return admin_tokens.create(owner.id, "test")["token"]
-
-
-@pytest.fixture()
-def admin_headers(admin_token):
-    """Authorization header carrying `admin_token`."""
-    return {"Authorization": f"Bearer {admin_token}"}
-
-
-@pytest.fixture()
-def session_client(client, owner):
-    """The shared TestClient, logged in as the owner (session cookie in its jar)."""
-    r = client.post("/auth/login", json={"username": owner.username,
-                                         "password": owner.password})
-    assert r.status_code == 200, r.text
-    return client
 
 
 @pytest.fixture()

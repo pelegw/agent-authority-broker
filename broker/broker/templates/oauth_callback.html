@@ -1,0 +1,52 @@
+<!doctype html>
+<!-- OAuth / install callback. Rendered by routers/oauth.py; the server fills
+     only the service name (as JSON) and a CSP nonce. The code and state are
+     read from the URL here, in the browser, and relayed once to the broker,
+     which forwards them to the plugin. Nothing from the URL is ever written
+     into the page. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Connecting</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 3rem auto; max-width: 32rem;
+         padding: 0 1rem; color: #1b1b1b; background: #fafafa; }
+  @media (prefers-color-scheme: dark) { body { color: #e8e8e8; background: #161616; } }
+  .ok { color: #1a7f37; } .err { color: #c62828; }
+</style>
+</head>
+<body>
+<h1>Connecting…</h1>
+<p id="msg">Finishing the connection.</p>
+<script nonce="{{NONCE}}">
+(function () {
+  var service = {{SERVICE_JSON}};
+  var q = new URLSearchParams(window.location.search);
+  var body = {};
+  ["code", "state", "installation_id"].forEach(function (k) {
+    if (q.get(k)) { body[k] = q.get(k); }
+  });
+  // Drop the code from the address bar and history right away.
+  history.replaceState(null, "", window.location.pathname);
+  var msg = document.getElementById("msg");
+  fetch("/v1/admin/plugins/" + encodeURIComponent(service) + "/connect/finish", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {"Content-Type": "application/json", "X-Requested-With": "aab-console"},
+    body: JSON.stringify(body)
+  }).then(function (r) {
+    return r.json().then(function (j) { return {ok: r.ok, j: j}; });
+  }).then(function (res) {
+    msg.textContent = res.ok ? "Connected. You can close this tab."
+                             : "Connection failed: " + (res.j.error || "unknown error");
+    msg.className = res.ok ? "ok" : "err";
+  }).catch(function () {
+    msg.textContent = "Connection failed: the broker could not be reached.";
+    msg.className = "err";
+  });
+})();
+</script>
+</body>
+</html>
