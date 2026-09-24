@@ -366,11 +366,14 @@ grants and under per-action approval, printing the interrupt table.
 
 Version 0.2.0, single owner.
 
-- **Not yet verified with Docker running:** the image builds, and
-  plugin-whatsapp reading the sidecar's WAL-mode archive through a
-  read-only mount. CI validates the compose files (`docker compose config`)
-  but builds no image. [docs/deployment.md](docs/deployment.md) lists the
-  checks to run after `docker compose up`.
+- **Verified under Docker, except with a paired phone.** The five images
+  build, the stack runs as uid 10001 with only the broker published, and
+  plugin-whatsapp reads the sidecar's WAL-mode archive through its
+  read-only mount (exercised with a stand-in writer, before pairing).
+  Pairing and reads of a live, paired archive were not part of that run.
+  CI validates the compose files (`docker compose config`) but builds no
+  image. [docs/deployment.md](docs/deployment.md) lists the checks to run
+  after `docker compose up`, with the expected outputs.
 - **Google downscoped refresh is not yet verified against the real
   endpoint.** The plugin refuses any token wider than it asked for; if
   Google ignores the requested subset, the manifests' `scopes` narrowing

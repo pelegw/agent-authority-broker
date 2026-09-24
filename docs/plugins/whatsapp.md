@@ -192,11 +192,33 @@ up.
 ## Operational notes
 
 - **Read-only WAL archive.** `wa_data` is mounted read-only here. The archive
-  is opened with `mode=ro` and `PRAGMA query_only`. SQLite reads a WAL
-  database through the writer's `-shm` file, so archive reads work while the
-  sidecar is running. If the sidecar is stopped and has cleaned up its `-shm`,
-  reads return `503` (never stale or partial data). Before the sidecar has
-  created `messages.db`, reads return empty results.
+  is opened with `mode=ro` and `PRAGMA query_only`, per call. Verified under
+  Docker for 0.2.0 (`docs/deployment.md` > Verify after `docker compose up`,
+  step 7):
+  - *Sidecar running.* The sidecar creates `messages.db`, `-wal` and `-shm`
+    at start, before pairing. SQLite reads the WAL through the sidecar's
+    `-shm`, which it maps read-only. 1,000 reads interleaved with 3,000
+    single-row commits and several checkpoints by a stand-in writer all
+    answered 200, and the newest row never went backwards.
+  - *Sidecar stopped cleanly* (`docker compose stop`). The sidecar closes
+    the archive on SIGTERM, so SQLite folds the WAL into `messages.db` and
+    removes `-wal` and `-shm`. The plugin cannot recreate them on a
+    read-only mount, so reads answer `503` (never stale or partial data)
+    until the sidecar starts again. No plugin restart is needed.
+  - *Sidecar crashed* (SIGKILL, OOM). `-wal` and `-shm` stay behind. SQLite
+    rebuilds the WAL index in heap memory from the `-wal` file, because it
+    cannot write the `-shm`, and reads answer 200 with the last committed
+    rows. No writer is alive, so nothing is partial.
+  - *Before the sidecar has created `messages.db`*, reads return empty
+    results.
+
+  The mount stays read-only on purpose. A read-write mount (WA_GW's setup,
+  with `mode=ro` in the URI) would give this container write access to
+  `session.db`, the WhatsApp session. `?immutable=1` would make SQLite
+  ignore the WAL and the sidecar's locks, so reads could be stale or torn
+  while the sidecar writes. A separate writable place for the `-shm` does
+  not exist: SQLite keeps it beside the database, and it must be the very
+  file the sidecar maps, or the plugin would not see the sidecar's commits.
 - **Long-poll bootstrap.** Call `check_new_messages` once without a cursor,
   then long-poll with `?wait=` and the cursor. A call without a cursor is
   answered at once whatever `wait` says (engine rule for every `long_poll`

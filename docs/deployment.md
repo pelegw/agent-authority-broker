@@ -11,9 +11,10 @@ every console setting with its bounds, is `docs/configuration.md`.
 > (plugin `whatsapp`), `plugin-github` (plugin `github`) and `plugin-google`
 > (plugins `gmail`, `gcal`, `gdrive`). The Telegram bot token and every
 > plugin credential are entered in the console. The topology, networks,
-> volumes and env split below are final. The images and the read-only
-> `wa_data` mount have not yet been verified by a real build and run: do the
-> checks in [Verify after `docker compose up`](#verify-after-docker-compose-up).
+> volumes and env split below are final. The images, a local run and the
+> read-only `wa_data` mount were verified under Docker after the 0.2.0 tag;
+> [Verify after `docker compose up`](#verify-after-docker-compose-up) has the
+> recorded outputs. Pairing a real phone was not part of that run.
 
 ## Containers, networks, volumes
 
@@ -92,49 +93,124 @@ within minutes.
 Run these after the first `docker compose up -d --build` on a new host and
 after any change to the images or compose files. In public mode add
 `-f docker-compose.yml -f docker-compose.public.yml` to every compose command
-and use `https://<SITE_DOMAIN>` instead of `http://127.0.0.1:8080`.
+and use `https://<SITE_DOMAIN>` instead of `http://127.0.0.1:8080`. The
+expected outputs below are the ones recorded when 0.2.0 was verified
+(Docker Engine 29.7.2, Compose v5.5.0, Docker Desktop on Windows with WSL2).
+
+Admin calls without the console: log in with `POST /auth/login` and keep the
+`aab_session` cookie (`curl -c jar` / `-b jar`). Every cookie-authenticated
+write also needs `-H 'X-Requested-With: aab-console'`, otherwise it answers
+`403 {"error":"missing x-requested-with: aab-console header","code":"csrf"}`.
+
+On Windows, Git Bash rewrites a leading `/` in arguments, so
+`docker compose exec whatsapp-sidecar ls /data` looks for
+`C:/Program Files/Git/data`. Prefix such commands with `MSYS_NO_PATHCONV=1`,
+or run them from PowerShell. If port 8080 is taken on the host (a WA_GW
+gateway, for example), set `BROKER_PORT` in `.env`.
 
 1. **Containers.** `docker compose ps`: every service is running, and
-   `broker`, `plugin-whatsapp`, `plugin-github` and `plugin-google` turn
-   `healthy` within a minute. The sidecar has no healthcheck.
-   `docker compose logs broker` shows no boot refusal.
+   `broker`, `plugin-whatsapp`, `plugin-github` and `plugin-google` show
+   `Up ... (healthy)` within a minute. The sidecar has no healthcheck and
+   shows plain `Up`. `docker compose exec <service> id` answers
+   `uid=10001(aab) gid=10001(aab) groups=10001(aab)` in all five.
+   `docker compose logs broker` shows no boot refusal. Each plugin's log
+   shows `"GET /manifests HTTP/1.1" 200 OK` (the broker's discovery). The
+   sidecar's log shows `internal API listening on :8081` and the pairing QR.
 2. **Published ports.** `docker compose ps` shows a host port only for the
    broker (`127.0.0.1:8080->8080/tcp`), or in public mode only for `edge`
-   (`443`). No plugin and no sidecar port.
+   (`443`). The plugins show `8090/tcp` with no `->`: that is the image's
+   `EXPOSE`, not a published port. The sidecar shows none.
 3. **Health.** `curl -s http://127.0.0.1:8080/health` and `/v1/health`
-   answer `{"status":"ok","version":"0.2.0"}`. They report liveness only,
+   answer `200 {"status":"ok","version":"0.2.0"}`. They report liveness only,
    never plugin or connection state.
-4. **Setup page.** `/admin` shows the setup page until the owner exists
-   (`GET /auth/status` answers `"setup_completed": false`), then the login
-   page.
+4. **Setup page.** `/admin` shows the setup page until the owner exists:
+   `GET /auth/status` answers `{"setup_completed":false,"login_required":false}`.
+   `POST /auth/setup` with `{setup_token, username, password}` answers
+   `{"username":"...","setup_completed":true}`. A second setup answers
+   `409 setup_completed`, and a wrong token answers
+   `403 {"error":"invalid setup token","code":"forbidden"}`. Then the console
+   shows the login page.
 5. **Plugin health cards.** After logging in, the Overview has one card per
    discovered plugin: `whatsapp`, `github`, `gmail`, `gcal` and `gdrive`,
-   all disabled on first boot. A service that was
-   down at boot is not listed yet: the broker retries discovery at most every
-   30 seconds and logs that the service is not reachable yet. If one stays
-   missing, the container is down or its token does not match the broker's
-   (after rotating a `PLUGIN_TOKEN_<SERVICE>`, recreate both ends). A
-   manifest that fails the pin against the vendored copy is refused and
-   audited (`plugin.refused`). Enabling WhatsApp shows "waiting for QR
-   pairing" until the phone scans the QR.
-6. **The read-only `wa_data` mount.** After pairing, with the sidecar
-   running:
+   all disabled on first boot. `GET /v1/admin/plugins` answers
+   `{"items": [...], "refused": []}` with those five, each naming its
+   `service`. A service that was down at boot is not listed yet: the broker
+   logs `plugin service google not reachable yet: plugin service unreachable
+   (ConnectError)` and retries discovery at most every 30 seconds (verified:
+   the Google plugins were listed again about 30 seconds after
+   `docker compose start plugin-google`, with no broker restart). If one
+   stays missing, the container is down or its token does not match the
+   broker's (after rotating a `PLUGIN_TOKEN_<SERVICE>`, recreate both ends).
+   A manifest that fails the pin against the vendored copy is refused and
+   audited (`plugin.refused`). A health refresh is
+   `POST /v1/admin/plugins/<id>/health` (a `GET` answers 405). Without
+   credentials:
+   - **WhatsApp** enables (it has nothing to configure). Its `last_health`
+     shows `"health": "waiting for QR pairing"`, `"archive": "present"` and
+     `"connection": {"waiting_for_qr": true, ...}` until the phone scans the
+     QR. `POST /v1/admin/plugins/whatsapp/connect/start` answers
+     `{"kind":"qr"}`, and `GET .../connect/qr.png` answers a 512x512
+     `image/png` with `cache-control: no-store`.
+   - **GitHub** enables but stays unhealthy: `"health": "not configured: set
+     app_id, app_slug and private_key_pem (or private_key_path), or a pat"`.
+     `connect/start` answers `400 plugin: configure app_id, app_slug and
+     private_key_pem (or a pat) first`.
+   - **Gmail, Calendar, Drive** refuse to enable:
+     `400 {"error":"required config missing: ['client_id']","code":"invalid_config"}`.
+     Their health says `not configured: set the OAuth client id and secret`,
+     and `POST /v1/admin/plugins/google/connect/start` answers
+     `400 plugin: set the Google OAuth client id and secret first`.
+6. **An agent key before pairing.** Create one (Agent keys, or
+   `POST /v1/admin/keys` with `{"name": "...", "role": "read-only",
+   "capabilities": [{"target": "whatsapp", "actions": ["list_chats"],
+   "mode": "direct"}]}`). Until WhatsApp is paired the owner ceiling `P` is
+   empty (it holds only plugins that are enabled **and** connected), so:
+   - `GET /v1/me` lists `whatsapp` with `"capabilities": []`.
+   - `POST /v1/targets/whatsapp/actions/list_chats` answers
+     `503 {"error":"target is not connected","code":"not_connected"}`,
+     never a 500.
+   - MCP `initialize` answers with `serverInfo`
+     `{"name":"agent-authority-broker","version":"0.2.0"}`, and `tools/list`
+     holds only the 12 generic tools (`get_my_access`, `list_targets`,
+     `resolve_resource`, `request_permission`, `get_permission_status`,
+     `list_my_permissions`, `delegate`, `list_my_delegations`,
+     `revoke_delegation`, `get_action_status`, `list_my_actions`,
+     `cancel_action`). `whatsapp_list_chats` appears once the device is
+     paired.
+7. **The read-only `wa_data` mount.** The sidecar creates the archive when it
+   starts, before pairing:
    - `docker compose exec plugin-whatsapp ls -l /data` lists `messages.db`,
-     `messages.db-wal` and `messages.db-shm`, and
+     `messages.db-wal` and `messages.db-shm` (and whatsmeow's `session.db`
+     with its own `-wal` and `-shm`).
      `docker compose exec plugin-whatsapp touch /data/probe` fails with
-     "Read-only file system".
-   - Archive reads keep working while the sidecar writes: call
-     `list_chats` or `read_messages` with an agent key while messages
-     arrive; each call answers 200 with current rows.
-   - `docker compose stop whatsapp-sidecar`: once `messages.db-shm` is
-     absent (the sidecar removes it when it closes the archive cleanly),
-     archive reads answer 503 (not performed, safe to retry), never stale
-     or partial rows. `docker compose start whatsapp-sidecar` and reads
-     work again without restarting the plugin.
-7. **Decision record.** After the first agent call, Overview's chain
-   verification (or `GET /v1/admin/decisions/verify`, or
-   `aab decisions verify`) reports the chain as intact.
-8. **Public mode only:** the checks in `deploy/DEPLOY.md` step 9 (health
+     `touch: cannot touch '/data/probe': Read-only file system`, and `mount`
+     inside the container shows `/data` as `ext4 (ro,relatime)`.
+   - After pairing, archive reads keep working while the sidecar writes:
+     call `list_chats` or `read_messages` with an agent key while messages
+     arrive. Each call answers 200 with current rows.
+   - `docker compose stop whatsapp-sidecar`: the sidecar closes the archive,
+     SQLite folds the WAL into `messages.db` and removes `messages.db-wal`
+     and `messages.db-shm`, and archive reads answer
+     `503 message archive temporarily unavailable` (not performed, safe to
+     retry), never stale or partial rows. A health refresh then stores
+     `{"healthy": false, "error": "sidecar unreachable (ConnectError)",
+     "status": 503, "enforcement": "proxy"}` and keeps `connected` as it
+     was. After `docker compose start whatsapp-sidecar`, reads work again
+     without restarting the plugin.
+   - After a crash instead (`docker compose kill whatsapp-sidecar`, or an
+     OOM kill), `-wal` and `-shm` stay behind and reads keep answering 200
+     with the last committed rows: SQLite rebuilds the WAL index in memory
+     from the `-wal` file because it cannot write the `-shm`. Nothing is
+     writing, so nothing is partial. The next sidecar start recovers the
+     WAL.
+8. **Decision record and skill doc.** After the first agent call, Overview's
+   chain verification (or `GET /v1/admin/decisions/verify`, or
+   `aab decisions verify`) answers
+   `{"ok":true,"checked":<rows>,"first_bad_id":null,"signed":true}`.
+   `GET /skill` answers 200 `text/markdown` with the request's base URL
+   filled in, and `GET /v1/me/skill` answers the same guide filtered to the
+   calling key.
+9. **Public mode only:** the checks in `deploy/DEPLOY.md` step 9 (health
    through Cloudflare, the origin IP unreachable directly, the admin plane
    behind Access).
 

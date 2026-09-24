@@ -24,6 +24,8 @@ import (
 type Client struct {
 	WM *whatsmeow.Client
 	st *store.Store
+	// container is whatsmeow's session store (session.db); Close releases it.
+	container *sqlstore.Container
 
 	mu     sync.RWMutex
 	qrCode string // current pairing code while waiting for a scan, else ""
@@ -65,11 +67,22 @@ func New(ctx context.Context, dataDir, deviceName string, st *store.Store) (*Cli
 		return nil, fmt.Errorf("get device: %w", err)
 	}
 	c := &Client{
-		WM: whatsmeow.NewClient(device, waLog.Stdout("WhatsApp", "INFO", true)),
-		st: st,
+		WM:        whatsmeow.NewClient(device, waLog.Stdout("WhatsApp", "INFO", true)),
+		st:        st,
+		container: container,
 	}
 	c.WM.AddEventHandler(c.handleEvent)
 	return c, nil
+}
+
+// Close releases the session store (session.db) so SQLite can checkpoint its
+// WAL on the way out. Shutdown only, after WM.Disconnect: nothing may use the
+// client afterwards. The archive store is closed separately by its owner.
+func (c *Client) Close() error {
+	if c.container == nil {
+		return nil
+	}
+	return c.container.Close()
 }
 
 // Run connects to WhatsApp. If the device isn't paired yet it drives the QR
