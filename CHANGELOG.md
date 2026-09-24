@@ -3,9 +3,11 @@
 All notable changes to this project are documented here. The version number
 lives only in `VERSION`.
 
-## [Unreleased]
+## [0.2.0] - 2026-09-24
 
-### Added
+### Operational logging (same day, before the tag)
+
+#### Added
 - Operational logging for every service (`docs/logging.md`). One setup,
   `logging_setup.configure(service)`, kept byte-identical in the broker and
   the plugin runtime by a test: one handler to stdout, UTC millisecond
@@ -61,7 +63,7 @@ lives only in `VERSION`.
   drives every secret-handling flow at DEBUG and fails on any secret value
   in any record or output line. Go tests for the sidecar's request log.
 
-### Changed
+#### Changed
 - uvicorn's own access log is off: it logged every request with its query
   string. The images pass `--no-access-log`, and the logging setup leaves
   `uvicorn.access` no handler path, which is what that flag means to
@@ -76,7 +78,7 @@ lives only in `VERSION`.
   `plugin service not reachable yet; will retry service=google status=503
   retry_seconds=30` (docs/deployment.md updated).
 
-### Security
+#### Security
 - The OAuth authorization code (and GitHub's installation id and state) no
   longer reach any log line; the access-log caveat is gone from
   `docs/auth.md`, `docs/deployment.md`, `docs/architecture.md` and the
@@ -89,12 +91,10 @@ lives only in `VERSION`.
   search, the bot token in the Telegram API path), protocol payloads (`mcp`)
   or form fields are held at WARNING whatever `LOG_LEVEL` says.
 
-### Upgrade notes
+#### Upgrade notes
 - No `.env` change is required (compose defaults both to `INFO` / `text`);
   add `LOG_LEVEL` / `LOG_FORMAT` to change them. `docker compose up -d`
   recreates the containers with the new logging options.
-
-## [0.2.0] - 2026-09-24
 
 ### Hardening after the Docker verification (same day, before the tag)
 
