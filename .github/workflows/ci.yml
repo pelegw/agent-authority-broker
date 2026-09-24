@@ -43,6 +43,24 @@ jobs:
         if: hashFiles('plugin-runtime/pyproject.toml') != ''
         run: pytest plugin-runtime
 
+  # The WhatsApp plugin service (plugins/whatsapp): its own package and tests.
+  # The broker job above also runs broker/tests/targets, which serves this
+  # plugin through the runtime end to end (imported from source there).
+  plugin-whatsapp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # aab-plugin-runtime is the repo's own package (not on PyPI): installing
+      # both in one command lets pip resolve the dependency from the path.
+      - name: Install plugin-runtime + plugin-whatsapp (editable, with dev extras)
+        run: pip install -e plugin-runtime -e "plugins/whatsapp[dev]"
+      - name: pytest
+        working-directory: plugins/whatsapp
+        run: python -m pytest
+
   compose:
     runs-on: ubuntu-latest
     steps:
