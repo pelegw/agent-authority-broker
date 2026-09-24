@@ -110,30 +110,37 @@ services:
 
   # GitHub plugin service: holds the GitHub App private key and installation,
   # mints installation tokens narrowed to the repos/permissions of each call.
+  # The App id, slug, key and the PAT fallback are console config (relayed
+  # once to /configure, encrypted in github_secrets), not env.
   plugin-github:
     build:
       context: ./plugins/github
       additional_contexts:
-        runtime: ./plugin-runtime
-        repo: .
+        runtime: ./plugin-runtime   # the aab-plugin-runtime package
     restart: unless-stopped
     networks: [broker_net]
     volumes:
-      - github_secrets:/secrets
-      # Optional bootstrap for the App private key: put app.pem in
-      # GITHUB_APP_KEY_DIR on the host (default ./data/github-app, git-ignored)
-      # and set GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github/app.pem in .env.
-      # Mounted into this container only, read-only. See docs/deployment.md.
+      - github_secrets:/secrets     # this plugin's own encrypted secret store
+      # Optional alternative to pasting the App private key in the console:
+      # put app.pem in GITHUB_APP_KEY_DIR on the host (default
+      # ./data/github-app, git-ignored) and set
+      # GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github/app.pem in .env. Used
+      # only when no key was set in the console. Mounted into this container
+      # only, read-only. See docs/plugins/github.md.
       - type: bind
         source: ${GITHUB_APP_KEY_DIR:-./data/github-app}
         target: /run/secrets/github
         read_only: true
         bind:
           create_host_path: true
+    # Inside the container the names are generic (aab_plugin_runtime.from_env
+    # reads PLUGIN_TOKEN / PLUGIN_SECRETS_KEY / PLUGIN_SECRETS_DIR); the values
+    # are this service's own .env entries, so no other service's token or key
+    # can reach it.
     environment:
-      PLUGIN_TOKEN_GITHUB: ${PLUGIN_TOKEN_GITHUB:?run 'python scripts/init_secrets.py' to create .env}
-      PLUGIN_SECRETS_KEY_GITHUB: ${PLUGIN_SECRETS_KEY_GITHUB:?run 'python scripts/init_secrets.py' to create .env}
-      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      PLUGIN_TOKEN: ${PLUGIN_TOKEN_GITHUB:?run 'python scripts/init_secrets.py' to create .env}
+      PLUGIN_SECRETS_KEY: ${PLUGIN_SECRETS_KEY_GITHUB:?run 'python scripts/init_secrets.py' to create .env}
+      PLUGIN_SECRETS_DIR: /secrets
       GITHUB_APP_PRIVATE_KEY_PATH: ${GITHUB_APP_PRIVATE_KEY_PATH:-}
 
   # Google plugin service: one container for gmail, gcal and gdrive, because

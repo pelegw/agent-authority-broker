@@ -11,6 +11,7 @@ Design documents land here as the phases that need them are built:
 | `deployment.md` | phase 3 | One container per plugin service: local and public run, networks, the env split per container, what each volume holds, rotation per secret. |
 | `plugin-api.md` | phase 3 | The internal plugin API served by `aab-plugin-runtime` (`/manifests`, `/perform`, connect flows, `X-Plugin-Token`, 503/502 contract). |
 | `mcp.md` | phase 3 | The MCP surface: per-request tool derivation from manifests and the caller's reach, `<plugin>_<action>` naming, call controls, result encoding, what is deliberately absent. |
+| `plugins/github.md` | phase 6 | The GitHub plugin service: creating the GitHub App (permissions, Setup URL, install), per-call installation tokens, what is target- vs proxy-enforced, the PAT fallback's caveats, 503/502. |
 | `platform-thesis.md` | phase 7 | What adding Google after GitHub cost: manifest fields, engine files touched (target zero), shared adapter code. |
 
 The public deploy runbook (EC2 + Cloudflare) is `deploy/DEPLOY.md`. The implementation plan is referenced from `CLAUDE.md`.

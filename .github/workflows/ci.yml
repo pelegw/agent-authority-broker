@@ -96,3 +96,23 @@ jobs:
       # Phase 5 replaces this with: aab skill build ... && git diff --exit-code integrations/
       - name: placeholder
         run: echo "skill drift check added in phase 5"
+
+  # The GitHub plugin service (plugins/github): its own package and tests,
+  # against a scripted GitHub (tests/fakes.py). The broker job above also
+  # runs broker/tests/targets/test_github.py, which serves this plugin
+  # through the runtime end to end (imported from source there) and fails
+  # if the vendored manifest drifts from the plugin's.
+  plugin-github:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # aab-plugin-runtime is the repo's own package (not on PyPI): installing
+      # both in one command lets pip resolve the dependency from the path.
+      - name: Install plugin-runtime + plugin-github (editable, with dev extras)
+        run: pip install -e plugin-runtime -e "plugins/github[dev]"
+      - name: pytest
+        working-directory: plugins/github
+        run: python -m pytest
