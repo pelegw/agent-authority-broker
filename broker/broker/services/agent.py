@@ -30,7 +30,7 @@ from ..ledger import remaining
 from ..plugins.adapter import AdapterError
 from ..plugins.manifest import ManifestError
 from ..plugins.registry import get_registry
-from ..policy import enforced_where
+from ..policy import enforced_where, run_mode
 
 
 def _caps_by_target(auth) -> dict[str, list[tuple[Capability, tuple[str, ...]]]]:
@@ -44,14 +44,34 @@ def _caps_by_target(auth) -> dict[str, list[tuple[Capability, tuple[str, ...]]]]
 
 # ---- discovery ----------------------------------------------------------------------
 
-def list_targets(auth) -> dict:
+def reachable_actions(auth) -> dict[str, set[str]]:
+    """{enabled plugin: actions some effective capability of this key can
+    reach}. The one definition of "what this key may try", shared by REST
+    `/v1/targets`, `/v1/me/openapi.json` and the MCP tool list, so the
+    surfaces cannot drift. A capability reaches an action only when the
+    action exists and the capability's mode can run it (policy.run_mode);
+    resource selectors are not considered here, they are checked per call."""
     reg = get_registry()
     caps = _caps_by_target(auth)
+    out: dict[str, set[str]] = {}
+    for pid, m in reg.enabled_manifests().items():
+        acts = set()
+        for cap, _ in caps.get(pid, []):
+            for name in cap.actions:
+                act = m.action(name)
+                if act is not None and run_mode(cap.mode, act) is not None:
+                    acts.add(name)
+        out[pid] = acts
+    return out
+
+
+def list_targets(auth) -> dict:
+    reg = get_registry()
+    reach = reachable_actions(auth)
     items = []
     for pid, m in sorted(reg.enabled_manifests().items()):
-        reachable = sorted(set().union(*(c.actions for c, _ in caps.get(pid, []))))
         items.append({"id": pid, "display_name": m.display_name,
-                      "description": m.description, "actions": reachable})
+                      "description": m.description, "actions": sorted(reach.get(pid, ()))})
     return {"items": items}
 
 

@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from . import __version__, db, openapi_doc
+from . import __version__, db, mcp_server, openapi_doc
 from .actions import scheduler
 from .config import get_settings, validate_exposure
 from .errors import PolicyError
@@ -31,10 +31,12 @@ async def lifespan(app: FastAPI):
     # Discover plugin services from env; unreachable ones are retried lazily.
     init_registry()
     task = asyncio.create_task(scheduler.scheduler_loop())
-    # Next lane: the Telegram poll loop starts here, and the MCP session
-    # manager runs around the yield.
+    # Next lane: the Telegram poll loop starts here.
     try:
-        yield
+        # The MCP session manager MUST run inside the app's lifespan, else
+        # /mcp requests die with "Task group is not initialized".
+        async with mcp_server.run_session_manager():
+            yield
     finally:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -92,11 +94,26 @@ async def validation_error(_: Request, exc: RequestValidationError) -> JSONRespo
         "error": "invalid request: " + "; ".join(parts), "code": "invalid_request"})
 
 
-# Next lane (MCP): a `BrokerApp` ASGI splitter goes here, routing /mcp (and
-# /mcp/...) to the MCP server and everything else to `api`, so bare "/mcp" is
-# not 307-redirected (MCP clients don't reliably follow redirects on POST).
-# OriginGuard will then wrap BrokerApp instead of `api`.
+class BrokerApp:
+    """ASGI front door: /mcp (and /mcp/...) goes to the MCP server, everything
+    else (and the lifespan, which also runs the MCP session manager) to FastAPI.
 
-# OriginGuard runs first on every request: it enforces the Cloudflare origin
-# secret and stamps the trusted client IP into scope state.
-app = OriginGuardMiddleware(api)
+    A Starlette Mount("/mcp") would 307-redirect bare "/mcp" to "/mcp/", and
+    MCP clients do not reliably follow redirects on POST; hence this splitter.
+    """
+
+    def __init__(self, api_app, mcp_app):
+        self.api = api_app
+        self.mcp_app = mcp_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and (
+                scope["path"] == "/mcp" or scope["path"].startswith("/mcp/")):
+            await self.mcp_app(scope, receive, send)
+            return
+        await self.api(scope, receive, send)
+
+
+# OriginGuard runs first on every request, API and MCP alike: it enforces the
+# Cloudflare origin secret and stamps the trusted client IP into scope state.
+app = OriginGuardMiddleware(BrokerApp(api, mcp_server.mcp_app))

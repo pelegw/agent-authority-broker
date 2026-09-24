@@ -71,6 +71,15 @@ def applies(item, action: str) -> bool:
     return item.applies_to == ["*"] or action in item.applies_to
 
 
+def run_mode(cap_mode: str, act: Action, as_draft: bool = False) -> str | None:
+    """The mode a call runs at under a capability of `cap_mode`, or None when
+    that capability can never reach the action (a draft-only authority over
+    an action that cannot be drafted). Shared with services/agent.py so the
+    advertised surface (REST /v1/targets, MCP tools) and evaluation agree."""
+    mode = "draft" if as_draft or "direct" not in act.effective_modes else cap_mode
+    return mode if mode in act.effective_modes else None
+
+
 def selector_dims(manifest: Manifest, action: str) -> dict[str, str]:
     """Set-valued, stored dimensions that restrict `action`, mapped to the
     resource kind their ids belong to (the dimension name when none)."""
@@ -145,10 +154,8 @@ def evaluate(auth, target: str, action: str, params: Any, now: int, *,
     candidates.sort(key=lambda cc: (-MODE_RANK[cc[0].mode], cc[0]))
     mode_blocked = False
     for cap, chain in candidates:
-        mode = cap.mode
-        if as_draft or "direct" not in act.effective_modes:
-            mode = "draft"
-        if mode not in act.effective_modes:
+        mode = run_mode(cap.mode, act, as_draft)
+        if mode is None:
             mode_blocked = True
             continue
         if not _covers(cap, act, resource_id, dims, lattice):
