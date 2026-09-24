@@ -203,7 +203,7 @@ decision is recorded in a hash-chained log.
   generated from the manifests, denies, plaintext once, edit, rotate,
   disable, revoke grants), Hidden resources (picked by name, stored by
   id), Account (password, admin tokens, sessions). Delegations, Channels
-  and Settings are placeholders until console pass 2.
+  and Settings came with pass 2 (below).
 - `GET /v1/admin/plugins` carries a manifest projection
   (`plugins/manifest_view.py`) that the editors and approval cards are
   built from.
@@ -212,6 +212,47 @@ decision is recorded in a hash-chained log.
   the person who approves those agents; no HTML-string sinks or inline
   handlers (tested); bidi override controls shown as visible markers;
   plugin-supplied links must be `https:`. `docs/console.md`.
+
+### Added (phase 4: owner console, pass 2)
+- Channels: the Telegram card (token state including "re-enter required",
+  bot name, link state, poll-loop health, active). The bot token is
+  write-only: the password field is read once and emptied before the
+  request is sent, nothing ever writes a token back, and the status's
+  token field is only compared with its state words (tested). Linking
+  shows the one-time code and a `t.me` deep link (https on `t.me` only),
+  warns that whoever sends the code first becomes the approver, drops the
+  code on navigation and polls until linked or expired. Enable, disable,
+  test message, unlink and clear token, each confirmed.
+- Settings: every operator setting from `GET /v1/admin/settings` with its
+  value, default, bounds, unit and source; one form that sends only the
+  changed names, reset sends `null`; one input per setting type (tested
+  against `runtime_settings.SPECS`). `mcp_allowed_hosts_extra` shows the
+  file's hosts and says it applies at the next broker start. "What lives
+  in files" lists the env-only keys and why they are not editable here.
+- Delegations: the key forest from `/v1/admin/keys/tree` with status,
+  live, depth and orphan badges, why a key is not live, a grants summary
+  and the capabilities; expand and collapse; edit, disable and enable; and
+  revoke (the key is disabled first, which stops it and its subtree at
+  once, then its live grants are revoked, the effect of
+  `revoke_delegation`). Agent key rows link to their node
+  (`#/delegations/<id>`).
+- Plugins: plugins that share a connection slot (`connection.shared`) get
+  one card for the shared fields and the one connection, relayed through
+  any member: the Google account card (client id and secret, one Connect
+  for Gmail, Calendar and Drive, granted scopes, and missing scopes as
+  "reconnect needed" once connected). Member cards keep their own status
+  and scopes.
+- The GitHub connect panel reads what `plugin-github` reports: the
+  installed permissions, App or PAT mode, the repository selection and
+  count. Finishing by installation id sends the `state` that
+  `connect/start` issued. In PAT mode there is nothing to install, and the
+  panel says every restriction is proxy-enforced.
+- The enforcement badge follows `policy.enforced_where`: the plugin's live
+  report when it is `target`, `mixed` or `proxy`, otherwise "proxy (not
+  reported)", never the manifest's claim alone (a test ties the values to
+  `plugins.settings.ENFORCEMENT_VALUES`).
+- Background timers stop on navigation and sign-out; the header gains a
+  Telegram pill.
 
 ### Added (phase 5: delegation)
 - `delegate`, `list_my_delegations` and `revoke_delegation` over REST
@@ -253,7 +294,7 @@ decision is recorded in a hash-chained log.
   invalid_capabilities`. Owner-authored grants keep `direct` when the mode
   is omitted.
 
-### Added (phase 6: GitHub plugin service; merging, not yet on `dev`)
+### Added (phase 6: GitHub plugin service)
 - `plugins/github` (`aab_plugin_github`): the `github_app` connection
   (install URL with a single-use state nonce; the installation is verified
   with an App JWT before it is stored) mints an installation token per
@@ -261,9 +302,21 @@ decision is recorded in a hash-chained log.
   `target_permissions`, refuses a token wider than requested, and caches
   it in memory only. A PAT fallback is reported as `proxy` for every
   dimension. Hidden repositories are 404 before any token is minted;
-  branch patterns are checked by the plugin. The App key is pasted in the
-  console or read from the optional read-only `GITHUB_APP_KEY_DIR` bind.
-  `docs/plugins/github.md`.
+  branch patterns are checked by the plugin. `docs/plugins/github.md`.
+- The App id, slug and private key (or the PAT) are console config; the
+  plugin reads no GitHub value from env. The key is pasted in the console
+  (`private_key_pem`) or named by the `private_key_path` field inside the
+  optional read-only `GITHUB_APP_KEY_DIR` bind at `/run/secrets/github`.
+- Private key path confinement: a console-set path would be a file-read
+  primitive, so the file must resolve (symlinks followed) inside
+  `/run/secrets/github`, on configure and on every read. A path elsewhere,
+  missing, or not an RSA key is refused with 400 and never echoed; it can
+  never point at `/proc/self/environ` (which holds `PLUGIN_TOKEN` and
+  `PLUGIN_SECRETS_KEY`). A key in `private_key_pem` wins over the file.
+- `plugin-github` receives only the generic `PLUGIN_TOKEN`,
+  `PLUGIN_SECRETS_KEY` and `PLUGIN_SECRETS_DIR`. Image
+  `python:3.12-slim`, uid 10001, one uvicorn worker, TCP healthcheck. CI
+  job for the plugin.
 
 ### Added (phase 7: Google plugin service)
 - `plugins/google` (`aab_plugin_google`): one container hosting `gmail`,
@@ -320,6 +373,18 @@ decision is recorded in a hash-chained log.
 - Permission views (`list_my_permissions`, `get_permission_status`, and
   the `allowed` list of a `400 clipped`) no longer name an id the owner
   hid or denied after granting it.
+- `enforced_where` went stale in the permissive direction: a failed health
+  refresh (plugin unreachable) replaced the stored status with an error
+  record without `enforcement`, and the broker then fell back to the
+  manifest's claim, so a GitHub plugin last seen on a PAT (proxy) was
+  reported as target-enforced in `get_my_access` and in signed decision
+  rows. A failed refresh now keeps the last reported `enforcement`, and
+  `target` is claimed only when the manifest allows it and the plugin's
+  last report says `target` or `mixed`; a record with no or an unknown
+  value counts as `proxy`. Only a plugin that has never reported keeps the
+  manifest's claim.
+- The intermittent SQLite failure seen in test runs (the "SQLite
+  flake"): fix in progress.
 
 ### Documentation
 - `README.md` rewritten for the release: pitch, architecture, quick start,

@@ -114,7 +114,7 @@ curl http://127.0.0.1:8080/v1/health  # {"status":"ok","version":"0.2.0"}
    (`grep ^SETUP_TOKEN= .env`), a username and a password (at least 12
    characters). The token is inert once the owner exists. Then log in.
 2. **Enable WhatsApp and pair it.** Plugins > WhatsApp > Enable, then
-   Connect. The console shows the pairing QR (it is also printed in
+   Pair a device. The console shows the pairing QR (it is also printed in
    `docker compose logs whatsapp-sidecar`). On the phone: WhatsApp >
    Settings > Linked devices > Link a device, and scan. The plugin's health
    goes from "waiting for QR pairing" to connected. The device shows up as
@@ -162,7 +162,8 @@ curl http://127.0.0.1:8080/v1/health  # {"status":"ok","version":"0.2.0"}
 Gmail, Calendar and Drive need a Google OAuth client of your own
 ([docs/plugins/google.md](docs/plugins/google.md)); GitHub needs a GitHub
 App ([docs/plugins/github.md](docs/plugins/github.md)). Both are entered in
-the console, never in `.env`.
+the console (Plugins: the shared Google account card, and the GitHub
+plugin's form), never in `.env`.
 
 ## What lives in files vs the console
 
@@ -180,13 +181,21 @@ the console, never in `.env`.
 - **Compose values**: `BROKER_PORT`, `TZ`, `DEVICE_NAME`,
   `GITHUB_APP_KEY_DIR`.
 
-Everything else is configured in the console and stored in `broker.db`: the
-Telegram bot token (encrypted under `BROKER_SECRETS_KEY`), the GitHub App
-and Google OAuth client credentials (relayed once to the plugin container,
-never stored by the broker), plugin enable/disable and config, and the
-operator settings (delegation limits, session lifetimes, draft TTL,
-scheduling bounds, timeouts, extra MCP hosts), each typed and bounded. See
-[docs/configuration.md](docs/configuration.md).
+Everything else is configured in the console:
+
+- **The Telegram bot token** (Channels > Telegram), stored in `broker.db`
+  encrypted under `BROKER_SECRETS_KEY`, write-only.
+- **Every plugin credential**: the GitHub App id, slug and private key (or
+  the PAT fallback), and the Google OAuth client id and secret (one shared
+  Google account card for Gmail, Calendar and Drive). Secret fields are
+  relayed once to the plugin container and encrypted there; the broker never
+  stores them.
+- **Plugin enable/disable and non-secret config**, and the **operator
+  settings** (Settings: delegation limits, session lifetimes, draft TTL,
+  scheduling bounds, timeouts, extra MCP hosts), each typed and bounded,
+  stored in `broker.db`.
+
+See [docs/configuration.md](docs/configuration.md).
 
 ## Plugins
 
@@ -206,12 +215,12 @@ the plugin mints cannot exceed it) or only the broker and the plugin do
 | Calendar (`gcal`) | `plugin-google` | List calendars and events, free/busy; create, update and respond to events; delete (destructive) | Read vs write, by scope | Calendars, attendees, free/busy-only visibility, time window, private and others' events, hidden events | [google.md](docs/plugins/google.md) |
 | Drive (`gdrive`) | `plugin-google` | List, search, read metadata, download; create folders, upload, move, share; trash and delete (destructive) | Read vs write, by scope | Folder subtree (parent-chain walk by id), file types, shared drives, content vs metadata only, download size, external sharing, hidden files | [google.md](docs/plugins/google.md) |
 
-Gmail, Calendar and Drive share one container because they share one
-Google account: one OAuth client, one refresh token. Adding the second and
-third plugins touched no engine file
-([docs/platform-thesis.md](docs/platform-thesis.md)). The GitHub plugin
-service is merging from its own branch; until it lands, `plugin-github` is a
-placeholder image and GitHub does not appear in the console.
+All three plugin services (`plugin-whatsapp`, `plugin-github`,
+`plugin-google`) are real. Gmail, Calendar and Drive share one container
+because they share one Google account: one OAuth client, one refresh token,
+and in the console one Google account card with one Connect. Adding the
+second and third plugins touched no engine file
+([docs/platform-thesis.md](docs/platform-thesis.md)).
 
 ## Authority model
 
@@ -276,17 +285,16 @@ page itself. Views:
 | Requests | Drafts and permission requests to approve or reject (a permission request states the budget it adds) |
 | Scheduled | Actions waiting for their time; cancel |
 | Decisions | The decision record with key and grant chains, `enforced_where` and outcomes; Verify chain |
-| Plugins | Enable and disable, config forms generated from the manifest, health, connect (QR, GitHub App install, Google consent) |
+| Plugins | Enable and disable, config forms generated from the manifest (secret fields write-only), health, the enforcement badge (`target`, `mixed` or `proxy`, from what the plugin last reported), connect: WhatsApp QR pairing, the GitHub connect panel (App install, installed permissions, App or PAT mode), and one shared Google account card for Gmail, Calendar and Drive (client id and secret, one Connect, granted and missing scopes) |
 | Agent keys | Create keys with the capability editor, edit, rotate, disable, revoke grants |
-| Delegations | The key tree with delegated children; revoke |
+| Delegations | The key tree with delegated children, why a key is not live, orphans; edit, disable, revoke |
 | Hidden resources | Hide a chat, repo, label, folder and so on, picked by name and stored by id |
-| Channels | Telegram: bot token, linking, enable, test |
-| Settings | Operator settings, and what lives in files and why |
+| Channels | Telegram: the bot token (write-only), linking your chat, enable, test message, poll-loop health |
+| Settings | Every operator setting with its default, bounds and source; what lives in files and why |
 | Account | Password, admin tokens for the CLI, sessions |
 
-Delegations, Channels and Settings arrive with console pass 2. Until it
-merges they are placeholders, and the same functions are on the admin API
-(`/v1/admin/keys/tree`, `/v1/admin/telegram/*`, `/v1/admin/settings`). See
+Everything the console does goes through the admin API (`/v1/admin/*`),
+which the `aab` CLI and scripts can call with an admin token. See
 [docs/console.md](docs/console.md).
 
 ## Exposing to the internet
@@ -322,7 +330,7 @@ python -m venv .venv
 pip install -e "plugin-runtime[dev]"                     && (cd plugin-runtime && python -m pytest)
 pip install -e plugin-runtime -e "plugins/whatsapp[dev]" && (cd plugins/whatsapp && python -m pytest)
 pip install -e plugin-runtime -e "plugins/google[dev]"   && (cd plugins/google && python -m pytest)
-pip install -e plugin-runtime -e "plugins/github[dev]"   && (cd plugins/github && python -m pytest)   # once merged
+pip install -e plugin-runtime -e "plugins/github[dev]"   && (cd plugins/github && python -m pytest)
 
 # Go WhatsApp sidecar
 cd sidecars/whatsapp && go build ./... && go test ./...
@@ -367,8 +375,6 @@ Version 0.2.0, single owner.
   endpoint.** The plugin refuses any token wider than it asked for; if
   Google ignores the requested subset, the manifests' `scopes` narrowing
   moves to `proxy` rather than claim target enforcement.
-- **The GitHub plugin and console pass 2** (Delegations, Channels,
-  Settings) are merging from their own branches.
 - **WhatsApp runs through whatsmeow, an unofficial client.** Meta's terms
   do not allow it, and accounts can be banned. The WhatsApp session is the
   one credential not encrypted at rest (whatsmeow's own store in

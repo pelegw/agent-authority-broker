@@ -3,13 +3,14 @@
 This puts the broker on a public EC2 instance, reachable only through
 Cloudflare, with the admin/management plane gated by Cloudflare Access SSO.
 
-> Status (v0.2.0): `plugin-whatsapp` and `plugin-google` are real plugin
-> services; `plugin-github` is a placeholder image that only idles until the
-> GitHub plugin (phase 6) merges. The images and the read-only `wa_data`
-> mount have not yet been verified by a real build and run, so do the checks
-> in `docs/deployment.md` > "Verify after `docker compose up`" on the host
-> after the first deploy. The topology, env split and volumes are explained
-> in `docs/deployment.md`.
+> Status (v0.2.0): all three plugin services (`plugin-whatsapp`,
+> `plugin-github`, `plugin-google`) are real, and every third-party
+> credential (the Telegram bot token, the GitHub App or PAT, the Google
+> OAuth client) is entered in the console, never in `.env`. The images and
+> the read-only `wa_data` mount have not yet been verified by a real build
+> and run, so do the checks in `docs/deployment.md` > "Verify after
+> `docker compose up`" on the host after the first deploy. The topology,
+> env split and volumes are explained in `docs/deployment.md`.
 
 **Threat model recap.** The origin is locked down three ways so nobody who
 learns the EC2 IP can bypass Cloudflare: (1) the **security group** only accepts
@@ -132,17 +133,18 @@ container. Register exactly these (substitute your `SITE_DOMAIN`):
 No credential goes into `/opt/aab/.env` for any of this. The Google OAuth
 client id and secret and the GitHub App id, slug and private key are entered
 in the console, in the plugin config forms (Plugins > GitHub; for Google,
-the one account form that Gmail, Calendar and Drive share), which relay the
-secret fields once to the plugin container; the broker never stores them
-(`docs/configuration.md`, `docs/plugins/google.md`, `docs/plugins/github.md`).
+the one Google account card that Gmail, Calendar and Drive share), which
+relay the secret fields once to the plugin container; the broker never
+stores them (`docs/configuration.md`, `docs/plugins/google.md`,
+`docs/plugins/github.md`).
 For the GitHub App private key you may instead place it on the host as
 `/opt/aab/data/github-app/app.pem` (readable by uid 10001 only:
 `sudo install -o 10001 -g 10001 -m 0400 app.pem /opt/aab/data/github-app/`)
-and name `/run/secrets/github/app.pem` in the GitHub plugin's key-path field.
-Only `plugin-github` mounts that directory, read-only, and `deploy/push.sh`
-never syncs or deletes `data/`. The Telegram bot token is entered in the
-console as well (Channels > Telegram; until console pass 2 merges, through
-`POST /v1/admin/telegram/token`).
+and name `/run/secrets/github/app.pem` in the GitHub plugin's
+`private_key_path` field; the plugin reads only files that resolve inside
+`/run/secrets/github`. Only `plugin-github` mounts that directory,
+read-only, and `deploy/push.sh` never syncs or deletes `data/`. The
+Telegram bot token is entered in the console as well (Channels > Telegram).
 
 ## 7. Deploy
 
