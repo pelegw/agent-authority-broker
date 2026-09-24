@@ -20,9 +20,13 @@ volume (PLUGIN_SECRETS_KEY_<SERVICE>). One .env holds them all, but
 docker-compose.yml hands each container only its own values: no service gets
 the whole file.
 
-Third-party values (GitHub App, Google OAuth, Telegram, Cloudflare Access)
-can't be generated; they are written as empty, labelled placeholders and a
-checklist of where to obtain each is printed.
+Third-party credentials (GitHub App, Google OAuth client, Telegram bot token)
+are NOT in this file: the owner enters them in the console, which relays
+plugin credentials to the plugin that owns them and encrypts the Telegram
+token under BROKER_SECRETS_KEY (docs/configuration.md). The file keeps only
+what must exist before the database is readable, plus the public-mode
+exposure values (Cloudflare Access, SITE_DOMAIN), which are written as empty,
+labelled placeholders; a checklist of where to obtain each is printed.
 
 `.env.example` in the repo is this file's `--example` output; a test keeps the
 two identical so the template can't drift from what the script writes.
@@ -78,7 +82,7 @@ SECTIONS: list[tuple[str, list[Entry]]] = [
               "Edge secret a Cloudflare Transform Rule adds as X-AAB-Origin. Used only by the public overlay.",
               generate=_hex32),
         Entry("BROKER_SECRETS_KEY",
-              "Fernet key for broker-side secrets. Reserved: protects nothing in 0.2.0 (no target credentials in the broker).",
+              "Fernet key for secrets entered in the console and kept by the broker (the Telegram bot token). Never target credentials.",
               generate=_fernet_key),
         Entry("DECISION_SIGNING_KEY",
               "HMAC key for the hash-chained decision record. Keep it stable: old rows verify under it.",
@@ -107,25 +111,7 @@ SECTIONS: list[tuple[str, list[Entry]]] = [
               "Fernet key for plugin-google's own secret volume (OAuth refresh token). plugin-google only.",
               generate=_fernet_key),
     ]),
-    ("Third-party values (fill in; see the checklist the script prints)", [
-        Entry("GITHUB_APP_ID",
-              "GitHub App id for the github plugin (plugin-github only).",
-              obtain="GitHub > Settings > Developer settings > GitHub Apps > New GitHub App; "
-                     "the App ID is on the app's General page."),
-        Entry("GITHUB_APP_PRIVATE_KEY_PATH",
-              "Path (as the github plugin container sees it) to the App private key PEM, e.g. "
-              "/run/secrets/github/app.pem (see docs/deployment.md).",
-              obtain="The GitHub App's General page > Private keys > Generate a private key."),
-        Entry("GOOGLE_OAUTH_CLIENT_ID",
-              "Google OAuth client id shared by the gmail, gcal and gdrive plugins (plugin-google only).",
-              obtain="Google Cloud Console > APIs & Services > Credentials > Create credentials > "
-                     "OAuth client ID (Web application)."),
-        Entry("GOOGLE_OAUTH_CLIENT_SECRET",
-              "Google OAuth client secret for the client id above (plugin-google only).",
-              obtain="Shown next to the client id in Google Cloud Console > Credentials."),
-        Entry("TELEGRAM_BOT_TOKEN",
-              "Telegram bot token for approval cards on your phone (broker only). Blank = Telegram off.",
-              obtain="Message @BotFather on Telegram, send /newbot, copy the token."),
+    ("Public-mode values (fill in for an internet deploy; see the checklist the script prints)", [
         Entry("CF_ACCESS_TEAM_DOMAIN",
               "Cloudflare Access team domain, e.g. myteam.cloudflareaccess.com (public mode only).",
               obtain="Cloudflare Zero Trust dashboard > Settings > Custom Pages > Team domain."),
@@ -143,10 +129,13 @@ SECTIONS: list[tuple[str, list[Entry]]] = [
               default="AAB"),
         Entry("TZ", "Timezone for logs.", default="UTC"),
         Entry("GITHUB_APP_KEY_DIR",
-              "Host directory bind-mounted read-only into plugin-github at /run/secrets/github "
-              "(holds app.pem; git-ignored under data/).",
+              "Optional file-based alternative to pasting the GitHub App private key in the "
+              "console: host directory bind-mounted read-only into plugin-github at "
+              "/run/secrets/github (put app.pem there; git-ignored under data/).",
               default="./data/github-app"),
-        Entry("MCP_ALLOWED_HOSTS", "Host headers the /mcp endpoint accepts (DNS-rebinding guard).",
+        Entry("MCP_ALLOWED_HOSTS",
+              "Base Host headers the /mcp endpoint accepts (DNS-rebinding guard). The console "
+              "can add hosts (Settings) but never remove these.",
               default="localhost:*,127.0.0.1:*"),
         Entry("CF_ACCESS_ENABLED",
               "Require a Cloudflare Access identity on the admin plane. Must be true in public mode.",
@@ -160,6 +149,20 @@ SECTIONS: list[tuple[str, list[Entry]]] = [
 ]
 
 ENTRIES = {e.name: e for _, entries in SECTIONS for e in entries}
+
+# Third-party credentials that deliberately have no .env entry: the owner
+# enters each in the console. (what, where in the console, where to get it)
+CONSOLE_ENTERED = [
+    ("Telegram bot token", "Channels > Telegram",
+     "message @BotFather on Telegram, send /newbot, copy the token"),
+    ("GitHub App id and private key", "Plugins > GitHub",
+     "GitHub > Settings > Developer settings > GitHub Apps > New GitHub App; "
+     "General page > Private keys > Generate a private key (or put app.pem in "
+     "GITHUB_APP_KEY_DIR instead of pasting it)"),
+    ("Google OAuth client id and secret", "Plugins > Google",
+     "Google Cloud Console > APIs & Services > Credentials > Create credentials > "
+     "OAuth client ID (Web application)"),
+]
 GENERATED = [e.name for e in ENTRIES.values() if e.generate]
 
 HEADER_ENV = [
@@ -177,8 +180,9 @@ ROTATE_HINTS = {
     "SETUP_TOKEN": "Only matters before the owner account exists.",
     "ORIGIN_SECRET": "Update the Cloudflare Transform Rule header value, then restart: "
                      "docker compose -f docker-compose.yml -f docker-compose.public.yml up -d.",
-    "BROKER_SECRETS_KEY": "Restart the broker: docker compose up -d broker. "
-                          "Nothing is encrypted under it in 0.2.0.",
+    "BROKER_SECRETS_KEY": "Restart the broker: docker compose up -d broker. Secrets entered in "
+                          "the console no longer decrypt: re-enter the Telegram bot token "
+                          "(Channels > Telegram).",
     "DECISION_SIGNING_KEY": "Existing decision rows will no longer verify under the new key.",
     "PLUGIN_TOKEN_WHATSAPP": "Restart both ends: docker compose up -d broker plugin-whatsapp.",
     "PLUGIN_SECRETS_KEY_WHATSAPP": "Restart plugin-whatsapp; its stored config no longer "
@@ -233,11 +237,15 @@ def _write_private(path: Path, data: bytes) -> None:
 
 
 def _checklist() -> list[str]:
-    out = ["Fill in these third-party values when you enable the feature that needs them:"]
+    out = ["For a public (internet) deploy, fill in these values in the file:"]
     for e in ENTRIES.values():
         if e.obtain:
             out.append(f"  [ ] {e.name}: {e.obtain}")
-    out.append("For a public deploy also set CF_ACCESS_ENABLED=true (see deploy/DEPLOY.md).")
+    out.append("  and set CF_ACCESS_ENABLED=true (see deploy/DEPLOY.md).")
+    out.append("")
+    out.append("Entered in the console (/admin), never in this file, when you enable the feature:")
+    for what, where, obtain in CONSOLE_ENTERED:
+        out.append(f"  [ ] {what}: {where}. How to get it: {obtain}.")
     return out
 
 

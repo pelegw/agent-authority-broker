@@ -27,9 +27,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from .. import engine
 from ..agent_auth import current_auth
 from ..auth import AuthContext
-from ..config import get_settings
 from ..errors import PolicyError
 from ..plugins.registry import get_registry
+from ..runtime_settings import runtime_settings
 from ..services import agent
 
 router = APIRouter()
@@ -90,7 +90,7 @@ async def long_poll(target: str, action: str, request: Request, wait: int = 0,
     to hold the request until something new arrives."""
     params = _query_params(target, action, request)
     poll = await anyio.to_thread.run_sync(engine.open_poll, auth, target, action, params)
-    s = get_settings()
+    s = await anyio.to_thread.run_sync(runtime_settings)
     deadline = time.monotonic() + max(0, min(wait, s.long_poll_max_wait_seconds))
     while True:
         data = await anyio.to_thread.run_sync(engine.poll_step, auth, poll)

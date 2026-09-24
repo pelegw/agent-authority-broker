@@ -206,11 +206,14 @@ class RemoteAdapter:
     """
 
     def __init__(self, service: str, base_url: str, token: str, manifest: Manifest,
-                 timeout: float = 30.0, client_factory: ClientFactory | None = None):
+                 timeout: float | Callable[[], float] = 30.0,
+                 client_factory: ClientFactory | None = None):
         self.service = service
         self.base_url = base_url
         self.manifest = manifest
         self._token = token
+        # A callable is read per call: the registry passes the live console
+        # setting (plugin_timeout_seconds), so an edit applies without restart.
         self._timeout = timeout
         self._factory = client_factory or _default_client
 
@@ -223,7 +226,8 @@ class RemoteAdapter:
                  request_id: str | None = None, raw: bool = False):
         return request(self.base_url, self._token, method, path, json_body=json_body,
                        plugin_id=self.manifest.id, request_id=request_id, raw=raw,
-                       timeout=self._timeout, factory=self._factory)
+                       timeout=self._timeout() if callable(self._timeout) else self._timeout,
+                       factory=self._factory)
 
     # ---- protocol -------------------------------------------------------------
 

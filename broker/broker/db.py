@@ -100,20 +100,20 @@ CREATE TABLE IF NOT EXISTS grants (
 CREATE TABLE IF NOT EXISTS plugins (
     id          TEXT PRIMARY KEY,             -- manifest id: ^[a-z][a-z0-9]*$
     enabled     INTEGER NOT NULL DEFAULT 0,
-    config      TEXT NOT NULL DEFAULT '{}',   -- non-secret config only; secrets -> plugin_secrets
+    config      TEXT NOT NULL DEFAULT '{}',   -- non-secret only; secrets go to the plugin's /configure
     connected   INTEGER NOT NULL DEFAULT 0,   -- also 0 when secrets fail to decrypt (reconnect required)
     last_health TEXT NOT NULL DEFAULT '{}',   -- JSON from adapter.status()
     updated_at  INTEGER NOT NULL
 );
 
--- RESERVED, unused in 0.2.0 (kept because the schema is additive-only).
--- Target credentials live in the plugin containers, never here: the Google
--- refresh token and GitHub App key in each plugin's own secret volume under
--- its own PLUGIN_SECRETS_KEY_<SERVICE>, the WhatsApp session in wa_data
--- (sidecar-owned). The broker holds none. If a broker-side secret
--- ever needs storing, it goes here, only through crypto.py.
+-- Broker-side secrets the owner enters in the console and the broker itself
+-- uses, e.g. the Telegram bot token (slot 'broker', name 'telegram_bot_token').
+-- Read and written only through crypto.py, Fernet under BROKER_SECRETS_KEY.
+-- Target credentials never live here: the Google refresh token and GitHub App
+-- key stay in each plugin's own secret volume under its own
+-- PLUGIN_SECRETS_KEY_<SERVICE>, the WhatsApp session in wa_data (sidecar-owned).
 CREATE TABLE IF NOT EXISTS plugin_secrets (
-    slot       TEXT NOT NULL,                 -- plugin id, or a shared slot such as 'google'
+    slot       TEXT NOT NULL,                 -- 'broker' for the broker's own secrets
     name       TEXT NOT NULL,
     ciphertext BLOB NOT NULL,                 -- Fernet token under BROKER_SECRETS_KEY
     updated_at INTEGER NOT NULL,

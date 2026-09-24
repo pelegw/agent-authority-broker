@@ -18,6 +18,7 @@ from dataclasses import dataclass, replace
 
 from .. import db
 from ..config import get_settings
+from ..runtime_settings import runtime_settings
 
 COOKIE_NAME = "aab_session"
 _TOUCH_THROTTLE = 60
@@ -42,7 +43,7 @@ class Session:
 
     def expires_at(self) -> int:
         """When this session dies if no further requests arrive."""
-        idle = self.last_seen_at + get_settings().session_idle_seconds
+        idle = self.last_seen_at + runtime_settings().session_idle_seconds
         return min(idle, self.absolute_expires_at)
 
 
@@ -53,8 +54,9 @@ def create(principal_id: str, ip: str = "", user_agent: str = "") -> tuple[str, 
     """
     value = secrets.token_urlsafe(32)
     now = _now()
-    expires = now + get_settings().session_absolute_seconds
-    idle = get_settings().session_idle_seconds
+    rs = runtime_settings()
+    expires = now + rs.session_absolute_seconds
+    idle = rs.session_idle_seconds
     with db.connect() as conn:
         # Housekeeping: drop sessions that can no longer authenticate, so the
         # table does not grow with every login.
@@ -76,7 +78,7 @@ def lookup(cookie_value: str | None) -> Session | None:
     if not cookie_value:
         return None
     now = _now()
-    idle = get_settings().session_idle_seconds
+    idle = runtime_settings().session_idle_seconds
     with db.connect() as conn:
         row = conn.execute(
             "SELECT s.*, p.username FROM sessions s JOIN principals p ON p.id = s.principal_id"
@@ -125,7 +127,7 @@ def revoke_all_except(principal_id: str, keep_id: str | None) -> int:
 def list_for(principal_id: str, current_id: str | None = None) -> list[dict]:
     """Live sessions, newest first. `id` is the stored hash, never a cookie."""
     now = _now()
-    idle = get_settings().session_idle_seconds
+    idle = runtime_settings().session_idle_seconds
     with db.connect() as conn:
         rows = conn.execute(
             "SELECT * FROM sessions WHERE principal_id = ? ORDER BY created_at DESC",
@@ -151,7 +153,7 @@ def set_cookie(response, value: str) -> None:
     locally so http://127.0.0.1 logins work.
     """
     response.set_cookie(
-        COOKIE_NAME, value, max_age=get_settings().session_absolute_seconds,
+        COOKIE_NAME, value, max_age=runtime_settings().session_absolute_seconds,
         path="/", httponly=True, samesite="strict", secure=get_settings().public_mode())
 
 
