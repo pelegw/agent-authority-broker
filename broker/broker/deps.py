@@ -31,8 +31,10 @@ class AdminContext:
     """Who is acting on the admin plane. Every human action records this."""
     principal_id: str
     username: str
-    via: Literal["session", "token"]
-    credential_id: str             # sessions.id (a hash) or admin_tokens.id
+    # telegram: a tap by the linked Telegram user (notify/telegram_inbound.py),
+    # which is bound to the owner principal when the chat is linked.
+    via: Literal["session", "token", "telegram"]
+    credential_id: str             # sessions.id (a hash), admin_tokens.id, or the Telegram user id
     expires_at: int | None = None  # when this credential stops working, if ever
 
 

@@ -33,7 +33,8 @@ from typing import Any
 from .. import db
 from ..audit import audit
 from ..authority.grant import Lattice
-from ..config import get_settings, plugin_services
+from ..config import plugin_services
+from ..runtime_settings import runtime_settings
 from .adapter import Adapter, AdapterError, ClientFactory, InProcessAdapter, RemoteAdapter, request
 from .manifest import ID_RE, Manifest, ManifestError, load_manifest
 
@@ -42,6 +43,11 @@ log = logging.getLogger(__name__)
 TARGETS_DIR = Path(__file__).resolve().parents[1] / "targets"
 # A plugin service that was unreachable at boot is retried at most this often.
 _REDISCOVER_SECONDS = 30
+
+
+def live_plugin_timeout() -> float:
+    """The console's plugin_timeout_seconds, read at call time."""
+    return runtime_settings().plugin_timeout_seconds
 
 
 @dataclass(frozen=True)
@@ -140,7 +146,7 @@ class Registry:
             self._next_discovery = time.monotonic() + _REDISCOVER_SECONDS
 
     def _discover_one(self, service: str, url: str, token: str) -> None:
-        timeout = get_settings().plugin_timeout_seconds
+        timeout = live_plugin_timeout()
         try:
             body = request(url, token, "GET", "/manifests", timeout=timeout,
                            factory=self._factory)
@@ -164,7 +170,8 @@ class Registry:
             if vendored is None:
                 self._pin(m, None, service)
                 continue
-            adapter = RemoteAdapter(service, url, token, vendored, timeout, self._factory)
+            adapter = RemoteAdapter(service, url, token, vendored, live_plugin_timeout,
+                                    self._factory)
             self.register(adapter, m, vendored)
 
     def _maybe_rediscover(self) -> None:
@@ -246,8 +253,9 @@ class Registry:
             chain = tuple(owners[0].adapter.ancestors(kind, resource_id))
         except AdapterError:
             return ()
+        ttl = runtime_settings().ancestors_cache_seconds     # a DB read: outside the lock
         with self._lock:
-            self._anc_cache[key] = (now + get_settings().ancestors_cache_seconds, chain)
+            self._anc_cache[key] = (now + ttl, chain)
         return chain
 
     def clear_cache(self) -> None:

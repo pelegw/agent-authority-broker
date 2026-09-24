@@ -1,5 +1,6 @@
-"""The notifier seam. A provider (the Telegram lane adds notify/telegram.py)
-implements these two functions; list it in `notify._PROVIDERS` to activate.
+"""The notifier seam. A provider (notify/telegram.py is the one channel so
+far) implements these two functions; `notify._providers()` selects the live
+ones.
 
 Both receive plain dicts:
   notify_action(action)       a queued action awaiting a human: the `actions`

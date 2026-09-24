@@ -28,6 +28,7 @@ Examples:
   aab hidden list [--target t] | add <target> <kind> <id> [--label L --reason R]
   aab hidden rm <target> <kind> <id>
   aab decisions list [--key 3 --target t --decision deny --limit 50] | verify
+  aab simulate [--hours 8] [--seed 7] [--json]   # approval-volume simulation, local only
 
 Passwords and plugin secrets are only ever read with getpass, never from
 arguments (which end up in shell history and process listings).
@@ -38,6 +39,7 @@ import getpass
 import json
 import os
 import sys
+from pathlib import Path
 
 import httpx
 
@@ -110,6 +112,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("password", help="change the owner password")
     _skill_commands(sub)
     _engine_commands(sub)
+
+    sm = sub.add_parser("simulate", help="approval-volume simulation (local; needs a "
+                                         "source checkout)")
+    sm.add_argument("--hours", type=int, default=8)
+    sm.add_argument("--seed", type=int, default=7)
+    sm.add_argument("--json", action="store_true", help="print only the JSON summary")
     return p
 
 
@@ -261,6 +269,9 @@ def main(argv: list[str] | None = None) -> int:
                                             "password": password})
         return _finish(r)
 
+    if args.cmd == "simulate":
+        return _simulate(args)
+
     if not args.token:
         print("set AAB_ADMIN_TOKEN in the environment or pass --token", file=sys.stderr)
         return 2
@@ -288,6 +299,30 @@ def main(argv: list[str] | None = None) -> int:
             if r is None:     # unreachable: argparse enforces the choices
                 return 2
     return _finish(r)
+
+
+def _simulate(args) -> int:
+    """Run tests/simulation in this process against a throwaway database.
+    It talks to no broker and needs no token. The simulation lives with the
+    tests (it drives the in-process echo plugin), which are not part of the
+    installed package, so this works from a source checkout only."""
+    checkout = Path(__file__).resolve().parents[1]      # broker/
+    if (checkout / "tests" / "simulation").is_dir():
+        # First on the path, not merely present: the editable plugin-runtime
+        # install puts its own top-level `tests` package on sys.path too.
+        if str(checkout) in sys.path:
+            sys.path.remove(str(checkout))
+        sys.path.insert(0, str(checkout))
+    try:
+        from tests.simulation import simulate
+    except ImportError as exc:
+        print(f"aab simulate needs a source checkout with broker/tests ({exc})",
+              file=sys.stderr)
+        return 2
+    argv = ["--hours", str(args.hours), "--seed", str(args.seed)]
+    if args.json:
+        argv.append("--json")
+    return simulate.main(argv)
 
 
 def _finish(r: httpx.Response) -> int:

@@ -84,7 +84,12 @@ the broker's decision:
 - Binary (`returns: binary` in the manifest): `{"binary_b64": "...", "mime": "..."}`.
 - `long_poll` actions return a JSON object with a cursor and a list
   (e.g. `{"cursor": 7, "items": []}`); every list empty means "nothing new",
-  which is what the broker's `?wait=` loop waits on.
+  which is what the broker's `?wait=` loop waits on. An action that declares
+  a `cursor` param and is called without one is a **bootstrap** ("start from
+  now"): the broker answers it at once, whatever `wait` says.
+- Binary results reach REST callers as `X-Content-Type-Options: nosniff`
+  attachments, named after the call's most specific id (the first required
+  string param that is not the selector, else the resource id).
 
 ## Errors and the 503 / 502 contract
 
@@ -97,6 +102,7 @@ Error bodies are `{"error": "<message>"}`.
 | plugin | the call may have reached the target, outcome unknown | **502** | reservation **kept** for 24 h; a queued action becomes `failed` with the result recorded and is **never** retried automatically |
 | plugin | unexpected exception in the adapter | 502 (runtime maps it; body has no internals) | as 502 |
 | plugin | any other 5xx (500, 504, ...) | 502 | as 502: nothing promises "not performed" |
+| broker | agent params that are not UTF-8 JSON (lone surrogate, NaN, Infinity) | **400** `invalid_params` | recorded deny before evaluation; no plugin call, no reservation (the transport refuses such a body too) |
 | broker | connection refused / connect timeout (never reached the plugin) | **503** | as 503 |
 | broker | read timeout, reset, broken or non-JSON response after sending | **502** | as 502 |
 

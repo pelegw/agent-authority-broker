@@ -15,6 +15,12 @@ name: aab
 # Env split: there is deliberately no env_file. .env holds every value, but
 # each service below receives only the variables it names, so no container
 # ever sees another container's token or key.
+#
+# .env holds only what cannot live in the database (docs/configuration.md):
+# generated bootstrap secrets and fail-closed exposure settings. Third-party
+# credentials (Telegram bot token, GitHub App, Google OAuth client) are entered
+# in the console: plugin credentials are relayed once to the plugin's
+# /configure, the Telegram token is encrypted under BROKER_SECRETS_KEY.
 
 services:
   # The only thing agents ever talk to: REST + MCP, owner console, grants,
@@ -52,7 +58,6 @@ services:
       CF_ACCESS_ALLOWED_EMAILS: ${CF_ACCESS_ALLOWED_EMAILS:-}
       ALLOW_INSECURE_ADMIN: ${ALLOW_INSECURE_ADMIN:-false}
       MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-localhost:*,127.0.0.1:*}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       # Where each plugin service answers (broker_net) and the token the
       # broker presents to it. Keyed by service, not plugin id: plugin-google
       # hosts gmail, gcal and gdrive behind one URL and one token.
@@ -71,16 +76,24 @@ services:
       context: ./plugins/whatsapp
       additional_contexts:
         runtime: ./plugin-runtime   # the aab-plugin-runtime package
-        repo: .                     # VERSION and the vendored manifests
     restart: unless-stopped
     depends_on: [whatsapp-sidecar]
     networks: [broker_net, wa_internal]
     volumes:
-      - wa_data:/data:ro            # sidecar-owned archive + session; read-only here
-      - whatsapp_secrets:/secrets   # this plugin's own encrypted config
+      # Sidecar-owned archive + session; read-only here. SQLite reads the WAL
+      # archive through the sidecar's -shm file, so archive reads answer 503
+      # while the sidecar is down (never stale or partial data).
+      - wa_data:/data:ro
+      - whatsapp_secrets:/secrets   # this plugin's own encrypted secret store
+    # Inside the container the names are generic (aab_plugin_runtime.from_env
+    # reads PLUGIN_TOKEN / PLUGIN_SECRETS_KEY / PLUGIN_SECRETS_DIR); the values
+    # are this service's own .env entries, so no other service's token or key
+    # can reach it. SIDECAR_URL / SIDECAR_TOKEN / MESSAGES_DB are deployment
+    # values, deliberately not console config (the manifest declares none).
     environment:
-      PLUGIN_TOKEN_WHATSAPP: ${PLUGIN_TOKEN_WHATSAPP:?run 'python scripts/init_secrets.py' to create .env}
-      PLUGIN_SECRETS_KEY_WHATSAPP: ${PLUGIN_SECRETS_KEY_WHATSAPP:?run 'python scripts/init_secrets.py' to create .env}
+      PLUGIN_TOKEN: ${PLUGIN_TOKEN_WHATSAPP:?run 'python scripts/init_secrets.py' to create .env}
+      PLUGIN_SECRETS_KEY: ${PLUGIN_SECRETS_KEY_WHATSAPP:?run 'python scripts/init_secrets.py' to create .env}
+      PLUGIN_SECRETS_DIR: /secrets
       SIDECAR_URL: http://whatsapp-sidecar:8081
       SIDECAR_TOKEN: ${SIDECAR_TOKEN:?run 'python scripts/init_secrets.py' to create .env}
       MESSAGES_DB: /data/messages.db
@@ -112,10 +125,11 @@ services:
     networks: [broker_net]
     volumes:
       - github_secrets:/secrets
-      # Optional bootstrap for the App private key: put app.pem in
-      # GITHUB_APP_KEY_DIR on the host (default ./data/github-app, git-ignored)
-      # and set GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github/app.pem in .env.
-      # Mounted into this container only, read-only. See docs/deployment.md.
+      # Optional file-based alternative to pasting the App private key in the
+      # console: put app.pem in GITHUB_APP_KEY_DIR on the host (default
+      # ./data/github-app, git-ignored) and point the GitHub plugin's config
+      # form at /run/secrets/github/app.pem. Mounted into this container only,
+      # read-only. See docs/deployment.md.
       - type: bind
         source: ${GITHUB_APP_KEY_DIR:-./data/github-app}
         target: /run/secrets/github
@@ -125,8 +139,7 @@ services:
     environment:
       PLUGIN_TOKEN_GITHUB: ${PLUGIN_TOKEN_GITHUB:?run 'python scripts/init_secrets.py' to create .env}
       PLUGIN_SECRETS_KEY_GITHUB: ${PLUGIN_SECRETS_KEY_GITHUB:?run 'python scripts/init_secrets.py' to create .env}
-      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
-      GITHUB_APP_PRIVATE_KEY_PATH: ${GITHUB_APP_PRIVATE_KEY_PATH:-}
+      # The App id and key arrive via /configure from the console, not env.
 
   # Google plugin service: one container for gmail, gcal and gdrive, because
   # they share one OAuth credential (the isolation boundary that matters).
@@ -144,8 +157,7 @@ services:
     environment:
       PLUGIN_TOKEN_GOOGLE: ${PLUGIN_TOKEN_GOOGLE:?run 'python scripts/init_secrets.py' to create .env}
       PLUGIN_SECRETS_KEY_GOOGLE: ${PLUGIN_SECRETS_KEY_GOOGLE:?run 'python scripts/init_secrets.py' to create .env}
-      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
-      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      # The OAuth client id and secret arrive via /configure from the console.
       # Builds the redirect URI https://<SITE_DOMAIN>/oauth/callback/google.
       SITE_DOMAIN: ${SITE_DOMAIN:-}
 

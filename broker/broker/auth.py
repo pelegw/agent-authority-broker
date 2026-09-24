@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from . import db
 from .authority.denies import Denies, merged_denies, parse_denies
 from .authority.roles import ROLE_RANK, ROLES, check_role
-from .config import get_settings
+from .runtime_settings import runtime_settings
 
 KEY_PREFIX = "aab_"
 ADMIN_TOKEN_PREFIX = "aab_admin_"   # owner tokens; never valid as agent keys
@@ -81,8 +81,11 @@ def hash_key(plaintext: str) -> str:
 def max_delegation_depth() -> int:
     """How many delegation hops below a root key are allowed. The one reader
     of the setting, so authentication, key creation and the agent surface
-    (delegate, get_my_access, the MCP tool list) can never disagree."""
-    return get_settings().max_delegation_depth
+    (delegate, get_my_access, the MCP tool list) can never disagree. It is a
+    console-editable operator setting (runtime_settings), read per call, so
+    lowering it takes effect at once: keys deeper than the new limit stop
+    authenticating on their next request."""
+    return runtime_settings().max_delegation_depth
 
 
 # ---- chain walking ------------------------------------------------------------
@@ -310,7 +313,7 @@ def rotate_key(key_id: int, grace_seconds: int | None = None) -> str:
     (default: key_rotation_grace_seconds) so agents can swap without downtime.
     Returns the new plaintext. Role, grants, expiry and identity are kept."""
     if grace_seconds is None:
-        grace_seconds = get_settings().key_rotation_grace_seconds
+        grace_seconds = runtime_settings().key_rotation_grace_seconds
     now = int(time.time())
     new_plaintext, new_hash = generate_key()
     conn = db.connect()
