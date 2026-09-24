@@ -5,6 +5,26 @@ lives only in `VERSION`.
 
 ## [Unreleased]
 
+### Security
+- Policy check order no longer tells a key without authority whether a
+  plugin is connected. `evaluate()` answered `503 not_connected` before it
+  looked at coverage, so any key could probe whether WhatsApp was paired or
+  GitHub installed. Now, while a plugin is not connected, the key's
+  capabilities are computed as if it were and checked against the raw
+  (trimmed) selector value: a covered key gets `503 not_connected`, every
+  other key the same `403 out_of_grant` it gets while connected (a
+  selector in non-canonical form, say `" R1 "`, matches nothing raw and
+  gets the 403: the fail-closed side). While connected, a key none of whose
+  capabilities reaches the action gets its 403 before the plugin is asked
+  to normalize anything, so a malformed selector is a 400 only for a key
+  with authority for the action, and a plugin that cannot be reached
+  during normalization is `503 plugin_unavailable` only for a key covered
+  on the raw value. Nothing computed for an unconnected plugin can reach an
+  allow. The docstring of `broker/broker/policy.py` and
+  `docs/architecture.md` 1.5 carry the new order; `tests/test_policy.py`
+  has the rule table (covered or not, connected or not, malformed or
+  non-canonical selectors, draft-only authority, an unreachable plugin).
+
 ### Fixed
 - The WhatsApp sidecar never closed its databases on a graceful stop: its
   shutdown ended in `os.Exit(0)`, which skips deferred calls, so

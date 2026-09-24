@@ -133,13 +133,22 @@ An agent calls `POST /v1/targets/gmail/actions/search_threads` (or the MCP tool
 2. **Evaluate** (`policy.evaluate`). Params that cannot be encoded as UTF-8
    JSON (a lone surrogate, NaN, Infinity) are a recorded 400
    `invalid_params` before evaluation starts. Plugin enabled (else a
-   404-shaped deny); action exists and params validate; plugin connected
-   (else 503 `not_connected`); the selector parameter is normalized
-   (via the plugin's `/normalize`); a hidden or denied resource is 404;
-   `effective()` is computed live; the first capability covering
-   target + action + resource wins. None covers it: deny 403 `out_of_grant`.
-   Capability mode `draft` or the caller's `as_draft=true` or a `run_at`:
-   draft. Otherwise allow. `enforced_where` is filled per bounding dimension.
+   404-shaped deny); action exists and params validate, from the manifest
+   alone. Plugin connected: if not, the key's capabilities are computed as
+   if it were and checked against the raw (trimmed) selector value, and
+   only a key that some capability covers gets 503 `not_connected`; every
+   other key gets the same 403 it would get while connected, so a key
+   without authority cannot learn whether a plugin is paired. Then
+   `effective()` is computed live, and a key none of whose capabilities
+   reaches the action gets its 403 before the plugin is asked anything.
+   The selector parameter is normalized (via the plugin's `/normalize`; a
+   plugin that cannot be reached is 503 `plugin_unavailable`, again only
+   for a key covered on the raw value); the first capability covering
+   target + action + resource wins, and a hidden or denied resource is then
+   404. None covers it: deny 403 `out_of_grant`. Capability mode `draft` or
+   the caller's `as_draft=true` or a `run_at`: draft. Otherwise allow.
+   `enforced_where` is filled per bounding dimension. The full order is the
+   docstring of `broker/broker/policy.py`.
 3. **Decision record.** A `decision` row (allow, draft or deny, with the grant
    chain root to leaf, `params_hash`, reason, `enforced_where`) is appended to
    `decisions` **before any side effect**, including for denies.

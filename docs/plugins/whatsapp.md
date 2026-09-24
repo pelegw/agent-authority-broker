@@ -131,8 +131,10 @@ holds the session:
 1. The owner enables the plugin in the console. With nothing to configure,
    enabling runs `/configure` (a no-op) and then reads `/status`. Before
    pairing, the plugin reports `connected: false` and `health: "waiting for
-   QR pairing"`. It is enabled but not usable, and every agent call returns
-   `503 not_connected`.
+   QR pairing"`. It is enabled but not usable: every agent call that a
+   key's grant covers returns `503 not_connected`, and any other call the
+   same `403 out_of_grant` it gets once paired (a key without authority
+   cannot tell whether WhatsApp is paired).
 2. The console calls `POST /v1/admin/plugins/whatsapp/connect/start` and gets
    `{"kind": "qr"}`. After pairing, the same call returns `{"kind": "none"}`.
 3. The console shows `GET /v1/admin/plugins/whatsapp/connect/qr.png`. The
