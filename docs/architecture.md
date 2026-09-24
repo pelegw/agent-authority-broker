@@ -9,11 +9,15 @@ meant to be that exercise's input).
 
 Everything here describes the **target state** of the plan (implementation
 plan, "Deployment: one container per plugin", decided 2026-09-24, including
-its "Resolved open points"). Where older text elsewhere in the plan predates
-those resolutions (for example `PLUGIN_TOKEN_<ID>` keyed by plugin id, or
-OAuth state kept in the broker), this document follows the resolutions.
-Phase 0 is only the skeleton; see [Current build status](#6-current-build-status)
-for what exists today and where it still differs from the target.
+its "Resolved open points") and of the decisions taken since: third-party
+credentials are entered in the console (`docs/configuration.md`), and the
+broker passes the OAuth redirect URI to the plugin (section 1.7). Where older
+text in the plan predates these (for example `PLUGIN_TOKEN_<ID>` keyed by
+plugin id, OAuth state kept in the broker, or a `TELEGRAM_BOT_TOKEN` env
+var), this document follows the decisions. Phases 0 to 3, the WhatsApp
+plugin service and the approval-volume simulation are merged; see
+[Current build status](#6-current-build-status) for what exists today and
+where it still differs from the target.
 
 Contents
 
@@ -77,7 +81,7 @@ later without changing the model.
 | **Agent** | Any AI client (Claude over MCP, a script over REST). | `Authorization: Bearer aab_…` |
 | **Delegated sub-agent** | An agent holding a child key minted by another agent via `delegate`. Same surface; its authority is a strict narrowing of its parent's. | `Bearer aab_…` (child key; dies with its parent) |
 | **Target systems** | WhatsApp (via the Go sidecar), GitHub, Google (Gmail, Calendar, Drive). | Reached only by plugin containers, with short-lived credentials they mint themselves. |
-| **Approval channel** | The console, and optionally a Telegram bot. Shows approval cards; the owner's tap is an admin action. | Telegram bot token (outbound); the tapping Telegram user must be the linked owner. |
+| **Approval channel** | The console, and optionally a Telegram bot. Shows approval cards; the owner's tap is an admin action. | Telegram bot token (entered by the owner in the console, encrypted under `BROKER_SECRETS_KEY`; used outbound only); the tapping Telegram user must be the linked owner. |
 
 ### 1.4 Two planes
 
@@ -127,8 +131,11 @@ An agent calls `POST /v1/targets/gmail/actions/search_threads` (or the MCP tool
 1. **Authenticate.** Edge checks (public mode), then `aab_` bearer lookup by
    hash, rotation grace, key not disabled or expired, and every ancestor key
    in the delegation chain alive. Any failure is 401.
-2. **Evaluate** (`policy.evaluate`). Plugin enabled (else a 404-shaped deny);
-   action exists and params validate; the selector parameter is normalized
+2. **Evaluate** (`policy.evaluate`). Params that cannot be encoded as UTF-8
+   JSON (a lone surrogate, NaN, Infinity) are a recorded 400
+   `invalid_params` before evaluation starts. Plugin enabled (else a
+   404-shaped deny); action exists and params validate; plugin connected
+   (else 503 `not_connected`); the selector parameter is normalized
    (via the plugin's `/normalize`); a hidden or denied resource is 404;
    `effective()` is computed live; the first capability covering
    target + action + resource wins. None covers it: deny 403 `out_of_grant`.
@@ -152,6 +159,15 @@ An agent calls `POST /v1/targets/gmail/actions/search_threads` (or the MCP tool
    means "not delivered, safe to retry" and releases the reservation; a
    **502** means "outcome unknown", keeps the reservation for 24h, and is never
    retried automatically.
+
+Two REST response rules sit on top of this (`docs/plugin-api.md`). A binary
+result is served as an attachment (`Content-Disposition: attachment`, named
+after the call's most specific id) with `X-Content-Type-Options: nosniff`.
+A long-poll read (`GET …?wait=N`) is held until something is new, except a
+*bootstrap*: a `long_poll` action that declares a `cursor`, called without
+one, is answered at once whatever `wait` says, so nothing that arrives
+during the wait is skipped. MCP returns binary results as base64 content
+and never waits.
 
 ### 1.6 Lifecycle of one draft
 
@@ -187,21 +203,31 @@ An agent calls `POST /v1/targets/gmail/actions/search_threads` (or the MCP tool
   disabled.
 - **Connect and disconnect** run inside the plugin service. The console calls
   `/v1/admin/plugins/{id}/connect/start`; the broker relays to the plugin's
-  `POST /connect/start`, which answers `{kind: oauth|install|qr, url?, state?}`.
-  For Google the plugin builds the auth URL from its own client id with
-  scopes = the union of its enabled manifests' `target_permissions`, and
-  generates and stores the `state` nonce itself (plugin-side, in its own
-  secret volume; valid for 10 minutes and single use, consumed by the first
-  `/connect/finish` that presents it); for GitHub it returns the App install
-  URL (same nonce rules); for WhatsApp it returns `{kind: qr}` and the console shows
+  `POST /connect/start {enabled_plugins, redirect_uri?}`, which answers
+  `{kind: oauth|install|qr|none, url?, state?}`.
+  The OAuth redirect URI is the broker's `GET /oauth/callback/{service}`.
+  Only the broker knows how the owner reaches it, so the broker computes it
+  (public mode: `https://<SITE_DOMAIN>/oauth/callback/<service>` from its
+  own env; local mode: the loopback address the console used) and passes it
+  as `redirect_uri`; the plugin stores it beside the `state` nonce and
+  reuses it for the code exchange (decided; implemented with phase 7).
+  For Google the plugin builds the auth URL from its own client id, that
+  `redirect_uri` and scopes = the union of its enabled manifests'
+  `target_permissions`, and generates and stores the `state` nonce itself
+  (plugin-side, in its own secret volume; valid for 10 minutes and single
+  use, consumed by the first `/connect/finish` that presents it); for GitHub
+  it returns the App install URL (same nonce rules); for WhatsApp it returns
+  `{kind: qr}` (`{kind: none}` once paired) and the console shows
   `GET /v1/admin/plugins/whatsapp/connect/qr.png`, which the broker proxies
   from the plugin's `GET /connect/qr.png` (itself proxied from the sidecar).
-  The OAuth redirect URI is the broker's `GET /oauth/callback/{service}`,
-  which renders the admin-guarded callback page; that page POSTs `code` and
-  `state` to the broker, which relays them once to the plugin's
-  `POST /connect/finish` (GitHub: `installation_id`). The plugin exchanges the
-  code with its own client secret and stores the credential in its own volume.
-  `disconnect` relays to `POST /disconnect`, which wipes it.
+  The callback page is admin-guarded; it POSTs `code` and `state` to the
+  broker, which relays them once to the plugin's `POST /connect/finish`
+  (GitHub: `installation_id`). The plugin exchanges the code with its own
+  client secret and stores the credential in its own volume. For WhatsApp,
+  `/connect/finish` is a no-op that makes the broker refresh health.
+  `disconnect` relays to `POST /disconnect`, which wipes the credential
+  (WhatsApp answers 409: the plugin mounts the session read-only, so the
+  owner unlinks the device on the phone and the sidecar re-pairs).
 - **Hidden resources** (`hidden_resources`, by target, kind and normalized id)
   apply to every key. The label is display-only; enforcement is by id, so
   renaming a chat or repo can never unhide it. Hidden resources are 404 on
@@ -352,9 +378,19 @@ token and one key per container, whatever number of plugin ids it hosts.
 | `plugin-google` | `PLUGIN_TOKEN_GOOGLE`, `PLUGIN_SECRETS_KEY_GOOGLE`, `SITE_DOMAIN` (to build the redirect URI) | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN` |
 | `edge` | `SITE_DOMAIN`, `ORIGIN_SECRET`, origin certificate + key, Cloudflare origin-pull CA | Every other secret |
 
+The table names the `.env` entries each container is fed from. Inside a
+plugin container the names are generic: `aab_plugin_runtime.from_env` reads
+`PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY` and `PLUGIN_SECRETS_DIR`, and compose
+maps the service's own values onto them (`PLUGIN_TOKEN:
+${PLUGIN_TOKEN_WHATSAPP}`, `PLUGIN_SECRETS_KEY:
+${PLUGIN_SECRETS_KEY_WHATSAPP}`, `PLUGIN_SECRETS_DIR: /secrets`), so the
+image does not depend on which service it runs as. On `dev` only
+`plugin-whatsapp` is wired this way; see section 6.
+
 Third-party credentials are not in the env split at all (`docs/configuration.md`):
 the owner enters them in the console. The Telegram bot token is stored in
-`broker.db`, encrypted under `BROKER_SECRETS_KEY`; the GitHub App id and key
+`broker.db` (the `plugin_secrets` table, slot `broker`), encrypted under
+`BROKER_SECRETS_KEY`; the GitHub App id and key
 and the Google OAuth client id and secret are entered in each plugin's config
 form and relayed once to that plugin's `/configure`, never stored by the
 broker.
@@ -372,10 +408,10 @@ operational view of the same split (volumes, rotation per secret) is
 | **Cloudflare** (public mode) | Public DNS and TLS, WAF and rate limiting, Access SSO on `/admin*`, `/auth*`, `/v1/admin*`, `/oauth*` (the OAuth callback page); injects `X-AAB-Origin` | Origin secret (in the Transform Rule), Access signing keys | Internet-facing; reaches the edge on 443 |
 | **edge** (Caddy, optional) | Terminates origin TLS with the Cloudflare Origin Certificate, requires Cloudflare's client certificate (Authenticated Origin Pulls), rejects requests without `X-AAB-Origin`, reverse-proxies to `broker:8080` | Origin cert + key, `ORIGIN_SECRET` | Inbound 443 from Cloudflare only (security group); outbound only to the broker on `edge_net` |
 | **broker** | REST + MCP agent surface, console + admin API, OAuth callback page (`/oauth/callback/{service}`), owner identity, grants and authority algebra, policy engine, decision record, capacity ledger, action queue + scheduler, Telegram notifier, plugin registry (plugin id → service) and `RemoteAdapter`, connect-flow relay, skill doc generation | Password/key/token *hashes*, `DECISION_SIGNING_KEY`, `BROKER_SECRETS_KEY`, `SETUP_TOKEN`, all `PLUGIN_TOKEN_<SERVICE>`, the Telegram bot token (console-entered, encrypted); an OAuth authorization code in transit only; **no target credentials** | Inbound from the edge on `edge_net` (public) or loopback (local); outbound to every plugin service on `broker_net`, Telegram, Cloudflare JWKS; cannot reach the sidecar |
-| **plugin-whatsapp** | Plugin API for `whatsapp`; archive reads over `messages.db` with SQL-level visibility filtering; sends and media via the sidecar; connect = QR relay (`/connect/qr.png`) and status | `PLUGIN_TOKEN_WHATSAPP` (to verify the broker), `PLUGIN_SECRETS_KEY_WHATSAPP`, `SIDECAR_TOKEN`; its own config in `whatsapp_secrets`; read-only access to `wa_data` (which contains `session.db`) | Inbound from the broker on `broker_net`; outbound to the sidecar on `wa_internal` |
+| **plugin-whatsapp** | Plugin API for `whatsapp`; archive reads over `messages.db` (opened `mode=ro` with `query_only`) with SQL-level visibility filtering; sends and media via the sidecar; connect = QR relay (`/connect/qr.png`) and status mapped from the sidecar's; disconnect answers 409 (unlink on the phone) | `PLUGIN_TOKEN_WHATSAPP` (read as `PLUGIN_TOKEN`; verifies the broker), `PLUGIN_SECRETS_KEY_WHATSAPP` (read as `PLUGIN_SECRETS_KEY`), `SIDECAR_TOKEN`; a secret store in `whatsapp_secrets` that holds nothing today (the manifest's `config_schema` is empty: sidecar URL, token and archive path are deployment env); read-only access to `wa_data` (which contains `session.db`) | Inbound from the broker on `broker_net`; outbound to the sidecar on `wa_internal` |
 | **whatsapp-sidecar** | Speaks the WhatsApp multi-device protocol (whatsmeow), archives every message into `messages.db`, internal API `/health`, `/status`, `/qr`, `/send`, `/media`; no policy | WhatsApp session (`session.db`, the account credential, plaintext: see 4.3), `SIDECAR_TOKEN` | Inbound only from `wa_internal`; outbound to WhatsApp servers |
 | **plugin-github** | Plugin API for `github`; `github_app` connection (install URL, installation recorded on `/connect/finish`) mints installation tokens restricted to the requested repos and permissions | App private key (uploaded: encrypted in `github_secrets`; or file: the read-only `/run/secrets/github` bind), installation id and connect `state` nonces in `github_secrets`, App id, cached installation tokens (memory, ≤ 50 min), `PLUGIN_TOKEN_GITHUB`, `PLUGIN_SECRETS_KEY_GITHUB` | Inbound from the broker on `broker_net`; outbound to `api.github.com` |
-| **plugin-google** | Plugin API for `gmail`, `gcal`, `gdrive` (one `GET /manifests` returns all three; shared `_google/client.py`); `google_oauth` connection builds the auth URL, owns the state nonce, exchanges the code, mints per-scope-set access tokens by downscoped refresh | OAuth client id/secret, refresh token and connect `state` nonces (encrypted in `google_secrets`), `SITE_DOMAIN` (for the redirect URI), access tokens (memory only, per scope set), `PLUGIN_TOKEN_GOOGLE`, `PLUGIN_SECRETS_KEY_GOOGLE` | Inbound from the broker on `broker_net`; outbound to Google OAuth and API endpoints |
+| **plugin-google** | Plugin API for `gmail`, `gcal`, `gdrive` (one `GET /manifests` returns all three; shared `_google/client.py`); `google_oauth` connection builds the auth URL, owns the state nonce, exchanges the code, mints per-scope-set access tokens by downscoped refresh | OAuth client id/secret, refresh token and connect `state` nonces with the `redirect_uri` the broker passed (encrypted in `google_secrets`), access tokens (memory only, per scope set), `PLUGIN_TOKEN_GOOGLE`, `PLUGIN_SECRETS_KEY_GOOGLE` | Inbound from the broker on `broker_net`; outbound to Google OAuth and API endpoints |
 | **Telegram Bot API** | Delivers approval cards to the owner's phone and returns button taps | (external) | Broker calls it outbound; taps are fetched by the broker's poll loop, no inbound webhook |
 
 ---
@@ -534,7 +570,7 @@ return leg carries meaningful data.
 | 1 | Agent → Cloudflare | REST (`/v1/targets/{t}/actions/{a}`, `/v1/me`, `/v1/permissions…`, `/v1/delegations…`, `/v1/actions…`, `/skill`) or MCP (`/mcp`, stateless streamable HTTP) | HTTPS; `Bearer aab_…` | Yes: agent key |
 | 2 | Owner browser → Cloudflare | Console page, `/auth/setup` (setup token, username, password), `/auth/login`, `/v1/admin/*` calls | HTTPS; Access SSO for `/admin*`, `/auth*`, `/v1/admin*` | Yes: SSO session, password, setup token |
 | 3 | Cloudflare → edge | Requests 1, 2 and 41 | HTTPS :443; Cloudflare client cert (AOP); `X-AAB-Origin` added by Transform Rule; `Cf-Access-Jwt-Assertion` on admin paths; `CF-Connecting-IP` | Yes: origin secret, Access JWT, plus request credentials |
-| 4 | Edge → P1 | Agent requests | HTTP on `edge_net`; `X-AAB-Origin` re-checked by `OriginGuardMiddleware`; `X-Real-IP`; MCP `Host` allowlist | Yes: origin secret, agent key |
+| 4 | Edge → P1 | Agent requests | HTTP on `edge_net`; `X-AAB-Origin` re-checked by `OriginGuardMiddleware`; `X-Real-IP`; MCP `Host` allowlist (`MCP_ALLOWED_HOSTS` from env plus the console's extras, read at lifespan start) | Yes: origin secret, agent key |
 | 5 | Edge → P2 | Owner requests, OAuth callback | HTTP on `edge_net`; `X-AAB-Origin`; Access JWT verified against the team JWKS (aud, iss, exp, optional email allowlist); `aab_session` cookie (HttpOnly, SameSite=Strict, Secure) or `Bearer aab_admin_…`; `X-Requested-With: aab-console` on state changes | Yes |
 | 6 | P1 ↔ D2 | Key lookup by sha256 hash (current or previous-in-grace), parent chain, role, rate, denies; `last_used_at/ip` update | In-process SQLite | Hashes only |
 | 7 | P2 ↔ D1 | Owner row (scrypt hash + salt), session rows (sha256 of cookie), admin token hashes, `setup_completed`, Telegram link | In-process SQLite | Hashes |
@@ -546,7 +582,7 @@ return leg carries meaningful data.
 | 13 | P3 → P6 | Draft or scheduled action: params, resource label, note, `decision_id` | In-process (`actions.queue.create`) | No |
 | 14 | P6 ↔ D4 | Insert; atomic status transitions `UPDATE … WHERE status=?`; results | In-process SQLite | No |
 | 15 | P6 → P7 | `notify_action` (new draft, new permission request) | In-process | No |
-| 16 | P7 → Telegram | Card built from `summary_template` (resource names via the plugin's `/label`); oversized cards refused | HTTPS Bot API; bot token (console-entered, encrypted at rest under `BROKER_SECRETS_KEY`) | Yes: bot token |
+| 16 | P7 → Telegram | Card built from `summary_template` (resource names via the plugin's `/label`); an oversized card is replaced by a button-less pointer to the console | HTTPS Bot API; bot token (console-entered, encrypted at rest under `BROKER_SECRETS_KEY`) | Yes: bot token |
 | 17 | Telegram → P7 | Callback query: chat id, user id, action/grant id, verb | HTTPS long poll (`getUpdates`) initiated by the broker; accepted only from the linked owner's chat **and** user id; kill switch | Yes: bot token on the request |
 | 18 | P7 → P6 | Approve/reject with `AdminContext(via=telegram)` | In-process (admin services) | No |
 | 19 | P2 → P6 | Approve/reject/cancel from the console with `AdminContext(via=session\|token)` | In-process | No |
@@ -557,14 +593,14 @@ return leg carries meaningful data.
 | 24 | P2 → P8 | Plugin enable/config (secret fields relayed once), health check, labels for the console, and the connect relays of flows 38 to 44 | In-process | Yes: secret config fields and an authorization code, in transit only |
 | 25 | P8 ↔ P9 | `GET /manifests` (every manifest the service hosts), `GET /status`, `POST /configure`, `POST /normalize`, `POST /resolve`, `POST /label` (`{kind, ids[]}` → labels), `POST /perform` (params + `CallScope`: deny/allow_only, constraints, credential requirements, `request_id`); results | HTTP on `broker_net`; `X-Plugin-Token: PLUGIN_TOKEN_<SERVICE>`, constant-time compare | Yes: service token; `/configure` carries secret values |
 | 26 | P9 → P10 | Credential requirements (`{"scopes": [...]}` or `{"repos": [...], "permissions": {...}}`) | In-process in the plugin | No |
-| 27 | P10 ↔ D5 | Long-lived credential (Google refresh token, GitHub App PEM and installation id, WhatsApp plugin config secrets) and the connect `state` nonce; encrypted with `PLUGIN_SECRETS_KEY_<SERVICE>` | Local file/volume | Yes |
+| 27 | P10 ↔ D5 | Long-lived credential (Google OAuth client secret and refresh token, GitHub App PEM and installation id; plugin-whatsapp stores nothing today) and the connect `state` nonce with its `redirect_uri`; encrypted with `PLUGIN_SECRETS_KEY_<SERVICE>` | Local file/volume | Yes |
 | 28 | P10 ↔ token endpoints | Google: refresh with `scope=<subset>` → access token (cached in memory per scope set, never logged or persisted). GitHub: RS256 App JWT (10 min) → installation token for exact repos + permissions (cached ≤ 50 min) | HTTPS | Yes: refresh token / App JWT out, access / installation token back |
 | 29 | P9 ↔ target APIs | Target calls and responses; the plugin filters denied/hidden rows before returning | HTTPS; short-lived token | Yes: short-lived token |
 | 30 | P9 ↔ P11 | `POST /send`, `GET /media`, `GET /status`, `GET /qr` (backs `/connect/qr.png`); results | HTTP :8081 on `wa_internal`; `X-Internal-Token: SIDECAR_TOKEN`, constant-time compare (`/health` tokenless) | Yes: sidecar token |
 | 31 | P11 ↔ WhatsApp | Multi-device protocol: messages in and out, media | WhatsApp E2E protocol; linked-device session from `session.db` | Yes: session keys |
 | 32 | P11 → D6 | Writes `session.db` (session credential, plaintext) and archives every message into `messages.db` | Local SQLite on `wa_data` (rw) | Yes: `session.db` is the account credential |
 | 33 | P9 → D6 | Reads `messages.db` for list/read/search with the visibility clause in SQL | Local SQLite on `wa_data` mounted read-only | No (but the volume also holds `session.db`) |
-| 34 | P1 → Agent | Result, 202 `pending_approval` / `scheduled`, or `{"error","code","hint"}` with 400/401/403/404/429/502/503 | HTTP(S) response | Only `delegate` returns a child key plaintext, once |
+| 34 | P1 → Agent | Result, 202 `pending_approval` / `scheduled`, or `{"error","code","hint"}` with 400/401/403/404/429/502/503. REST binary results are attachments with `X-Content-Type-Options: nosniff`; a long-poll bootstrap (no `cursor`) is answered at once whatever `?wait=` says | HTTP(S) response | Only `delegate` returns a child key plaintext, once |
 | 35 | Owner browser → consent endpoints | Google consent screen (scopes = union of the enabled Google manifests' `target_permissions`) or GitHub App install page, opened from the URL of flow 39 | HTTPS in the browser | Yes: owner's Google / GitHub login |
 | 36 | P2 → Cloudflare | JWKS fetch for Access JWT verification (cached, refreshed on unknown `kid`) | HTTPS | No |
 | 37 | P2 → P4 | Admin decisions that belong in the record (approvals as `actor_principal`/`actor_via` on outcome rows); `GET /v1/admin/decisions/verify` re-computes the chain | In-process | No |
@@ -576,17 +612,18 @@ broker only relays. Sequence for Google: 24 → 38 → 39 → 35 → 40 → 41 �
 → 43 → 27. GitHub is the same with an install page and `installation_id`.
 WhatsApp: 24 → 38 (`{kind: qr}`), then the console polls
 `GET /v1/admin/plugins/whatsapp/connect/qr.png` (24 → 38 → 30 → 39) while the
-owner scans with the phone (C12).
+owner scans with the phone (C12), then 24 → 42 (`/connect/finish`, a no-op
+that refreshes health).
 
 | # | From → To | Data carried | Protocol / auth | Credential? |
 |---|---|---|---|---|
-| 38 | P8 → P9 | `POST /connect/start` → `{kind: oauth\|install\|qr, url?, state?}`. For Google the plugin builds the auth URL from its own client id with the union of its enabled manifests' `target_permissions` and generates and stores the `state` nonce (27); for GitHub it returns the App install URL; for WhatsApp `{kind: qr}`. Also `GET /connect/qr.png` (WhatsApp, proxied from the sidecar via 30) | HTTP on `broker_net`; `X-Plugin-Token` | No (the URL carries only the public client id and `state`) |
+| 38 | P8 → P9 | `POST /connect/start {enabled_plugins, redirect_uri?}` → `{kind: oauth\|install\|qr\|none, url?, state?}`. `redirect_uri` is the broker's own `/oauth/callback/{service}`, computed by the broker. For Google the plugin builds the auth URL from its own client id, that `redirect_uri` and the union of its enabled manifests' `target_permissions`, and generates and stores the `state` nonce with the `redirect_uri` (27); for GitHub it returns the App install URL; for WhatsApp `{kind: qr}` (`none` once paired). Also `GET /connect/qr.png` (WhatsApp, proxied from the sidecar via 30) | HTTP on `broker_net`; `X-Plugin-Token` | No (the URL carries only the public client id, the redirect URI and `state`) |
 | 39 | P2 → Owner browser | The auth / install URL to open, or the QR PNG served at `/v1/admin/plugins/whatsapp/connect/qr.png` | HTTPS response to an authenticated admin request | QR PNG is a pairing secret while valid |
 | 40 | Consent endpoint → Owner browser | Redirect to the broker's `GET /oauth/callback/{service}` with `code` and `state` (GitHub: `installation_id`) | HTTPS 302 | Yes: authorization code |
 | 41 | Owner browser → P2 | `GET /oauth/callback/{service}` renders the admin-guarded callback page, which POSTs `code` + `state` back to the broker; travels via Cloudflare and the edge like flow 2 | HTTPS; owner session cookie (and Access JWT in public mode) | Yes: authorization code |
-| 42 | P8 → P9 | `POST /connect/finish {code?, state?, installation_id?}`: the code is relayed once and not stored by the broker | HTTP on `broker_net`; `X-Plugin-Token` | Yes: authorization code |
+| 42 | P8 → P9 | `POST /connect/finish {code?, state?, installation_id?}`: the code is relayed once and not stored by the broker (WhatsApp: no body, a no-op that refreshes health) | HTTP on `broker_net`; `X-Plugin-Token` | Yes: authorization code |
 | 43 | P10 ↔ token endpoints | Plugin checks `state`, exchanges the code with its own client id + secret for a refresh token (Google), or verifies the installation with an App JWT (GitHub); result stored encrypted in D5 (27) | HTTPS | Yes: client secret / App JWT out, refresh token back |
-| 44 | P8 → P9 | `POST /disconnect`: the plugin wipes its stored credential | HTTP on `broker_net`; `X-Plugin-Token` | No |
+| 44 | P8 → P9 | `POST /disconnect`: the plugin wipes its stored credential (WhatsApp: 409, unlink the device on the phone) | HTTP on `broker_net`; `X-Plugin-Token` | No |
 
 ---
 
@@ -598,13 +635,13 @@ owner scans with the phone (C12).
 |---|---|---|---|
 | **Internet ↔ Cloudflare** | 1, 2, 41 | Agents: nothing at this layer beyond TLS (their `aab_` key is checked by the broker). Owner: Cloudflare Access SSO on `/admin*`, `/auth*`, `/v1/admin*`, `/oauth*`. WAF rate limiting (recommended). | Agent paths are deliberately not behind Access; agents authenticate with their key. |
 | **Cloudflare ↔ edge** | 3 | Security group allows 443 only from Cloudflare IP ranges; Authenticated Origin Pulls (Cloudflare client cert); `X-AAB-Origin` origin secret. | The default origin-pull CA is Cloudflare's global CA, so AOP proves "some Cloudflare account". The origin secret is the real per-deployment lock until a custom AOP cert is pinned. |
-| **Edge ↔ broker** | 4, 5 | Network `edge_net` (edge and broker only). `OriginGuardMiddleware` re-checks `X-AAB-Origin` (constant-time; only `/health` and `/v1/health` exempt) and only then trusts `CF-Connecting-IP`. Admin: Access JWT verified at the origin **and** an owner credential (session cookie or `aab_admin_` token), plus `X-Requested-With: aab-console` on state changes. Agents: `Bearer aab_…`. `/mcp` checks `Host` against `MCP_ALLOWED_HOSTS`. | The edge has no route to any plugin, so a compromised edge cannot call `/perform`. Boot fails closed if public mode is on without Cloudflare Access (unless `ALLOW_INSECURE_ADMIN=true`). OpenAPI/docs UIs are off in public mode. Local mode: the loopback bind is the boundary and the origin secret is off. |
+| **Edge ↔ broker** | 4, 5 | Network `edge_net` (edge and broker only). `OriginGuardMiddleware` re-checks `X-AAB-Origin` (constant-time; only `/health` and `/v1/health` exempt) and only then trusts `CF-Connecting-IP`. Admin: Access JWT verified at the origin **and** an owner credential (session cookie or `aab_admin_` token), plus `X-Requested-With: aab-console` on state changes. Agents: `Bearer aab_…`. `/mcp` checks `Host` against `MCP_ALLOWED_HOSTS` plus the console's `mcp_allowed_hosts_extra` (additive: the console can add hosts, never remove the file's), read when the app lifespan starts. | The edge has no route to any plugin, so a compromised edge cannot call `/perform`. Boot fails closed if public mode is on without Cloudflare Access (unless `ALLOW_INSECURE_ADMIN=true`). OpenAPI/docs UIs are off in public mode. Local mode: the loopback bind is the boundary and the origin secret is off. |
 | **Agent key → authority** | 6, 9, 10 | `aab_` key hashed with sha256; previous hash accepted during the rotation grace (`key_rotation_grace_seconds`, 24h); key and every ancestor must be enabled and unexpired; per-key `rate_per_min`. | A key holds no authority itself; everything comes from grants re-walked per call. |
 | **Owner identity** | 7, 8, 19 | Password (`hashlib.scrypt`, per-user salt), 5 failed logins/min/IP; sessions 12h idle / 7d absolute; admin tokens `aab_admin_<48hex>` stored hashed, revocable, optional expiry; one-time `SETUP_TOKEN` inert after setup. | Every human action carries an `AdminContext` and is recorded under the owner's username. |
 | **Broker ↔ plugin services** | 24, 25, 38, 42, 44 | One shared token per service, `PLUGIN_TOKEN_<SERVICE>` (`WHATSAPP`, `GITHUB`, `GOOGLE`), in `X-Plugin-Token`, constant-time compared; network `broker_net` (broker and plugin services only); every manifest from `GET /manifests` pinned (id + version) against the broker's vendored copy. | Plain HTTP inside the host. The plugin trusts the broker's `CallScope`: a compromised broker can request any credential the connection can mint, but cannot read stored credentials. The authorization code crosses here once (42). |
 | **Plugin ↔ sidecar** | 30, 33 | `SIDECAR_TOKEN` in `X-Internal-Token`, constant-time compared; network `wa_internal` which the broker is not on. | The sidecar has no policy at all; everything it is asked to do it does. The shared `wa_data` volume is a second crossing: sidecar rw, plugin-whatsapp ro, nobody else; it contains the plaintext `session.db` (4.3). |
 | **Broker ↔ Telegram** | 16, 17 | Outbound HTTPS with the bot token; taps accepted only when both the chat id and the user id match the linked owner; kill switch. | No inbound webhook port. A Telegram tap is an owner action (`via=telegram`); agents have no path to it. Card content (summary, resource labels) leaves the host. |
-| **Owner ↔ consent, callback relay** | 35, 39 to 43 | The plugin generates, stores and checks the `state` nonce (10-minute TTL, single use); the callback page and the POST it makes are admin-guarded (session, plus Access in public mode); the relay to `/connect/finish` uses the service token. | The broker never sees a client secret or a refresh token; an intercepted code is useless without the plugin's client secret. The long-lived credential is created and kept only inside the plugin service. |
+| **Owner ↔ consent, callback relay** | 35, 39 to 43 | The plugin generates, stores and checks the `state` nonce (10-minute TTL, single use); the callback page and the POST it makes are admin-guarded (session, plus Access in public mode); the relay to `/connect/finish` uses the service token. The redirect URI is the broker's own callback, computed by the broker (public mode: from `SITE_DOMAIN` in its env, not from console config) and handed to the plugin in `/connect/start`. | The broker never sees a client secret or a refresh token; an intercepted code is useless without the plugin's client secret. The long-lived credential is created and kept only inside the plugin service. |
 | **Plugin ↔ target APIs** | 28, 29, 31, 43 | Google: short-lived access tokens minted by downscoped refresh. GitHub: installation tokens restricted to `repositories` + `permissions`. WhatsApp: the linked-device session. | See 4.2 for what each token actually restricts. |
 
 ### 4.2 Enforced by target vs proxy-only
@@ -696,7 +733,7 @@ budgets, hidden resources and per-key denies are always broker-enforced.
 | **Adapter** | The code that talks to a target for one plugin (`configure`, `status`, `normalize`, `resolve`, `label`, `perform`). Broker side: `InProcessAdapter` (tests, `echo`) or `RemoteAdapter` (HTTP to a plugin service). |
 | **Connection** | The part of a plugin that runs the connect flow, owns the long-lived credential and mints short-lived ones: `sidecar_qr`, `github_app`, `google_oauth`. Lives in the plugin service; adapters never see long-lived secrets and the broker never sees them at all. |
 | **CallScope** | What the broker sends with each `perform`: visibility (deny set, optional `allow_only`), constraints, credential requirements, `request_id`. |
-| **Plugin service** | One container hosting one or more plugin ids (`plugin-google` hosts `gmail`, `gcal`, `gdrive`). Env, token and secrets key are per service (`PLUGIN_URL_/PLUGIN_TOKEN_/PLUGIN_SECRETS_KEY_<SERVICE>`); the registry maps plugin id → service. |
+| **Plugin service** | One container hosting one or more plugin ids (`plugin-google` hosts `gmail`, `gcal`, `gdrive`). Env, token and secrets key are per service (`PLUGIN_URL_/PLUGIN_TOKEN_/PLUGIN_SECRETS_KEY_<SERVICE>` in `.env` and on the broker; inside the plugin container compose maps them to the generic `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR`); the registry maps plugin id → service. |
 | **Plugin runtime** | The `aab-plugin-runtime` package that hosts adapters in a plugin service and serves the internal plugin API (`GET /manifests`, `GET /status`, `POST /configure`, `/normalize`, `/resolve`, `/label`, `/perform`, `/connect/start`, `GET /connect/qr.png`, `POST /connect/finish`, `/disconnect`) behind `X-Plugin-Token`, mapping adapter exceptions to 404/503/502. |
 | **Sidecar** | A native process a plugin needs to reach a target that has no API; today the Go WhatsApp sidecar (whatsmeow). It holds the target session and no policy, and is reachable only from its plugin service. |
 | **AdminContext** | The identity of a human action: principal, username, surface (`session`, `token`, `telegram`), session or token id. |
@@ -706,76 +743,71 @@ budgets, hidden resources and per-key denies are always broker-enforced.
 
 ## 6. Current build status
 
-Phase 0 (skeleton) implemented:
+State of `dev` at `a669953` (2026-09-24). Merged:
 
-- `broker/broker/config.py`: all broker-wide settings, `public_mode()` and the
-  `validate_exposure` boot interlock (public mode requires Cloudflare Access
-  unless `ALLOW_INSECURE_ADMIN`).
-- `broker/broker/db.py`: the full target schema, all 14 tables and indexes,
-  additive `_MIGRATIONS`.
-- `origin.py` (`OriginGuardMiddleware`, `X-AAB-Origin`, trusted
-  `CF-Connecting-IP`), `cf_access.py` (Access JWT verification against JWKS),
-  `audit.py` (with `actor_principal`/`actor_via`), `errors.py` (`PolicyError`
-  and default codes including 502 `unknown_outcome` / 503 `unavailable`),
-  `deps.py` (`client_ip` only).
-- `main.py` with `GET /health` and `GET /v1/health` only.
-- `scripts/init_secrets.py`: generates `SETUP_TOKEN`, `SIDECAR_TOKEN`,
-  `ORIGIN_SECRET`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, third-party
-  placeholders, 0600 file, `--rotate`, `--example`.
-- Compose: `broker` + `whatsapp-sidecar`; public overlay with the Caddy `edge`;
-  both images run as non-root user `aab`.
-- The Go sidecar copied from WA_GW: `/health`, `/status`, `/qr`, `/send`,
-  `/media` on `:8081` behind `X-Internal-Token`.
-
-Merged since: identity (phase 1), the authority core (phase 2), and the
-infrastructure lane of phase 3: compose with the five services (plus the
-`edge` overlay) on `edge_net` / `broker_net` / `wa_internal`, the per-service
-env split, the fixed secret volumes, `init_secrets.py` generating all 11
-secrets, `docs/deployment.md`, and the `DEPLOY.md` updates (Access on
-`/oauth*`, OAuth redirect URIs, plugin secret volumes in backups).
-
-Not yet built: the engine, plugin registry, `RemoteAdapter`, the plugin
-runtime, MCP and Telegram (rest of phase 3); the plugin services themselves
-(4, 6, 7: `plugin-whatsapp`, `plugin-github` and `plugin-google` are
-placeholder non-root images that only idle) and the console; delegation and
-skill generation (5).
-
-Where phase 0 differed from the target state described above, and what the
-phase 3 infrastructure lane has fixed:
-
-| Phase 0 | Target | Status |
+| Phase | On `dev` | Where |
 |---|---|---|
-| One network `internal` shared by edge, broker and sidecar | `edge_net` (edge ↔ broker), `broker_net` (broker ↔ plugin services), `wa_internal` (plugin-whatsapp ↔ sidecar) | Done (compose split) |
-| Broker mounts `wa_data:ro` | Only the sidecar (rw) and `plugin-whatsapp` (ro) mount `wa_data` | Done |
-| Broker gets the whole `.env` (`env_file: .env`), including `SIDECAR_TOKEN` and the GitHub/Google placeholders | Per-service env mapping; broker gets no target or sidecar secrets | Done (env split, section 2.2) |
-| No plugin services; `SIDECAR_TOKEN` described as broker ↔ sidecar | `plugin-whatsapp`, `plugin-github`, `plugin-google`; sidecar token is plugin ↔ sidecar | Done in compose; the images are placeholders until phases 4, 6, 7 |
-| `init_secrets.py` generates 5 secrets | Also `PLUGIN_TOKEN_<SERVICE>` and `PLUGIN_SECRETS_KEY_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE` | Done (11 generated secrets; `.env.example` regenerated) |
-| `plugin_secrets` described as holding plugin credentials under `BROKER_SECRETS_KEY` (`db.py`, `CLAUDE.md`); `app_config` described as holding OAuth state nonces | `plugin_secrets` never holds target credentials; target credentials and connect `state` live in the plugin services | Done (`db.py`, `CLAUDE.md`). Since the configuration principle (`docs/configuration.md`), `plugin_secrets` holds broker-side secrets entered in the console (the Telegram bot token) |
-| Compose comment: the broker "holds every target credential"; `GITHUB_APP_PRIVATE_KEY_PATH` "as the broker container sees it" | The broker holds no target credential; the path is as `plugin-github` sees it | Done (wording) |
-| `DEPLOY.md` backups: `wa_data`, `broker_data`, `.env` with `BROKER_SECRETS_KEY` | Also every plugin secret volume, with its `PLUGIN_SECRETS_KEY_<SERVICE>` | Done |
-| Sidecar log hint `GET /v1/admin/qr`; comments say "gateway" | `/v1/admin/plugins/whatsapp/connect/qr.png`; "plugin" | Done (wording) |
+| 0. Skeleton | Settings with the `validate_exposure` boot interlock; the full schema with additive `_MIGRATIONS`; origin guard, Access JWT verification, audit, compact errors; `GET /health`; `init_secrets.py`; compose with the public overlay and the Caddy edge; EC2 deploy scripts; CI; the Go sidecar copied from WA_GW; non-root images | `broker/broker/config.py`, `db.py`, `origin.py`, `cf_access.py`, `scripts/`, `deploy/`, `edge/`, `sidecars/whatsapp/` |
+| 1. Identity | scrypt owner and one-time `SETUP_TOKEN` setup; session cookies with idle and absolute expiry; `aab_admin_` tokens; `require_admin` → `AdminContext`; CSRF header on cookie writes; `aab` CLI | `identity/`, `deps.py`, `routers/auth.py`, `routers/admin.py`, `docs/auth.md` |
+| 2. Authority core | Manifest validation and strict params models; capabilities over the six narrowing forms; `narrow()` as the only producer of `NarrowedCapabilities`; roles, ceiling, denies, live `effective`; the grants store; `aab_` keys with the parent chain; Hypothesis property suite | `plugins/manifest.py`, `authority/`, `auth.py`, `docs/grant-algebra.md`, `docs/manifest-schema.md` |
+| 3. Infrastructure | Five services (plus the `edge` overlay) on `edge_net` / `broker_net` / `wa_internal`; the per-service env split; one secret volume per plugin service; 11 generated secrets | `docker-compose.yml`, `docker-compose.public.yml`, `docs/deployment.md` |
+| 3. Engine core | The plugin runtime; `InProcessAdapter` and `RemoteAdapter`; the registry with manifest pinning; `policy.evaluate`; the hash-chained decision record with `verify`; the capacity ledger; `engine.perform`; the action queue, delivery with re-check and the scheduler; hidden resources; agent REST (targets, long poll, resolve, actions, `/v1/me`, permissions, per-key OpenAPI); admin REST (plugins with the connect relay and the OAuth callback page, keys and grants, actions, hidden resources, decisions) | `plugin-runtime/`, `broker/broker/`, `docs/plugin-api.md` |
+| 3. MCP | Stateless streamable HTTP, per-request tool list, the `BrokerApp` splitter, generic tools, REST/MCP parity tests | `mcp_server.py`, `mcp_tools.py`, `mcp_generic.py`, `docs/mcp.md` |
+| 3. Telegram and settings | Broker-side secret store (`crypto.py`, `plugin_secrets` slot `broker`); Telegram cards, linking and taps, with the inbound half unreachable from agent surfaces; console-managed operator settings (`runtime_settings`, `/v1/admin/settings`); third-party credentials removed from `.env` and compose ("files hold less") | `notify/`, `crypto.py`, `runtime_settings.py`, `docs/configuration.md` |
+| 4. WhatsApp plugin service | `plugin-whatsapp`: JID normalization, the read-only archive, the sidecar client, the `sidecar_qr` connection, the adapter; then the long-poll bootstrap, a recorded 400 for unencodable params, `nosniff` attachment headers and read-only chats | `plugins/whatsapp/`, `docs/plugins/whatsapp.md` |
+| 8. Simulation | Approval-volume simulation (standing grants vs per-action approval), `aab simulate` | `broker/tests/simulation/`, `docs/approval-volume.md` |
+
+In progress on their own branches, not on `dev`: the console (phase 4b; on
+`dev` the admin plane is the admin REST API and the `aab` CLI, and the only
+page template is the OAuth callback page), delegation and the generated
+skill doc (phase 5: `delegate`, `list_my_delegations`, `revoke_delegation`,
+the `broker://skill` resource and the CI drift check, whose job is a
+placeholder today), the GitHub plugin service (6) and the Google plugin
+service (7). The 0.2.0 release closes phase 8.
+
+Remaining gaps between `dev` and the target described above (every
+difference between phase 0 and the target listed in earlier versions of
+this section is fixed):
+
+| Gap on `dev` | Target | Status |
+|---|---|---|
+| `plugin-github` and `plugin-google` are placeholder images that only idle, and compose still passes them the suffixed names (`PLUGIN_TOKEN_GITHUB`, `PLUGIN_SECRETS_KEY_GITHUB`, ...), which `from_env` does not read | Real plugin services that read the generic `PLUGIN_TOKEN` / `PLUGIN_SECRETS_KEY` / `PLUGIN_SECRETS_DIR`, as `plugin-whatsapp` does | Phases 6 and 7, in progress |
+| `plugin-google` receives `SITE_DOMAIN` to build its own redirect URI (compose, and the env-split table in 2.2 and `docs/deployment.md`) | The broker builds the redirect URI and passes `redirect_uri` in `/connect/start` (1.7); `plugin-google` needs no `SITE_DOMAIN` | Phase 7, in progress; both env-split tables change together (a test keeps them identical) |
+| No CI job builds an image (the `compose` job runs `docker compose config` only); the broker, sidecar and `plugin-whatsapp` images have not been verified by a build | `docker compose build` and a local run verified | Unverified |
+| `plugin-whatsapp` reads the sidecar's WAL-mode `messages.db` from a read-only mount (`mode=ro`, `query_only`, through the sidecar's `-shm` file); no test covers that across two containers | Verified in a real compose run, including the 503 while the sidecar is stopped | Unverified |
 
 ---
 
 ## 7. Open points
 
-The nine points raised in the first version of this document were resolved in
-the plan ("Resolved open points", 2026-09-24) and are reflected above. Since
-then the per-plugin secret volume names were fixed (`whatsapp_secrets`,
-`github_secrets`, `google_secrets`), the Cloudflare Access application was
-extended to `/oauth*`, and the connect `state` nonce was decided (plugin-side,
-10 minutes, single use; section 1.7). Still open:
+Resolved since the previous version of this document: the local-mode OAuth
+redirect (the broker computes the redirect URI and passes it in
+`/connect/start`, so `plugin-google` needs neither `SITE_DOMAIN` nor
+`BROKER_PORT`; section 1.7), and where the Telegram bot token lives (the
+console, encrypted in `plugin_secrets` under `BROKER_SECRETS_KEY`;
+`docs/configuration.md`). Still open:
 
-1. **Local-mode OAuth redirect (phase 7).** `plugin-google` builds its
-   redirect URI as `https://<SITE_DOMAIN>/oauth/callback/google`, but
-   `SITE_DOMAIN` is blank in a local run. The proposed fallback is
-   `http://localhost:<BROKER_PORT>/oauth/callback/google` (Google accepts
-   `http://localhost` redirect URIs for Web clients). Open: `BROKER_PORT` is
-   currently read only by compose and not passed to `plugin-google`, so the
-   plugin cannot build that URL yet; whether to pass it (or a full
-   `PUBLIC_BASE_URL`), and whether GitHub's Setup URL needs the same fallback.
-2. **Older plan text** outside the resolved list still shows the pre-resolution
-   design (`GET /manifest`, `PLUGIN_TOKEN_<ID>`, `google_oauth` keeping `state`
-   in `app_config`, `sidecar_qr` proxying `/qr`). (`plugin_secrets` holding the
-   Telegram token is current again: see `docs/configuration.md`.) This document follows the resolutions; the plan body could
-   be aligned to avoid confusing implementers.
+1. **GitHub App Setup URL in local mode (phase 6).** GitHub sends the owner
+   back to the App's one registered Setup URL, not to a URL passed per
+   request, so the broker's `redirect_uri` does not help there. A local-only
+   deployment must register its loopback callback
+   (`http://localhost:<BROKER_PORT>/oauth/callback/github`) on the App; how
+   the console tells the owner which URL to register is open.
+2. **Budgets add up across approved grants** (`docs/approval-volume.md`).
+   Each approved expansion grant carries its own `per_day`, so a key's daily
+   write capacity grows with every approval, and the approval card does not
+   say so. The options recorded there: show the budget a request carries on
+   its card, or add a key-level daily ceiling.
+3. **Console edits of `mcp_allowed_hosts_extra` need a broker restart.** The
+   MCP transport reads the Host allowlist when the app lifespan starts,
+   while `docs/configuration.md` says setting changes apply on the next
+   request. Either rebuild the transport security when the setting changes,
+   or document the exception.
+4. **Older plan text** outside the resolved list still shows superseded
+   design: `GET /manifest`, `PLUGIN_TOKEN_<ID>`, `app_config` holding OAuth
+   state nonces, `/v1/admin/plugins/whatsapp/qr`, and `TELEGRAM_BOT_TOKEN`
+   in the env split. Resolved point 8 ("the Telegram bot token is a broker
+   env var") is itself superseded by the configuration principle, and the
+   `redirect_uri` decision is not in the plan yet. This document follows
+   the decisions; the plan body could be aligned to avoid confusing
+   implementers.
