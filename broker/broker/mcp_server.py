@@ -42,7 +42,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from . import __version__, mcp_tools
 from .agent_auth import authenticate
 from .auth import AuthContext
-from .config import get_settings
+from .runtime_settings import runtime_settings
 from .errors import PolicyError
 
 log = logging.getLogger(__name__)
@@ -94,7 +94,10 @@ def transport_security() -> TransportSecuritySettings:
     """DNS-rebinding protection: only Host headers in MCP_ALLOWED_HOSTS are
     served (a hostile web page resolving its own name to 127.0.0.1 would
     otherwise reach a local broker from the owner's browser)."""
-    hosts = [h.strip() for h in get_settings().mcp_allowed_hosts.split(",") if h.strip()]
+    # Env entries first, console extras after; the env list can never be
+    # removed from the console (runtime_settings is additive by construction).
+    # Read at lifespan start: the session manager is built once per lifespan.
+    hosts = list(runtime_settings().mcp_allowed_hosts)
     return TransportSecuritySettings(enable_dns_rebinding_protection=True,
                                      allowed_hosts=hosts)
 

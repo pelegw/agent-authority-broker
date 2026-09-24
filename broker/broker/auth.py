@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from . import db
 from .authority.denies import Denies, merged_denies, parse_denies
 from .authority.roles import ROLE_RANK, ROLES, check_role
-from .config import get_settings
+from .runtime_settings import runtime_settings
 
 KEY_PREFIX = "aab_"
 ADMIN_TOKEN_PREFIX = "aab_admin_"   # owner tokens; never valid as agent keys
@@ -109,7 +109,7 @@ def _chain_problem(chain: list[dict], now: int) -> str | None:
     """Why a chain cannot act right now, or None if every link is live."""
     if not chain:
         return "broken chain"
-    if len(chain) - 1 > get_settings().max_delegation_depth:
+    if len(chain) - 1 > runtime_settings().max_delegation_depth:
         return "delegation too deep"
     principal = chain[0]["principal_id"]
     for link in chain:
@@ -286,7 +286,7 @@ def _check_child_of(conn, parent_key_id: int, principal_id: str, role: str,
     parent = chain[-1]
     if parent["principal_id"] != principal_id:
         raise ValueError("parent key belongs to another principal")
-    if len(chain) > get_settings().max_delegation_depth:   # child depth = len(chain)
+    if len(chain) > runtime_settings().max_delegation_depth:   # child depth = len(chain)
         raise ValueError("delegation depth limit reached")
     if ROLE_RANK[role] > ROLE_RANK.get(parent["role"], -1):
         raise ValueError(f"role {role!r} exceeds parent role {parent['role']!r}")
@@ -303,7 +303,7 @@ def rotate_key(key_id: int, grace_seconds: int | None = None) -> str:
     (default: key_rotation_grace_seconds) so agents can swap without downtime.
     Returns the new plaintext. Role, grants, expiry and identity are kept."""
     if grace_seconds is None:
-        grace_seconds = get_settings().key_rotation_grace_seconds
+        grace_seconds = runtime_settings().key_rotation_grace_seconds
     now = int(time.time())
     new_plaintext, new_hash = generate_key()
     conn = db.connect()

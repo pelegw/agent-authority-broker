@@ -9,7 +9,10 @@ What must hold across the broker/plugin boundary:
   * a hidden chat's media never reaches the sidecar;
   * a draft-mode capability turns send_message into pending_approval;
   * sidecar 503 (not sent) and 502 (unknown) are recorded as such;
-  * the broker's resource_ref post-filter holds even if the plugin leaks.
+  * the broker's resource_ref post-filter holds even if the plugin leaks;
+  * media downloads are nosniff attachments named after the message;
+  * a long-poll bootstrap answers at once, whatever ?wait= says;
+  * status/broadcast/channel chats can be hidden and read, never sent to.
 """
 
 import threading
@@ -397,3 +400,74 @@ def test_long_poll_returns_when_a_message_lands(client, wa, make_agent, monkeypa
     assert [m["text"] for m in body["items"]] == ["arrived"]
     assert time.monotonic() - t0 < 4
 
+
+# ---- follow-ups: download headers, bootstrap, read-only chats ------------------------
+
+def test_media_download_is_a_nosniff_attachment_named_after_the_message(client, wa,
+                                                                        make_agent):
+    a = make_agent([wa_cap(["get_media"])])
+    r = call(client, a, "get_media", {"chat": BOB, "message_id": "B1"})
+    assert r.status_code == 200 and r.content == fakes.IMAGE_BYTES
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert r.headers["content-disposition"] == 'attachment; filename="B1"'
+
+
+def test_active_media_types_are_downgraded_end_to_end(client, wa, make_agent):
+    # A WhatsApp document's sender picks its type; HTML must not come back as HTML.
+    wa.sidecar.media[(BOB, "B1")] = (b"<script>alert(1)</script>", "text/html")
+    a = make_agent([wa_cap(["get_media"])])
+    r = call(client, a, "get_media", {"chat": BOB, "message_id": "B1"})
+    assert r.headers["content-type"] == "application/octet-stream"
+    assert r.headers["x-content-type-options"] == "nosniff"
+
+
+def test_bootstrap_with_wait_returns_at_once_and_skips_nothing(client, wa, make_agent):
+    a = make_agent([wa_cap(["check_new_messages"])])
+    t0 = time.monotonic()
+    boot = client.get(f"{ACT}/check_new_messages", params={"wait": 5}, headers=a.headers)
+    assert boot.status_code == 200 and boot.json()["items"] == []
+    assert time.monotonic() - t0 < 1.0          # under one default poll interval
+    fakes.insert_message(wa.archive, BOB, "RIGHT1", "right after the bootstrap")
+    r = client.get(f"{ACT}/check_new_messages",
+                   params={"cursor": boot.json()["cursor"], "wait": 5}, headers=a.headers)
+    assert [m["text"] for m in r.json()["items"]] == ["right after the bootstrap"]
+
+
+def test_owner_can_hide_a_status_chat(client, wa, make_agent, admin_headers):
+    fakes.add_read_only_chats(wa.archive)
+    a = make_agent([wa_cap(READS)])
+    assert fakes.STATUS in [c["jid"] for c in items(call(client, a, "list_chats"))]
+    assert [m["id"] for m in items(call(client, a, "read_messages",
+                                        {"chat": fakes.CHANNEL}))] == ["N1"]
+    for jid in (fakes.STATUS, fakes.CHANNEL):
+        r = client.post("/v1/admin/hidden", json={"target": "whatsapp", "kind": "chat",
+                                                  "resource_id": jid}, headers=admin_headers)
+        assert r.status_code == 200 and r.json()["resource_id"] == jid
+    jids = [c["jid"] for c in items(call(client, a, "list_chats"))]
+    assert fakes.STATUS not in jids and fakes.CHANNEL not in jids
+    assert items(call(client, a, "search_messages", {"query": "holiday"})) == []
+    assert call(client, a, "get_chat", {"chat": fakes.STATUS}).json() == NOT_FOUND
+    assert call(client, a, "read_messages", {"chat": fakes.CHANNEL}).json() == NOT_FOUND
+
+
+@pytest.mark.parametrize("to", [fakes.STATUS, fakes.CHANNEL])
+def test_send_to_a_read_only_chat_is_400_and_never_reaches_the_sidecar(client, wa,
+                                                                        make_agent, to):
+    a = make_agent([wa_cap(["send_message"])])
+    r = call(client, a, "send_message", {"to": to, "text": "hi"})
+    assert r.status_code == 400 and "unsupported recipient" in r.json()["error"]
+    assert wa.sidecar.sent == [] and wa.sidecar.requests == []
+    # The chat id is valid, so the broker reserved before asking the plugin;
+    # the plugin's 400 means "not performed" and the slot is released.
+    assert ledger_states() == ["released"] and outcomes() == ["error:400"]
+
+
+def test_a_drafted_send_to_a_read_only_chat_fails_on_approval(client, wa, make_agent,
+                                                              admin_headers):
+    a = make_agent([wa_cap(["send_message"], mode="draft")])
+    r = call(client, a, "send_message", {"to": fakes.STATUS, "text": "hi"})
+    assert r.status_code == 202             # the broker cannot know until the plugin says
+    action_id = r.json()["action_id"]
+    r = client.post(f"/v1/admin/actions/{action_id}/approve", headers=admin_headers)
+    assert r.status_code == 400 and queue.get_row(action_id)["status"] == "failed"
+    assert wa.sidecar.sent == []

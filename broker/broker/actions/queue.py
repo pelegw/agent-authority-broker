@@ -25,9 +25,9 @@ import uuid
 
 from .. import db, notify
 from ..audit import audit
-from ..config import get_settings
 from ..errors import PolicyError
 from ..plugins.registry import get_registry
+from ..runtime_settings import runtime_settings
 
 # A `sending` claim older than this is a crashed delivery: fail it rather
 # than leave it dangling (it may have been sent, so never back to pending).
@@ -49,7 +49,7 @@ def resolve_run_at(run_at: int | None, delay_seconds: int | None) -> int | None:
         run_at = now + delay_seconds
     if run_at is None:
         return None
-    s = get_settings()
+    s = runtime_settings()
     if run_at <= now + s.schedule_min_lead_seconds:
         raise PolicyError(400, f"run_at must be at least {s.schedule_min_lead_seconds}s "
                                "in the future", "bad_request")
@@ -76,7 +76,7 @@ def create(auth, *, target: str, action: str, params: dict, decision_id: int,
     if status not in ("pending", "scheduled"):
         raise ValueError("a new action is pending or scheduled")
     now = int(time.time())
-    expires_at = now + get_settings().draft_ttl_hours * 3600
+    expires_at = now + runtime_settings().draft_ttl_hours * 3600
     if run_at is not None:
         # A scheduled row must outlive its fire time a little, for inspection.
         expires_at = max(expires_at, run_at + 3600)

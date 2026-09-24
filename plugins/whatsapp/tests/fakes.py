@@ -71,6 +71,22 @@ def seed_archive(path: str | Path) -> None:
     conn.close()
 
 
+STATUS = "status@broadcast"                     # status updates: readable, not sendable
+CHANNEL = "120363000000000009@newsletter"       # a channel: readable, not sendable
+
+
+def add_read_only_chats(path: str | Path) -> None:
+    """A status-update chat and a channel, as the sidecar archives them."""
+    conn = sqlite3.connect(str(path))
+    conn.executemany("INSERT INTO chats VALUES (?, ?, ?, ?)", [
+        (STATUS, "", 0, 1500), (CHANNEL, "Town News", 0, 1600)])
+    conn.executemany("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [
+        (STATUS, "S1", ALICE, 1500, 0, "text", "my holiday photos", None),
+        (CHANNEL, "N1", CHANNEL, 1600, 0, "text", "road closed today", None)])
+    conn.commit()
+    conn.close()
+
+
 def insert_message(path: str | Path, chat_jid: str, msg_id: str, text: str,
                    ts: int | None = None) -> None:
     """Append a message the way the sidecar would (a fresh live row)."""

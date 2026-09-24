@@ -76,8 +76,10 @@ host**. That writes, with mode 0600, the broker's secrets (`SETUP_TOKEN`,
 `ORIGIN_SECRET`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`), and per plugin
 service a token and a key (`PLUGIN_TOKEN_WHATSAPP` / `PLUGIN_SECRETS_KEY_WHATSAPP`,
 `..._GITHUB`, `..._GOOGLE`) plus `SIDECAR_TOKEN` (plugin-whatsapp to sidecar),
-then empty, labelled placeholders; it prints a checklist and stops. Secret
-values are never printed and never leave the host. Compose hands each
+then empty, labelled placeholders for the Cloudflare Access values and
+`SITE_DOMAIN`; it prints a checklist (including which credentials you enter in
+the console instead) and stops. Secret values are never printed and never
+leave the host. Compose hands each
 container only its own values (table in `docs/deployment.md`).
 
 To rotate one value later: `python3 scripts/init_secrets.py --out .env --rotate NAME`
@@ -120,13 +122,16 @@ container. Register exactly these (substitute your `SITE_DOMAIN`):
 | Google | Cloud Console > APIs & Services > Credentials > your OAuth client (Web application) > Authorized redirect URIs | `https://aab.example.com/oauth/callback/google` |
 | GitHub | Your GitHub App > General > Post installation > **Setup URL** (tick "Redirect on update"); GitHub appends `installation_id` to it | `https://aab.example.com/oauth/callback/github` |
 
-Put `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` and `GITHUB_APP_ID`
-in `/opt/aab/.env`. For the GitHub App private key, either upload it from the
-console when connecting, or place it on the host as
-`/opt/aab/data/github-app/app.pem` (readable by uid 10001 only:
+The Google OAuth client id and secret and the GitHub App id and private key
+are not in `/opt/aab/.env`: enter them in the console, in each plugin's config
+form (Plugins > Google, Plugins > GitHub), which relays them once to the plugin
+container (`docs/configuration.md`). For the GitHub App private key you may
+instead place it on the host as `/opt/aab/data/github-app/app.pem` (readable by
+uid 10001 only:
 `sudo install -o 10001 -g 10001 -m 0400 app.pem /opt/aab/data/github-app/`)
-and set `GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github/app.pem`. Only
-`plugin-github` mounts that directory.
+and point the GitHub plugin's config form at `/run/secrets/github/app.pem`.
+Only `plugin-github` mounts that directory. The Telegram bot token is entered
+in the console as well (Channels > Telegram).
 
 ## 7. Deploy
 
@@ -170,15 +175,15 @@ Cloudflare secret header (i.e. straight to the origin) should get 403.
 
   | What | Holds | Needs, to be useful |
   |---|---|---|
-  | `broker_data` volume | owner account, keys, grants, decision record | `DECISION_SIGNING_KEY` (old rows verify only under it) |
+  | `broker_data` volume | owner account, keys, grants, decision record, console settings, Telegram bot token (encrypted) | `DECISION_SIGNING_KEY` (old rows verify only under it), `BROKER_SECRETS_KEY` (else re-enter the Telegram token) |
   | `wa_data` volume | WhatsApp session (**plaintext**: a backup is the live account) + message archive | nothing: treat the backup itself as a credential |
   | `whatsapp_secrets` volume | plugin-whatsapp's encrypted config | `PLUGIN_SECRETS_KEY_WHATSAPP` |
   | `github_secrets` volume | GitHub App key + installation (encrypted) | `PLUGIN_SECRETS_KEY_GITHUB` |
   | `google_secrets` volume | Google OAuth refresh token (encrypted) | `PLUGIN_SECRETS_KEY_GOOGLE` |
-  | `/opt/aab/.env` | every key above, plus tokens and third-party values | host-only, mode 0600 |
+  | `/opt/aab/.env` | every key above, plus tokens and the Cloudflare Access values | host-only, mode 0600 |
 
   Docker prefixes the volume names with the project name (`aab_broker_data`,
   ...). Losing a `PLUGIN_SECRETS_KEY_<SERVICE>` means that plugin must be
-  reconnected; nothing else is lost. `BROKER_SECRETS_KEY` protects nothing in
-  0.2.0 but back it up anyway. **Never** commit `.env`, `data/` or
+  reconnected; nothing else is lost. Losing `BROKER_SECRETS_KEY` means
+  re-entering the Telegram bot token. **Never** commit `.env`, `data/` or
   `edge/certs/*` (already gitignored).

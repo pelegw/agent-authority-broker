@@ -95,9 +95,9 @@ session's attribution trailers.
 - [x] 0. Skeleton: repo, VERSION, config, db schema, security ports, compose, CI, secrets script
 - [x] 1. Identity: owner setup/login/sessions, admin tokens, `require_admin` -> `AdminContext`
 - [x] 2. Authority core: capabilities, grants, `narrow()`, roles, `aab_` keys, hypothesis suite
-- [ ] 3. Engine: plugin registry, policy, decisions, ledger, actions, notify, MCP, CLI (against `echo`)
-- [ ] 4. WhatsApp plugin + console v1 (full WA_GW replacement)
-- [ ] 5. Delegation + generated skill doc (+ CI drift check)
-- [ ] 6. GitHub plugin
-- [ ] 7. Google plugins (Gmail, Calendar, Drive) + `docs/platform-thesis.md`
-- [ ] 8. Simulation, docs, release 0.2.0
+- [x] 3. Engine: plugin runtime + registry, policy, decisions, ledger, actions, REST, MCP (parity-tested), Telegram approvals, console-managed settings, per-plugin containers + env split
+- [ ] 4. WhatsApp plugin service (done) + admin console (in progress)
+- [ ] 5. Delegation + generated skill doc (+ CI drift check) (in progress)
+- [ ] 6. GitHub plugin (in progress)
+- [ ] 7. Google plugins (Gmail, Calendar, Drive) + `docs/platform-thesis.md` (in progress)
+- [ ] 8. Simulation (done), docs, release 0.2.0

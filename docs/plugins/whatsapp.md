@@ -33,10 +33,10 @@ broker ──(broker_net, X-Plugin-Token)──> plugin-whatsapp ──(wa_inter
 | `get_chat` | read | One chat's metadata. Hidden or missing: `404`. |
 | `read_messages` | read | One chat's messages, newest first. Page backwards with `before` (a timestamp) and `before_id`, which makes the cursor exact within one second. Hidden or missing chat: `404`. |
 | `search_messages` | read | Substring search across the archive, or inside one `chat` (a hidden or missing chat is then a `404`). |
-| `check_new_messages` | read, long-poll | Incoming messages after `cursor`, oldest first: `{"cursor", "items"}`. Called with no cursor, it returns the current top of the archive and no backlog, so the agent starts "from now". Messages older than 5 minutes are never counted as new: history sync re-inserts old messages as new rows. |
+| `check_new_messages` | read, long-poll | Incoming messages after `cursor`, oldest first: `{"cursor", "items"}`. Called with no cursor, it returns the current top of the archive and no backlog, so the agent starts "from now"; the broker answers that bootstrap at once even if `?wait=` was given. Messages older than 5 minutes are never counted as new: history sync re-inserts old messages as new rows. |
 | `search_contacts` | read | Address-book search by name or phone fragment. It returns JIDs. |
-| `get_media` | read, binary | Downloads a message's media through the sidecar. The plugin checks the chat's visibility before calling the sidecar. |
-| `send_message` | write | Sends a text message through the sidecar. It can be drafted and scheduled; the draft routing and the queue live in the broker. |
+| `get_media` | read, binary | Downloads a message's media through the sidecar. The plugin checks the chat's visibility before calling the sidecar. The sender chose the media type, so active types (HTML, SVG, XML, scripts) come back as `application/octet-stream`; over REST the broker always serves it as a `nosniff` attachment named after the message id. |
+| `send_message` | write | Sends a text message through the sidecar to a person or a group. Read-only chats (status, broadcast lists, channels) are refused with `400`. It can be drafted and scheduled; the draft routing and the queue live in the broker. |
 
 List results are `{"items": [...]}`. Every chat and message row carries
 `"resource_ref": {"kind": "chat", "id": <jid>}` (contacts use `"kind":
@@ -71,16 +71,28 @@ way WA_GW did, so pagination stays honest and counts never leak:
 
 ### JIDs
 
-`normalize` (for both `chat` and `contact`) is WA_GW's `normalize_jid`,
-unchanged. It mirrors the sidecar's `ParseRecipient`, and a test runs the Go
-test's own vectors against it. It accepts `…@s.whatsapp.net`, `…@g.us`,
-`…@lid` or an international phone number, and it strips device (`:N`) and
-agent (`.N`) suffixes. One rule is added: the user part must be canonical
-(digits, or `digits-digits` for an old-style group). Hidden lists and grants
-compare exact strings, so a spelling that WhatsApp might still deliver to the
-same account (`+972…@s.whatsapp.net`, a space or an invisible character
-inside the digits) is refused with `400` and cannot act as a second name for a
-hidden chat.
+`jid.py` has two paths, because not every chat can be written to:
+
+- **`normalize_recipient`** (the send path, and `normalize` for a
+  `contact`) is WA_GW's `normalize_jid`, unchanged. It mirrors the sidecar's
+  `ParseRecipient`, and a test runs the Go test's own vectors against it. It
+  accepts `…@s.whatsapp.net`, `…@g.us`, `…@lid` or an international phone
+  number, and it strips device (`:N`) and agent (`.N`) suffixes.
+- **`normalize_jid`** (`normalize` for a `chat`, and every read) accepts all of
+  that plus the chats the archive holds but the sidecar cannot send to:
+  status updates (`status@broadcast`), broadcast lists (`<digits>@broadcast`)
+  and channels (`<digits>@newsletter`). The owner can hide them and agents can
+  read them. `send_message` uses the recipient path, so they get a `400`
+  before the sidecar is called. The broker cannot tell this from the chat id
+  alone, so a *drafted* send to one of them is queued and fails with that
+  `400` on approval.
+
+One rule is added on both paths: the user part must be canonical (digits, or
+`digits-digits` for an old-style group; `status` for `status@broadcast`).
+Hidden lists and grants compare exact strings, so a spelling that WhatsApp
+might still deliver to the same account (`+972…@s.whatsapp.net`, a space or
+an invisible character inside the digits) is refused with `400` and cannot act
+as a second name for a hidden chat.
 
 ## Environment
 
@@ -163,7 +175,8 @@ appear only on the admin plane).
 | What happened | Plugin answers | Broker behaviour |
 |---|---|---|
 | Hidden or missing chat, missing message or media | `404` | The generic `not found` body |
-| Bad recipient, empty or oversized text (the sidecar reads at most 64 KiB), bad params, malformed scope | `400`, before any sidecar call | Passed through |
+| Bad recipient (including a read-only chat), empty or oversized text (the sidecar reads at most 64 KiB), bad params, malformed scope | `400`, before any sidecar call | Passed through |
+| Agent params that are not valid UTF-8 JSON (a lone surrogate, NaN) | never reaches the plugin | The broker answers a recorded `400 invalid_params` before evaluating, and takes no budget |
 | Sidecar unreachable (connection refused, connect timeout) | `503` | Not performed; a queued send returns to pending |
 | Sidecar says "not logged in" | `503` | As above |
 | Sidecar refused `SIDECAR_TOKEN` (`401`/`403`) | `503` | As above; not shown to the agent as its own `401` |
@@ -184,11 +197,11 @@ up.
   sidecar is running. If the sidecar is stopped and has cleaned up its `-shm`,
   reads return `503` (never stale or partial data). Before the sidecar has
   created `messages.db`, reads return empty results.
-- **Long-poll bootstrap.** Call `check_new_messages` once *without* a cursor,
-  then long-poll with `?wait=` and the cursor. The broker's wait loop ends
-  early only when a list is non-empty. A bootstrap call always returns an
-  empty list, so a bootstrap sent with `wait` holds for the whole wait and
-  returns the top of the archive at the end.
+- **Long-poll bootstrap.** Call `check_new_messages` once without a cursor,
+  then long-poll with `?wait=` and the cursor. A call without a cursor is
+  answered at once whatever `wait` says (engine rule for every `long_poll`
+  action that declares a `cursor`), so nothing that arrives during a wait is
+  skipped.
 - **Labels.** `/label` (used for approval cards, for example "Send to Alice:
   …") and `/resolve` (the console's pickers) apply no visibility. They serve
   the owner. The broker filters `resolve` itself for agents.

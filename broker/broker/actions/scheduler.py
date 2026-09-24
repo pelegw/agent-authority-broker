@@ -19,9 +19,9 @@ import anyio.to_thread
 
 from .. import db
 from ..audit import audit
-from ..config import get_settings
 from ..errors import PolicyError
 from ..plugins.registry import get_registry
+from ..runtime_settings import runtime_settings
 from . import deliver, queue
 
 
@@ -59,4 +59,6 @@ async def scheduler_loop() -> None:
         except Exception as exc:
             audit("system", "scheduler.error", detail={"error": type(exc).__name__},
                   result="error")
-        await asyncio.sleep(get_settings().scheduler_tick_seconds)
+        # Read in a thread: a console edit applies from the next tick.
+        tick = await anyio.to_thread.run_sync(lambda: runtime_settings().scheduler_tick_seconds)
+        await asyncio.sleep(tick)
