@@ -3,9 +3,11 @@
 All notable changes to this project are documented here. The version number
 lives only in `VERSION`.
 
-## [Unreleased]
+## [0.2.0] - 2026-09-24
 
-### Security
+### Hardening after the Docker verification (same day, before the tag)
+
+#### Security
 - Policy check order no longer tells a key without authority whether a
   plugin is connected. `evaluate()` answered `503 not_connected` before it
   looked at coverage, so any key could probe whether WhatsApp was paired or
@@ -53,7 +55,7 @@ lives only in `VERSION`.
   exact membership of every network in both compose shapes and that no
   service falls back to compose's default network.
 
-### Upgrade notes
+#### Upgrade notes
 - **WhatsApp session volume.** An existing `wa_data` volume keeps its
   `session.db`, but the sidecar now opens the session in the new
   `wa_session` volume, so on its first start with this layout it asks to
@@ -80,7 +82,7 @@ lives only in `VERSION`.
   networks and moves the containers onto them; the old `aab_broker_net` is
   left behind unused. Remove it with `docker network rm aab_broker_net`.
 
-### Fixed
+#### Fixed
 - The WhatsApp sidecar never closed its databases on a graceful stop: its
   shutdown ended in `os.Exit(0)`, which skips deferred calls, so
   `messages.db` was not checkpointed and its `-wal` and `-shm` stayed
@@ -91,7 +93,7 @@ lives only in `VERSION`.
   final checkpoint and file removal, the session store's close, and that
   `run()` returns instead of exiting.
 
-### Documentation
+#### Documentation
 - 0.2.0 verified under Docker (Engine 29.7.2, Compose v5.5.0): all five
   images build (broker 269 MB, each Python plugin about 257 MB, sidecar
   55 MB), every container runs as uid 10001, only the broker is published,
@@ -105,8 +107,6 @@ lives only in `VERSION`.
   `docs/deployment.md` > Verify after `docker compose up` now lists the
   exact expected outputs, and `docs/plugins/whatsapp.md` records why the
   mount stays read-only (no read-write mount, no `immutable=1`).
-
-## [0.2.0] - 2026-09-24
 
 First release as the Agent Authority Broker, the successor of WA_GW 0.1.0.
 Clean break: new repo, new names (`aab_` keys, namespaced tools and endpoints),
