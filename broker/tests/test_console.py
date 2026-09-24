@@ -234,6 +234,15 @@ def test_connection_panel_covers_every_connection_kind(html):
     assert _object_keys(_block(html, "connectors")) == kinds
 
 
+def test_enforcement_display_fails_closed_like_the_broker(html):
+    """The badge shows what enforced_where would say: the plugin's live
+    report when it is a known value, otherwise proxy (never the manifest's
+    claim alone)."""
+    from broker.plugins import settings as plugin_settings
+    assert _js_list(html, "ENFORCEMENT_VALUES") == list(plugin_settings.ENFORCEMENT_VALUES)
+    assert 'return ENFORCEMENT_VALUES.includes(live) ? live : "proxy";' in _script(html)
+
+
 def test_views_nav_and_loaders_agree(html):
     sections = re.findall(r'<section class="view" data-view="([a-z]+)"', html)
     nav = re.findall(r'<a href="#/([a-z]+)" data-view="\1">', html)

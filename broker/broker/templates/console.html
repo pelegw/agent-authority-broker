@@ -937,13 +937,20 @@ function pluginBadges(p) {
   const hl = healthOf(p);
   if (hl.healthy === true) out.push(badge("healthy", "ok"));
   else if (hl.healthy === false) out.push(badge("unhealthy", "bad"));
-  out.push(badge("enforcement: " + enforcementOf(p), ""));
+  out.push(badge("enforcement: " + enforcementOf(p) + (enforcementReported(p) ? "" : " (not reported)"),
+                  enforcementOf(p) === "proxy" && p.connection && p.connection.enforcement !== "proxy" ? "warn" : ""));
   return out;
 }
+// What the broker reports in enforced_where: the plugin's live answer when
+// it is one of these, otherwise proxy. Never the manifest's claim alone: a
+// plugin that has not said (or said something else) is proxy-enforced
+// (docs/plugin-api.md, GET /status).
+const ENFORCEMENT_VALUES = ["target", "mixed", "proxy"];
 function enforcementOf(p) {
   const live = healthOf(p).enforcement;
-  return typeof live === "string" && live ? live : (p.connection && p.connection.enforcement) || "proxy";
+  return ENFORCEMENT_VALUES.includes(live) ? live : "proxy";
 }
+function enforcementReported(p) { return ENFORCEMENT_VALUES.includes(healthOf(p).enforcement); }
 function paintPluginPill() {
   const enabled = state.plugins.filter((p) => p.enabled);
   const up = enabled.filter((p) => pluginStatus(p)[1] === "ok");
@@ -2541,6 +2548,10 @@ function renderConnection(ui) {
 }
 function enforcementNote(p, el) {
   const how = enforcementOf(p);
+  if (!enforcementReported(p) && p.connection && p.connection.enforcement !== "proxy") {
+    el.append(h("div", { class: "sub" }, `The manifest says ${p.connection.enforcement}, but the plugin has not reported how its live credential enforces, so every dimension counts as proxy until it does (Check health).`));
+    return;
+  }
   el.append(h("div", { class: "sub" }, how === "target"
     ? "Enforced at the target: its credential is minted per call with only the permissions the call needs."
     : how === "mixed"
@@ -2667,17 +2678,27 @@ function startQr(ui) {
 // connect/finish gets the state nonce connect/start issued.
 function connectGithubApp(ui, c, el) {
   const p = ui.p;
+  const pat = c.mode === "pat";
+  const perms = [c.installed_permissions, c.permissions].find((x) => x && typeof x === "object" && !Array.isArray(x));
   if (p.connected) {
-    el.append(h("div", null, badge("installed", "ok"), " ", accountText(c) || "GitHub App installation"));
-    if (c.permissions && typeof c.permissions === "object" && !Array.isArray(c.permissions)) {
-      el.append(h("div", { class: "facts" }, ...fact("Installed permissions",
-        idChips(Object.entries(c.permissions).map(([k, v]) => `${k}: ${v}`)))));
-    }
+    el.append(h("div", null, badge(pat ? "personal access token" : "installed", pat ? "warn" : "ok"), " ",
+      accountText(c) || (pat ? "GitHub account" : "GitHub App installation")));
+    const facts = h("div", { class: "facts" });
+    if (perms) facts.append(...fact("Installed permissions", idChips(Object.entries(perms).map(([k, v]) => `${k}: ${v}`))));
+    if (typeof c.repository_selection === "string") facts.append(...fact("Repositories", c.repository_selection +
+      (Number.isInteger(c.repositories_count) ? ` (${c.repositories_count})` : "")));
+    if (facts.childElementCount) el.append(facts);
+  }
+  if (pat) {
+    el.append(h("div", { class: "hint" }, "Running on the personal access token: there is nothing to install, and GitHub cannot narrow the token per call, so every restriction is enforced by the broker and the plugin only. Configure the App (app_id, app_slug, private key) to switch to per-call minimal tokens."),
+      h("div", { class: "row-actions" }, p.connected ? disconnectButton(ui) : null));
+    return;
   }
   const start = h("button", { type: "button", class: p.connected ? "ghost" : "primary" }, p.connected ? "Install on more accounts" : "Install the GitHub App");
   start.onclick = async () => {
     let r;
     try { r = await connectStart(ui, start); } catch (e) { showErr(e); return; }
+    if (r && r.kind === "none") { toast("Nothing to install: the plugin is not in App mode.", "info"); reloadPluginStates().catch(showErr); return; }
     const url = externalUrl(r && r.url);
     if (!url) { toast("The plugin returned no usable https link. Check its App settings.", "err"); return; }
     ui.ghState = r && typeof r.state === "string" ? r.state.slice(0, 512) : null;

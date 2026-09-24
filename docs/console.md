@@ -116,7 +116,11 @@ its members:
   returned install URL (https only) as a link and as text. GitHub's redirect to
   the broker's callback page finishes the install; otherwise the installation
   id field posts `installation_id` **plus the `state` connect/start issued**
-  to `connect/finish`.
+  to `connect/finish` (the plugin refuses a missing or reused state). Once
+  installed, the panel shows the account, the installed permission set and
+  the repository selection. In PAT mode (`mode: pat`) there is nothing to
+  install (`connect/start` answers `kind: none`): the panel says every
+  restriction is proxy-enforced and offers only Disconnect.
 - `google_oauth`: "Connect Google" opens the consent URL from `connect/start`
   (https only; a link is shown too, in case a popup blocker stops the new tab).
   Google redirects to the broker's `/oauth/callback/google` page, which
@@ -133,10 +137,11 @@ top level). Plugin lanes should report these where they apply:
 |---|---|
 | `connected`, `healthy` | every badge |
 | `health` (string) | the status line under a plugin's name when it is not `ok` (for example `reconnect needed: scopes missing`) |
-| `enforcement` | the enforcement badge and note when the plugin reports one (Google says `mixed`); else the manifest's `connection.enforcement` |
+| `enforcement` | the enforcement badge and note: the live value when it is `target`, `mixed` or `proxy`; otherwise **proxy (not reported)**, exactly as `policy.enforced_where` counts it, never the manifest's claim alone |
 | `waiting_for_qr` | `sidecar_qr`: while true, the QR image is re-fetched every 5 s; once `connected`, the console calls `connect/finish` once |
 | `push_name`, `account`, `login`, `email`, `jid` | the "connected as" line (first one present) |
-| `permissions` (object) | `github_app`: the installed permission set |
+| `installed_permissions` (object; `permissions` also read) | `github_app`: the installed permission set |
+| `mode`, `repository_selection`, `repositories_count` | `github_app`: App or PAT mode, and which repositories the installation covers |
 | `granted_scopes`, `missing_scopes` (lists) | `google_oauth`; missing scopes show as "reconnect needed" once connected |
 | `<secret field>_set` (boolean) | secret config fields show "set" / "not set" and "Set" / "Replace"; without it they say only "stored in the plugin" |
 
