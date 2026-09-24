@@ -21,6 +21,7 @@ from .origin import OriginGuardMiddleware
 from .plugins.registry import get_registry, init_registry
 from .routers import (actions, admin, admin_keys, admin_ops, admin_plugins, admin_settings,
                       admin_telegram, auth, health, me, oauth, permissions, targets)
+from .routers import console
 
 
 @asynccontextmanager
@@ -68,6 +69,8 @@ ADMIN_ROUTERS = (admin.router, admin_plugins.router, admin_keys.router, admin_op
 api.include_router(health.router)
 # Pre-login owner endpoints (status/setup/login/logout): outside require_admin.
 api.include_router(auth.router)
+# The owner console page: a data-free shell; its data comes from the admin API.
+api.include_router(console.router)
 for _r in ADMIN_ROUTERS:
     api.include_router(_r)
 # The agent surface (aab_ keys). These routers never import deps.py/identity.
