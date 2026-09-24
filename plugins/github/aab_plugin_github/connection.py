@@ -3,10 +3,10 @@
 Everything that can act on GitHub lives here, inside the plugin container;
 the broker holds none of it (docs/plugins/github.md).
 
-  config slot "github"      app_id, app_slug (written by the adapter's
-                            configure), private_key_pem and pat (written by
-                            the runtime's /configure). Owned by the owner's
-                            config form.
+  config slot "github"      app_id, app_slug, private_key_path (written by the
+                            adapter's configure), private_key_pem and pat
+                            (written by the runtime's /configure). Owned by
+                            the owner's config form.
   state slot "github_app"   installation_id, installation_account and the
                             pending connect state nonce. A separate file on
                             purpose: /configure can only ever write the
@@ -15,7 +15,8 @@ the broker holds none of it (docs/plugins/github.md).
 
 Modes, derived on every call from what is configured (so a /configure takes
 effect immediately):
-  app   app_id and a private key (secret, or GITHUB_APP_PRIVATE_KEY_PATH).
+  app   app_id and a private key (private_key_pem, or the file at
+        private_key_path inside /run/secrets/github).
         Every call gets an installation token narrowed to exactly its
         repositories and permissions: enforcement "target".
   pat   no App, but a PAT. GitHub cannot narrow it: enforcement "proxy",
@@ -48,12 +49,11 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import datetime
-from pathlib import Path
 
 from aab_plugin_runtime import AdapterError
 
 from .api import NOT_FOUND, GitHubAPI, GitHubError
-from .app_jwt import MAX_PEM_BYTES, InvalidKey, app_jwt, load_private_key
+from .app_jwt import KEY_DIR, BadKeyPath, InvalidKey, app_jwt, load_private_key, read_key_file
 from .ids import normalize_owner, normalize_repo, split_repo
 from .scope import credential, missing, within
 from .tokens import GitHubToken, TokenCache
@@ -105,10 +105,10 @@ class GitHubAppConnection:
     kind = "github_app"
     slot = "github_app"          # the runtime binds this connection its own slot
 
-    def __init__(self, api: GitHubAPI, *, key_path: str | None = None,
+    def __init__(self, api: GitHubAPI, *, key_dir: str = KEY_DIR,
                  clock: Callable[[], float] = time.time):
         self.api = api
-        self._key_path = key_path or None
+        self._key_dir = key_dir
         self._clock = clock
         self._config = MemorySlot()          # adapter hands in the "github" slot
         self._state = MemorySlot()           # runtime binds the "github_app" slot
@@ -152,15 +152,16 @@ class GitHubAppConnection:
         return self._config.get("pat") or None
 
     def _pem_text(self) -> str | None:
+        """The console's key, else the key file at private_key_path (confined
+        to the key directory on every read, not just when configured)."""
         pem = self._config.get("private_key_pem")
         if pem:
             return pem
-        if self._key_path:
+        path = self._config.get("private_key_path")
+        if path:
             try:
-                path = Path(self._key_path)
-                if path.is_file() and path.stat().st_size <= MAX_PEM_BYTES:
-                    return path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
+                return read_key_file(path, self._key_dir)
+            except BadKeyPath:
                 return None
         return None
 
@@ -307,9 +308,12 @@ class GitHubAppConnection:
                "enforcement": "target" if mode == "app" else "proxy",
                "account": None, "installed_permissions": None, "repositories_count": None}
         if mode is None:
-            return {**out, "connected": False, "healthy": False,
-                    "health": "not configured: set app_id, app_slug and private_key_pem, "
-                              "or a pat"}
+            if self.app_id() and self._config.get("private_key_path"):
+                health = "the key file at private_key_path cannot be read"
+            else:
+                health = ("not configured: set app_id, app_slug and private_key_pem "
+                          "(or private_key_path), or a pat")
+            return {**out, "connected": False, "healthy": False, "health": health}
         if mode == "pat":
             return {**out, **self._pat_status()}
         return {**out, **self._app_status()}

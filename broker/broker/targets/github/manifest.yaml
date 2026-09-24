@@ -25,7 +25,9 @@ connection:
 
 # Console config (configuration principle: nothing here comes from .env).
 # The two secrets are relayed once to the plugin's /configure and stored
-# only in the plugin's own encrypted volume.
+# only in the plugin's own encrypted volume. private_key_path is not a
+# secret (a location, not a key), and the plugin reads only files inside
+# /run/secrets/github through it.
 config_schema:
   - name: app_id
     type: string
@@ -38,8 +40,14 @@ config_schema:
     secret: true
     help: >-
       The App's private key (PEM). Stored encrypted by the plugin and never
-      shown again. Optional when the plugin container has the key as a file
-      (GITHUB_APP_PRIVATE_KEY_PATH).
+      shown again. Leave empty to use private_key_path instead.
+  - name: private_key_path
+    type: string
+    help: >-
+      Alternative to private_key_pem: the key as a file in the optional
+      GITHUB_APP_KEY_DIR bind, e.g. /run/secrets/github/app.pem. Used only
+      when private_key_pem is empty; files outside /run/secrets/github are
+      refused.
   - name: pat
     type: string
     secret: true

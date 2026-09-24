@@ -3,16 +3,14 @@
 The container receives only its own values (docs/architecture.md 2.2); the
 names are generic so the image does not care which .env variable fed them:
 
-  PLUGIN_TOKEN                 the broker's X-Plugin-Token for this service (required)
-  PLUGIN_SECRETS_KEY           Fernet key for this service's secret store
-  PLUGIN_SECRETS_DIR           where that store lives (the /secrets volume)
-  GITHUB_APP_PRIVATE_KEY_PATH  optional: the App's PEM as a read-only file,
-                               used only when no private_key_pem was set in
-                               the console (operators who prefer files)
+  PLUGIN_TOKEN        the broker's X-Plugin-Token for this service (required)
+  PLUGIN_SECRETS_KEY  Fernet key for this service's secret store
+  PLUGIN_SECRETS_DIR  where that store lives (the /secrets volume)
 
-The first three are read by `aab_plugin_runtime.from_env`, which refuses to
-boot with an empty token. Everything else (App id, slug, key, PAT) is
-console config (configuration principle), stored in the encrypted store.
+All three are read by `aab_plugin_runtime.from_env`, which refuses to boot
+with an empty token. Everything GitHub-specific (App id, slug, key or key
+file path, PAT) is console config (configuration principle), stored in the
+encrypted store; no GitHub value comes from env.
 
 GitHub rate limits come back as 429 with a `Retry-After` header: the
 runtime's generic handler knows only `{"error"}` bodies, so this app adds a
@@ -35,7 +33,9 @@ from .api import RateLimited
 
 
 def build_adapter(environ: Mapping[str, str]) -> GitHubAdapter:
-    return GitHubAdapter(key_path=environ.get("GITHUB_APP_PRIVATE_KEY_PATH") or None)
+    # `environ` is accepted for symmetry with the other plugins; nothing
+    # GitHub-specific is read from it.
+    return GitHubAdapter()
 
 
 async def rate_limited(_: Request, exc: RateLimited) -> JSONResponse:

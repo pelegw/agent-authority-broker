@@ -134,8 +134,13 @@ agent it had not.
    validated (an unencrypted RSA key; anything else is refused and wiped)
    and stored only in `github_secrets`. The broker's database gets
    `app_id` and `app_slug` and the *name* of the secret field, never its
-   value. Alternatively mount the key as a file (see Environment) and leave
-   the field empty; a key set in the console wins over the file.
+   value. Alternatively put the key in the `GITHUB_APP_KEY_DIR` bind (see
+   Environment), leave `private_key_pem` empty and set `private_key_path`
+   to `/run/secrets/github/app.pem`. The plugin reads only files that
+   resolve (symlinks followed) inside `/run/secrets/github`, and refuses a
+   path that is anywhere else, missing, or not a valid key: a console
+   session must never be able to point it at another file such as
+   `/proc/self/environ`. A key set in `private_key_pem` wins over the file.
 2. **Enable** the plugin. Before installation it reports `connected: false`,
    `health: "App configured but not installed: use connect"`, and every
    agent call is `503 not_connected`.
@@ -219,18 +224,18 @@ Know what you give up:
 | `PLUGIN_TOKEN` | `PLUGIN_TOKEN_GITHUB` | runtime: the broker's `X-Plugin-Token` | yes; boot refuses when empty |
 | `PLUGIN_SECRETS_KEY` | `PLUGIN_SECRETS_KEY_GITHUB` | runtime: the Fernet key for `/secrets` | yes in compose |
 | `PLUGIN_SECRETS_DIR` | `/secrets` (the `github_secrets` volume) | runtime | set by compose and the image |
-| `GITHUB_APP_PRIVATE_KEY_PATH` | `GITHUB_APP_PRIVATE_KEY_PATH`, e.g. `/run/secrets/github/app.pem` | plugin: the App key as a file, used only when no `private_key_pem` is set | no |
 
-`GITHUB_APP_KEY_DIR` (host side, default `./data/github-app`) is bind-mounted
-read-only at `/run/secrets/github`, into this container only; install the
-key there as uid 10001, mode 0400. The App ID, slug and PAT are console
-config, not env. The image runs `uvicorn --factory
+Nothing GitHub-specific is env. `GITHUB_APP_KEY_DIR` (read by compose on the
+host, default `./data/github-app`) is bind-mounted read-only at
+`/run/secrets/github`, into this container only; install the key there as
+uid 10001, mode 0400, and name it in the console's `private_key_path`. The
+App ID, slug, key and PAT are console config. The image runs `uvicorn --factory
 aab_plugin_github.main:create_app` with one worker on `:8090`, as uid 10001;
 the healthcheck only checks that the port accepts a connection (every route
 needs the token).
 
 `github_secrets` holds two encrypted files: `github.secrets` (`app_id`,
-`app_slug`, `private_key_pem`, `pat`: the console config, persisted so a
+`app_slug`, `private_key_path`, `private_key_pem`, `pat`: the console config, persisted so a
 container restart does not lose it) and `github_app.secrets` (installation
 id and account, pending state). `/configure` can only ever write the first,
 so no config relay can plant an installation.

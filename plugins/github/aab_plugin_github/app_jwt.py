@@ -8,7 +8,13 @@ ahead (GitHub's maximum), `iss` the App ID.
 
 The PEM is parsed here and nowhere else. Parse errors are reported without
 the underlying exception text, which could quote key material.
+
+The key comes from the console (`private_key_pem`, a secret) or, as the
+optional file-based alternative, from `private_key_path`: a file in the
+read-only GITHUB_APP_KEY_DIR bind. `read_key_file` confines that path.
 """
+
+from pathlib import Path
 
 import jwt
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
@@ -17,10 +23,49 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 JWT_BACKDATE_SECONDS = 60
 JWT_LIFETIME_SECONDS = 600
 MAX_PEM_BYTES = 16 * 1024
+# Where compose mounts the optional GITHUB_APP_KEY_DIR bind (read-only, this
+# container only).
+KEY_DIR = "/run/secrets/github"
 
 
 class InvalidKey(ValueError):
     """The PEM is not an unencrypted RSA private key."""
+
+
+class BadKeyPath(ValueError):
+    """A private_key_path the plugin will not read."""
+
+
+def key_file(path: str, key_dir: str = KEY_DIR) -> Path:
+    """The file named by `private_key_path`, only if it resolves (symlinks
+    followed) to something INSIDE `key_dir`.
+
+    The path is console config, so a hijacked console session could set it.
+    Confining it means it can never point at /proc/self/environ (which holds
+    this container's PLUGIN_TOKEN and PLUGIN_SECRETS_KEY) or any other file;
+    and whatever is read is only ever parsed as a key, never echoed."""
+    if not isinstance(path, str) or not path or "\x00" in path:
+        raise BadKeyPath(f"private_key_path must be a file inside {key_dir}")
+    target = Path(path)
+    if not target.is_absolute():
+        raise BadKeyPath(f"private_key_path must be an absolute path inside {key_dir}")
+    base = Path(key_dir).resolve()
+    real = target.resolve()
+    if real == base or not real.is_relative_to(base):
+        raise BadKeyPath(f"private_key_path must be a file inside {key_dir}")
+    return real
+
+
+def read_key_file(path: str, key_dir: str = KEY_DIR) -> str:
+    """The PEM text at a confined path; BadKeyPath when the path is outside
+    the directory or the file is missing, unreadable or too large for a key."""
+    real = key_file(path, key_dir)
+    try:
+        if not real.is_file() or real.stat().st_size > MAX_PEM_BYTES:
+            raise BadKeyPath("private_key_path: there is no key file there")
+        return real.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        raise BadKeyPath("private_key_path: the file cannot be read") from None
 
 
 def load_private_key(pem: str) -> RSAPrivateKey:

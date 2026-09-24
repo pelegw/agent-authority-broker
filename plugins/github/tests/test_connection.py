@@ -74,30 +74,85 @@ def test_config_survives_a_container_restart(gh, clock, tmp_path):
     assert second.post("/perform", json=GET_FILE).status_code == 200
 
 
-def test_the_key_can_come_from_a_file(gh, clock, tmp_path):
-    key_file = tmp_path / "app.pem"
-    key_file.write_text(PRIVATE_KEY_PEM)
-    adapter = GitHubAdapter(GitHubAPI(transport=gh.transport(), clock=clock),
-                            key_path=str(key_file), clock=clock)
-    client = TestClient(create_app({"PLUGIN_TOKEN": PLUGIN_TOKEN,
-                                    "PLUGIN_SECRETS_KEY": Fernet.generate_key().decode(),
-                                    "PLUGIN_SECRETS_DIR": str(tmp_path / "s")},
-                                   adapter=adapter),
-                        headers={"X-Plugin-Token": PLUGIN_TOKEN})
-    configure(client, APP_CONFIG)
-    install(client)
-    assert client.get("/status").json()["enforcement"] == "target"
+@pytest.fixture()
+def key_dir(tmp_path):
+    """Stands in for /run/secrets/github (the GITHUB_APP_KEY_DIR bind)."""
+    d = tmp_path / "run-secrets-github"
+    d.mkdir()
+    (d / "app.pem").write_text(PRIVATE_KEY_PEM)
+    (d / "bad.pem").write_text("garbage")
+    return d
 
 
-def test_a_console_key_wins_over_the_file(gh, clock, tmp_path):
-    bad = tmp_path / "bad.pem"
-    bad.write_text("garbage")
+@pytest.fixture()
+def file_client(gh, clock, tmp_path, key_dir):
     adapter = GitHubAdapter(GitHubAPI(transport=gh.transport(), clock=clock),
-                            key_path=str(bad), clock=clock)
+                            key_dir=str(key_dir), clock=clock)
+    return TestClient(create_app({"PLUGIN_TOKEN": PLUGIN_TOKEN,
+                                  "PLUGIN_SECRETS_KEY": Fernet.generate_key().decode(),
+                                  "PLUGIN_SECRETS_DIR": str(tmp_path / "s")}, adapter=adapter),
+                      headers={"X-Plugin-Token": PLUGIN_TOKEN}, raise_server_exceptions=False)
+
+
+def test_the_key_can_come_from_a_file_in_the_key_dir(file_client, key_dir):
+    configure(file_client, {**APP_CONFIG, "private_key_path": str(key_dir / "app.pem")})
+    install(file_client)
+    s = file_client.get("/status").json()
+    assert (s["enforcement"], s["connected"]) == ("target", True)
+    assert file_client.post("/perform", json=GET_FILE).status_code == 200
+
+
+def test_key_files_outside_the_key_dir_are_refused(file_client, key_dir, tmp_path):
+    outside = tmp_path / "outside.pem"
+    outside.write_text(PRIVATE_KEY_PEM)          # a perfectly good key, wrong place
+    for path in (str(outside), str(key_dir / ".." / "outside.pem"), "app.pem",
+                 str(key_dir), "/proc/self/environ", str(key_dir / "missing.pem")):
+        r = file_client.post("/configure", json={
+            "config": {**APP_CONFIG, "private_key_path": path}, "secrets": {}})
+        assert r.status_code == 400, path
+        assert "PLUGIN_TOKEN" not in r.text and "BEGIN" not in r.text
+    assert file_client.get("/status").json()["mode"] is None
+
+
+def test_a_symlink_out_of_the_key_dir_is_refused(file_client, key_dir, tmp_path):
+    outside = tmp_path / "outside.pem"
+    outside.write_text(PRIVATE_KEY_PEM)
+    link = key_dir / "link.pem"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks need extra privileges on this platform")
+    r = file_client.post("/configure", json={
+        "config": {**APP_CONFIG, "private_key_path": str(link)}, "secrets": {}})
+    assert r.status_code == 400
+
+
+def test_a_key_file_that_is_not_a_key_is_refused(file_client, key_dir):
+    r = file_client.post("/configure", json={
+        "config": {**APP_CONFIG, "private_key_path": str(key_dir / "bad.pem")}, "secrets": {}})
+    assert r.status_code == 400 and "garbage" not in r.text
+
+
+def test_a_console_key_wins_over_the_file(gh, clock, key_dir):
+    adapter = GitHubAdapter(GitHubAPI(transport=gh.transport(), clock=clock),
+                            key_dir=str(key_dir), clock=clock)
     adapter.bind_secrets(_Slot({"app_id": APP_CONFIG["app_id"],
+                                "private_key_path": str(key_dir / "bad.pem"),
                                 "private_key_pem": PRIVATE_KEY_PEM}))
     assert adapter.connection.mode() == "app"
     assert adapter.connection._jwt()
+
+
+def test_a_stored_path_is_confined_on_every_read(gh, clock, key_dir, tmp_path):
+    # Even a path that reached the store some other way is never read
+    # outside the key directory.
+    outside = tmp_path / "outside.pem"
+    outside.write_text(PRIVATE_KEY_PEM)
+    adapter = GitHubAdapter(GitHubAPI(transport=gh.transport(), clock=clock),
+                            key_dir=str(key_dir), clock=clock)
+    adapter.bind_secrets(_Slot({"app_id": APP_CONFIG["app_id"],
+                                "private_key_path": str(outside)}))
+    assert adapter.connection.mode() is None
 
 
 class _Slot(dict):
@@ -226,14 +281,22 @@ def test_status_in_pat_mode(pat_mode, gh):
     assert (s["connected"], s["healthy"]) == (False, False)
 
 
-def test_status_with_an_invalid_key_file(gh, clock, tmp_path):
-    bad = tmp_path / "bad.pem"
-    bad.write_text("garbage")
+def test_status_with_an_invalid_key_file(gh, clock, key_dir):
     adapter = GitHubAdapter(GitHubAPI(transport=gh.transport(), clock=clock),
-                            key_path=str(bad), clock=clock)
-    adapter.bind_secrets(_Slot({"app_id": APP_CONFIG["app_id"]}))
+                            key_dir=str(key_dir), clock=clock)
+    adapter.bind_secrets(_Slot({"app_id": APP_CONFIG["app_id"],
+                                "private_key_path": str(key_dir / "bad.pem")}))
     s = adapter.status()
     assert s["connected"] is False and "invalid" in s["health"]
+
+
+def test_status_when_the_key_file_disappeared(gh, clock, key_dir):
+    adapter = GitHubAdapter(GitHubAPI(transport=gh.transport(), clock=clock),
+                            key_dir=str(key_dir), clock=clock)
+    adapter.bind_secrets(_Slot({"app_id": APP_CONFIG["app_id"],
+                                "private_key_path": str(key_dir / "gone.pem")}))
+    s = adapter.status()
+    assert s["connected"] is False and "private_key_path" in s["health"]
 
 
 # ---- disconnect -------------------------------------------------------------------

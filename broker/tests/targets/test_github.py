@@ -175,7 +175,8 @@ def test_manifest_config_is_console_config_with_two_secrets():
     m = Registry().vendored("github")
     fields = {f.name: (f.type, f.secret) for f in m.config_schema}
     assert fields == {"app_id": ("string", False), "app_slug": ("string", False),
-                      "private_key_pem": ("text", True), "pat": ("string", True)}
+                      "private_key_pem": ("text", True), "private_key_path": ("string", False),
+                      "pat": ("string", True)}
     assert m.connection.kind == "github_app" and m.connection.enforcement == "target"
     dims = {n.dimension: (n.form, n.enforcement) for n in m.narrowings}
     assert dims == {"repo": ("list", "target"), "permissions": ("level", "target"),

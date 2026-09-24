@@ -38,7 +38,7 @@ from aab_plugin_runtime import AdapterError, Result
 
 from . import reads, writes
 from .api import NOT_FOUND, GitHubAPI
-from .app_jwt import InvalidKey, load_private_key
+from .app_jwt import KEY_DIR, BadKeyPath, InvalidKey, load_private_key, read_key_file
 from .call import Call
 from .connection import APP_ID_RE, APP_SLUG_RE, GitHubAppConnection, MemorySlot, Unreachable
 from .ids import check_branch, normalize_repo
@@ -57,11 +57,12 @@ BRANCH_PARAM = {"create_branch": "branch", "push_file": "branch", "create_pr": "
 class GitHubAdapter:
     """The `aab_plugin_runtime` PluginAdapter for plugin id `github`."""
 
-    def __init__(self, api: GitHubAPI | None = None, *, key_path: str | None = None,
+    def __init__(self, api: GitHubAPI | None = None, *, key_dir: str = KEY_DIR,
                  manifest_path: Path = MANIFEST_PATH, clock: Callable[[], float] = time.time):
         self.manifest = yaml.safe_load(Path(manifest_path).read_text(encoding="utf-8"))
         self.api = api or GitHubAPI(clock=clock)
-        self.connection = GitHubAppConnection(self.api, key_path=key_path, clock=clock)
+        self._key_dir = key_dir
+        self.connection = GitHubAppConnection(self.api, key_dir=key_dir, clock=clock)
         self._slot = MemorySlot()
         self.connection.use_config(self._slot)
         self._actions: dict[str, Callable[[Call], Result]] = {
@@ -97,9 +98,10 @@ class GitHubAdapter:
         self.connection.use_config(slot)
 
     def configure(self, config: dict, secrets) -> None:
-        """Validate and persist the console config. app_id/app_slug are kept in
-        the encrypted slot too, so a container restart does not lose them
-        (the broker sends config only on enable and on change). A secret that
+        """Validate and persist the console config. app_id, app_slug and
+        private_key_path are kept in the encrypted slot too, so a container
+        restart does not lose them (the broker sends config only on enable
+        and on change). A secret that
         does not validate is wiped again before refusing, so a bad paste is
         never left behind to be used."""
         if not isinstance(config, dict):
@@ -118,8 +120,21 @@ class GitHubAdapter:
         if pat and not PAT_RE.fullmatch(pat):
             self._slot.set("pat", None)
             raise AdapterError(400, "pat does not look like a GitHub token")
+        key_path = config.get("private_key_path")
+        if key_path in (None, ""):
+            key_path = None
+        else:
+            # Refused unless it is a readable RSA key INSIDE the key directory:
+            # a console-set path must never become a way to read other files.
+            try:
+                load_private_key(read_key_file(key_path, self._key_dir))
+            except BadKeyPath as exc:
+                raise AdapterError(400, str(exc)) from None
+            except InvalidKey as exc:
+                raise AdapterError(400, f"private_key_path: {exc}") from None
         self._slot.set("app_id", app_id)
         self._slot.set("app_slug", slug)
+        self._slot.set("private_key_path", key_path)
         self.connection.reset()
 
     def status(self) -> dict:

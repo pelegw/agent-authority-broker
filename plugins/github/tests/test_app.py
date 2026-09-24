@@ -26,10 +26,13 @@ def test_create_app_from_env(environ):
     assert s["connected"] is False and s["enforcement"] == "proxy"
 
 
-def test_the_key_path_comes_from_env(environ, tmp_path):
-    environ["GITHUB_APP_PRIVATE_KEY_PATH"] = str(tmp_path / "app.pem")
-    assert main.build_adapter(environ).connection._key_path == str(tmp_path / "app.pem")
-    assert main.build_adapter({}).connection._key_path is None
+def test_no_github_value_comes_from_env(environ):
+    # Configuration principle: the key file location is console config
+    # (private_key_path), confined to the compose bind's mount point.
+    environ["GITHUB_APP_PRIVATE_KEY_PATH"] = "/proc/self/environ"
+    adapter = main.build_adapter(environ)
+    assert adapter.connection._key_dir == "/run/secrets/github"
+    assert adapter.connection.mode() is None
 
 
 def test_boot_refuses_without_a_token(environ):
