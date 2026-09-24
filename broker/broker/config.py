@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # How many delegation hops below a root key are allowed. Each hop can only
     # narrow, but deep chains are hard for a human to reason about.
     max_delegation_depth: int = 3
+    # How many live child keys one key may have delegated at once. Delegation
+    # needs no human, so this (with the depth limit) keeps any tree bounded.
+    max_live_delegations: int = 25
 
     # How often the scheduler looks for due queued actions.
     scheduler_tick_seconds: int = 15

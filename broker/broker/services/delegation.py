@@ -54,6 +54,7 @@ from ..authority.store import GrantInvariantError
 from ..errors import PolicyError
 from ..ledger import rate_limiter
 from ..plugins.registry import get_registry
+from ..runtime_settings import runtime_settings
 from .agent import clipped_error, live_children, normalize_request, visible_caps
 from .deny_input import normalize_denies
 
@@ -63,10 +64,6 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
 # Longest lifetime a delegation may ask for (also keeps the arithmetic far
 # from SQLite's integer range). Always further capped by the caller's own.
 MAX_HOURS = 24 * 365 * 10
-# Live direct children one key may hold at once. Delegation needs no human,
-# so without a cap one agent could mint key rows without end; with it (and
-# the depth limit) a tree stays bounded and reviewable in the console.
-MAX_LIVE_CHILDREN = 25
 _GRANT_LIST_LIMIT = 1000
 
 
@@ -161,8 +158,13 @@ def delegate(auth, name: str, capabilities: list, reason: str = "",
     own_denies = normalize_denies(denies, strict=True)
     requested = normalize_request(capabilities)
     reason = (reason or "")[:1000]
-    if live_children(auth) >= MAX_LIVE_CHILDREN:
-        raise PolicyError(409, f"this key already has {MAX_LIVE_CHILDREN} live delegations; "
+    # Live direct children one key may hold at once (an operator setting).
+    # Delegation needs no human, so without a cap one agent could mint key
+    # rows without end; with it (and the depth limit) a tree stays bounded
+    # and reviewable in the console.
+    cap = runtime_settings().max_live_delegations
+    if live_children(auth) >= cap:
+        raise PolicyError(409, f"this key already has {cap} live delegations; "
                                "revoke one first", "too_many_delegations")
 
     lattice = get_registry().lattice()

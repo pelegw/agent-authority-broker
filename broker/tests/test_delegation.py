@@ -14,7 +14,7 @@ from broker import auth, db
 from broker.authority import store
 from broker.plugins import settings
 
-from .conftest import cap
+from .conftest import CSRF_HEADERS, cap
 from .mcp_helpers import call, live, text_json, tools  # noqa: F401
 
 LIST = "/v1/targets/echo/actions/list_items"
@@ -149,9 +149,10 @@ def test_delegating_spends_the_callers_rate(client, echo_local, make_agent):
     assert r.status_code == 429 and r.json()["code"] == "rate_limited"
 
 
-def test_live_children_are_capped(client, parent, monkeypatch):
-    from broker.services import delegation
-    monkeypatch.setattr(delegation, "MAX_LIVE_CHILDREN", 2)
+def test_live_children_are_capped_by_the_operator_setting(client, parent, admin_headers):
+    r = client.patch("/v1/admin/settings", json={"settings": {"max_live_delegations": 2}},
+                     headers={**admin_headers, **CSRF_HEADERS})
+    assert r.status_code == 200, r.text
     c = [cap(["list_items"], selector={"room": ["r1"]})]
     first = delegate(client, parent.headers, c, name="a").json()
     assert delegate(client, parent.headers, c, name="b").status_code == 201
@@ -227,6 +228,29 @@ def test_depth_cap(client, live, parent):
     res = call(live, deepest, "delegate", {"name": "d4", "capabilities": [
         cap(["list_items"], selector={"room": ["r1"]})]})
     assert res["isError"] is True and text_json(res) == r.json()
+
+
+def test_depth_limit_follows_the_console_setting(client, live, parent, admin_ctx):
+    """max_delegation_depth is read per call through runtime_settings: raising
+    it lets a deeper key delegate, lowering it stops keys already deeper than
+    the new limit (they fail authentication) with no writes to their rows."""
+    from broker import runtime_settings as rs
+    headers = chain(client, parent, 2)
+    rs.update(admin_ctx, {"max_delegation_depth": 2})
+    deepest = headers[-1]
+    assert client.get("/v1/me", headers=deepest).json()["can_delegate"] is False
+    assert "delegate" not in tools(live, deepest)
+    assert delegate(client, deepest, [cap(["list_items"], selector={"room": ["r1"]})],
+                    name="d3").json()["code"] == "depth_exceeded"
+    rs.update(admin_ctx, {"max_delegation_depth": 5})
+    assert client.get("/v1/me", headers=deepest).json()["can_delegate"] is True
+    assert delegate(client, deepest, [cap(["list_items"], selector={"room": ["r1"]})],
+                    name="d3").status_code == 201
+    rs.update(admin_ctx, {"max_delegation_depth": 1})
+    assert client.get("/v1/me", headers=headers[1]).status_code == 200      # depth 1
+    assert client.get("/v1/me", headers=deepest).status_code == 401         # depth 2
+    rs.update(admin_ctx, {"max_delegation_depth": None})                    # back to 3
+    assert client.get("/v1/me", headers=deepest).status_code == 200
 
 
 def test_names_are_namespaced_and_validated(client, parent):

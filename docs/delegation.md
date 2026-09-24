@@ -157,15 +157,20 @@ grant.
 
 ## Limits and settings
 
-- `max_delegation_depth` (default 3) is read through
-  `auth.max_delegation_depth()`, the one accessor shared by authentication,
-  key creation, `delegate`, `get_my_access` and the MCP tool list.
+- `max_delegation_depth` (default 3, console-editable 0-10, see
+  `docs/configuration.md`) is read per call through
+  `auth.max_delegation_depth()` -> `runtime_settings()`, the one accessor
+  shared by authentication, key creation, `delegate`, `get_my_access` and the
+  MCP tool list. Raising it lets deeper keys delegate at once; lowering it
+  makes every key deeper than the new limit fail authentication on its next
+  request (nothing is written to their rows, so raising it again restores
+  them).
 - A delegation may ask for at most 87600 hours (10 years), and never beyond
   the caller's own expiry; its grants expire with the key.
 - Every `delegate` attempt, granted or refused, spends one call of the
   caller's per-minute rate (the same budget as its actions): `429
-  rate_limited`. A key may hold at most 25 live direct children
-  (`services/delegation.MAX_LIVE_CHILDREN`): `409 too_many_delegations`
+  rate_limited`. A key may hold at most `max_live_delegations` live direct
+  children (default 25, console-editable 1-200): `409 too_many_delegations`
   until one is revoked or expires. With the depth limit, that keeps any tree
   bounded without a human in the loop.
 - An agent's `denies` must name registered targets and their declared
