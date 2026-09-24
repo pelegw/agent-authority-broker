@@ -137,3 +137,34 @@ def set_health(plugin_id: str, health: dict, connected: bool | None) -> None:
             conn.execute("UPDATE plugins SET last_health = ?, connected = ?, updated_at = ?"
                          " WHERE id = ?", (json.dumps(health, sort_keys=True),
                                            1 if connected else 0, int(time.time()), plugin_id))
+
+
+# The `enforcement` values a plugin may report (docs/plugin-api.md, /status);
+# only these are carried over a failed refresh.
+ENFORCEMENT_VALUES = ("target", "mixed", "proxy")
+
+
+def set_health_failure(plugin_id: str, error: str, status: int) -> dict:
+    """Store a health refresh that FAILED (plugin unreachable, bad answer).
+
+    The record says `healthy: false` and keeps `connected` as it was (as
+    set_health(..., None) does). It also keeps the last `enforcement` the
+    plugin successfully reported: the failure says nothing about how the
+    plugin's credential enforces, and dropping the field would let
+    policy.enforced_where fall back to the manifest's claim, so a plugin
+    last seen on a PAT (proxy) would be reported as target-enforced the
+    moment it came back without another refresh. Returns the stored record."""
+    with db.connect() as conn:
+        row = conn.execute("SELECT last_health FROM plugins WHERE id = ?",
+                           (plugin_id,)).fetchone()
+        try:
+            previous = json.loads(row["last_health"] or "{}") if row else {}
+        except ValueError:
+            previous = {}
+        health: dict[str, Any] = {"healthy": False, "error": error, "status": status}
+        kept = previous.get("enforcement") if isinstance(previous, dict) else None
+        if kept in ENFORCEMENT_VALUES:
+            health["enforcement"] = kept
+        conn.execute("UPDATE plugins SET last_health = ?, updated_at = ? WHERE id = ?",
+                     (json.dumps(health, sort_keys=True), int(time.time()), plugin_id))
+    return health
