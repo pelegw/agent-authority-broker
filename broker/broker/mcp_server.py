@@ -90,10 +90,12 @@ async def call_tool(name: str, arguments: dict | None) -> types.CallToolResult:
         return await _run(mcp_tools.dispatch, _auth(), name, arguments or {})
     except PolicyError as exc:
         return mcp_tools.text_result(exc.body(), error=True)
-    except Exception:
-        # Log it here (without the arguments, which may carry message text),
-        # but never hand the agent a trace or an internal message.
-        log.exception("MCP tool failed %s", kv(tool=name))
+    except Exception as exc:
+        # Log the failure class here (never the arguments, which may carry
+        # message text, and never an exception message that may quote them);
+        # the traceback is DEBUG-only, and the agent gets no internals.
+        log.error("MCP tool failed %s", kv(tool=name, error=type(exc).__name__))
+        log.debug("MCP tool traceback %s", kv(tool=name), exc_info=True)
         return mcp_tools.text_result({"error": "internal error", "code": "internal"},
                                      error=True)
 
@@ -138,9 +140,10 @@ async def read_resource(uri) -> list[ReadResourceContents]:
         raise _mcp_error(types.INVALID_PARAMS, "no such resource")
     try:
         text = await _run(agent.skill_doc, auth, _request_base_url())
-    except Exception:
-        # Same rule as tools: log here, never hand the agent internals.
-        log.exception("MCP resource failed %s", kv(resource=SKILL_URI))
+    except Exception as exc:
+        # Same rule as tools: failure class at ERROR, traceback at DEBUG only.
+        log.error("MCP resource failed %s", kv(resource=SKILL_URI, error=type(exc).__name__))
+        log.debug("MCP resource traceback %s", kv(resource=SKILL_URI), exc_info=True)
         raise _mcp_error(types.INTERNAL_ERROR, "internal error") from None
     return [ReadResourceContents(content=text, mime_type="text/markdown")]
 
