@@ -7,7 +7,10 @@ lives only in `VERSION`.
 
 First release as the Agent Authority Broker, the successor of WA_GW 0.1.0.
 Clean break: new repo, new names (`aab_` keys, namespaced tools and endpoints),
-no migration from WA_GW's database.
+no migration from WA_GW's database. Agents hold no credentials and neither
+does the broker: each target runs in its own plugin container, every call is
+evaluated live against `P(owner) ∩ G(grant chain) ∩ R(role)`, and every
+decision is recorded in a hash-chained log.
 
 ### Added (phase 0: skeleton)
 - Repository layout, single-source `VERSION`, hatch dynamic version.
@@ -170,13 +173,131 @@ no migration from WA_GW's database.
   and channel chats so they can be hidden and read; sends to them are 400.
   A canonical user part is required, so no alias spelling can name a
   hidden chat.
+- Follow-ups: `check_new_messages` without a cursor is a bootstrap
+  answered at once (holding it skipped whatever arrived mid-wait);
+  `get_media` is served as a `nosniff` attachment named after the message
+  id, with active types downgraded to `application/octet-stream`.
 - The manifest's `config_schema` is empty (sidecar URL, token and archive
   path are deployment env); the broker's vendored copy must stay
   byte-identical.
 - Image: `python:3.12-slim`, uid 10001, one uvicorn worker, TCP
   healthcheck. The container reads the generic `PLUGIN_TOKEN`,
   `PLUGIN_SECRETS_KEY` and `PLUGIN_SECRETS_DIR`; an empty `PLUGIN_TOKEN`
-  or `SIDECAR_TOKEN` refuses to boot. CI job for the plugin. `docs/plugins/whatsapp.md`.
+  or `SIDECAR_TOKEN` refuses to boot. CI job for the plugin.
+  `docs/plugins/whatsapp.md`.
+
+### Added (phase 4: owner console, pass 1)
+- `/admin` and every `/admin/...` path serve one static page
+  (`templates/console.html`: vanilla JS, hash router, no build step).
+  `GET /auth/status` picks setup, login or the app; cookie auth with
+  `X-Requested-With: aab-console` on every call; a 401 anywhere returns to
+  the login page.
+- Views: Overview (counts, a card per plugin, chain verification),
+  Requests (drafts rendered from the manifest's `summary_template` with
+  the key chain, note and every parameter; permission requests as
+  readable capabilities, each stating the budget it adds), Scheduled,
+  Decisions (filters, key and grant chains, `enforced_where`, verify),
+  Plugins (enable/disable, config form from `config_schema` with
+  write-only secret fields, health, connection panels for `sidecar_qr`,
+  `github_app` and `google_oauth`), Agent keys (capability editor
+  generated from the manifests, denies, plaintext once, edit, rotate,
+  disable, revoke grants), Hidden resources (picked by name, stored by
+  id), Account (password, admin tokens, sessions). Delegations, Channels
+  and Settings are placeholders until console pass 2.
+- `GET /v1/admin/plugins` carries a manifest projection
+  (`plugins/manifest_view.py`) that the editors and approval cards are
+  built from.
+- A fresh nonce CSP per response (`form-action 'none'`, `base-uri 'none'`,
+  `frame-ancestors 'none'`), because the page shows agent-written text to
+  the person who approves those agents; no HTML-string sinks or inline
+  handlers (tested); bidi override controls shown as visible markers;
+  plugin-supplied links must be `https:`. `docs/console.md`.
+
+### Added (phase 5: delegation)
+- `delegate`, `list_my_delegations` and `revoke_delegation` over REST
+  (`/v1/delegations`) and MCP. A child key is carved out of the caller's
+  own authority: the request is narrowed against each live grant's current
+  effective view (chain meet, ceiling, every ancestor's role, denies), and
+  anything that does not fit is `400 clipped` with `clipped` and `allowed`
+  (hidden and denied ids removed). Child keys are named
+  `<caller>/<name>`; role, rate and lifetime are at most the caller's
+  (`400 exceeds_parent`); depth is capped (`400 depth_exceeded`, and the
+  MCP tool is not listed at the cap); each attempt spends the caller's
+  rate; a half-made delegation is undone (`409 conflict`).
+- `revoke_delegation` reaches descendants only (anything else is 404), and
+  an agent can only ever move a grant to `revoked`.
+- `GET /v1/admin/keys/tree`: every key as a forest with status, liveness
+  and grants; unreachable keys flagged as orphans. `get_my_access` gains
+  `parent`, `delegations` and `can_delegate`.
+- Delegation limits are operator settings read per call:
+  `max_delegation_depth` (default 3) and `max_live_delegations`
+  (default 25, 1-200).
+- Hypothesis properties 10 and 11 driven through the REST and MCP layers
+  (`tests/test_delegation_properties.py`). `docs/delegation.md`.
+
+### Added (phase 5: generated skill doc)
+- The agent guide is generated from the manifests, REST first: `GET /skill`
+  and `/skill.md` (every enabled plugin; a key is required in public mode),
+  `GET /v1/me/skill` (filtered to the calling key, with its current
+  capabilities), and the MCP resource `broker://skill` (the same text).
+- `aab skill build` renders every vendored manifest into
+  `integrations/claude-skill/agent-authority-broker/SKILL.md`; the CI
+  skill-drift job rebuilds it and fails on any difference.
+
+### Changed (phase 5: agent requests default to draft)
+- A capability an agent asks for (`request_permission` or `delegate`,
+  over REST or MCP) without a `mode` is read as `"mode": "draft"`: its
+  writes queue for a human unless the agent asks for `"direct"`
+  explicitly, so a forgotten field never buys autonomy. Reads stay
+  direct. An undraftable write asked for without a mode is `400
+  invalid_capabilities`. Owner-authored grants keep `direct` when the mode
+  is omitted.
+
+### Added (phase 6: GitHub plugin service; merging, not yet on `dev`)
+- `plugins/github` (`aab_plugin_github`): the `github_app` connection
+  (install URL with a single-use state nonce; the installation is verified
+  with an App JWT before it is stored) mints an installation token per
+  call for exactly the addressed repositories and the action's
+  `target_permissions`, refuses a token wider than requested, and caches
+  it in memory only. A PAT fallback is reported as `proxy` for every
+  dimension. Hidden repositories are 404 before any token is minted;
+  branch patterns are checked by the plugin. The App key is pasted in the
+  console or read from the optional read-only `GITHUB_APP_KEY_DIR` bind.
+  `docs/plugins/github.md`.
+
+### Added (phase 7: Google plugin service)
+- `plugins/google` (`aab_plugin_google`): one container hosting `gmail`,
+  `gcal` and `gdrive`, which share one OAuth client and one refresh token.
+- `google_oauth` connection: consent for the union of the enabled plugins'
+  `target_permissions` (offline, incremental); a 32-byte state nonce stored
+  hashed with the redirect URI, 10-minute TTL, consumed by any finish
+  attempt; the code exchanged with the plugin's own client secret; the
+  refresh token encrypted in the shared `google` slot.
+- Each call gets an access token for exactly its scope set, refreshed with
+  `scope=<subset>` and cached in memory per scope set. A token with more
+  scopes than requested is refused and not cached; a scope the consent did
+  not grant is `403 scopes not granted; reconnect`.
+- The adapters enforce every narrowing and constraint in the plugin, with
+  the broker's `resource_ref` post-filter behind them: Gmail labels (query
+  terms and post-filter), contacts, domains, date window, attachments,
+  bcc, read state; Calendar calendars (`primary` resolved first),
+  attendees, free/busy visibility, time window, private and others'
+  events, hidden events; Drive folder subtree by parent-chain walk
+  (incomplete chains fail closed), mime types, shared drives, file
+  content, download size, external sharing, no shortcut following.
+- Flags are named so that `true` is the permissive side (`private_events`,
+  `others_events`, `file_content` instead of the plan's `hide_private`,
+  `own_events_only`, `metadata_only`), because the algebra drops a flag's
+  `true` as top; a lint enforces it. The plan's `hide_keyword` is dropped
+  (a deny list); events are hideable by id instead.
+- Platform features the lane needed: shared config fields
+  (`config_schema[].shared`, stored once in the connection's slot), and an
+  OAuth `redirect_uri` computed by the broker and passed in
+  `/connect/start` (public mode: from `SITE_DOMAIN`, which the public
+  overlay now gives the broker; local mode: the address the console used).
+- `plugin-google` receives only the generic `PLUGIN_TOKEN`,
+  `PLUGIN_SECRETS_KEY` and `PLUGIN_SECRETS_DIR`. CI job for the plugin.
+  `docs/plugins/google.md`.
 
 ### Added (phase 8: simulation)
 - Approval-volume simulation (`broker/tests/simulation`, `aab simulate`):
@@ -186,11 +307,67 @@ no migration from WA_GW's database.
   `docs/approval-volume.md` also covers the 200-budget run and how
   budgets add up across approved grants.
 
+### Fixed
+- OAuth connect could never finish: `GET /oauth/callback/{service}`
+  required the owner session, but the SameSite=Strict session cookie is
+  not sent on the provider's cross-site redirect. The callback page is now
+  served without an owner credential (Cloudflare Access still applies in
+  public mode) and holds no data: it strips `code` and `state` from the
+  address bar and POSTs them same-origin to the admin-guarded
+  `connect/finish` (session cookie and CSRF header). Without a live
+  session it asks the owner to log in in another tab and retry, keeping
+  the code in memory only.
+- Permission views (`list_my_permissions`, `get_permission_status`, and
+  the `allowed` list of a `400 clipped`) no longer name an id the owner
+  hid or denied after granting it.
+
 ### Documentation
+- `README.md` rewritten for the release: pitch, architecture, quick start,
+  plugins, authority model, agent surface, console, deployment,
+  development, status and caveats.
 - `docs/architecture.md`: system description, deployment topology, data
   flow diagrams with numbered flows, security notes per trust boundary,
   glossary, build status and open points.
 - `docs/auth.md`, `docs/grant-algebra.md`, `docs/manifest-schema.md`,
   `docs/plugin-api.md`, `docs/mcp.md`, `docs/configuration.md`,
-  `docs/deployment.md`, `docs/plugins/whatsapp.md`,
-  `docs/approval-volume.md`.
+  `docs/deployment.md` (with a post-`docker compose up` verification
+  checklist), `docs/plugins/whatsapp.md`, `docs/plugins/google.md`,
+  `docs/plugins/github.md` (with the GitHub plugin), `docs/console.md`,
+  `docs/delegation.md`, `docs/approval-volume.md`.
+- `docs/platform-thesis.md`: what the second and third plugins cost the
+  platform, measured from the lanes' diffs. Engine files touched: zero for
+  each.
+
+### Known limitations
+- Not yet verified with Docker running: the image builds, and
+  plugin-whatsapp reading the sidecar's WAL-mode archive through its
+  read-only mount (`docs/deployment.md` lists the checks).
+- Google downscoped refresh is not yet verified against the real token
+  endpoint; if Google ignores the requested subset, the `scopes` narrowing
+  moves to `proxy`.
+- Console changes to `mcp_allowed_hosts_extra` take effect at the next
+  broker start.
+- Budgets belong to grants, so each approved expansion adds its own daily
+  budget to a key (approval cards state the budget a request adds).
+- WhatsApp goes through whatsmeow, an unofficial client; its session is
+  the one credential not encrypted at rest.
+
+### Upgrade notes
+- This is a new repository and a new deployment, not an upgrade in place.
+  Nothing migrates from WA_GW: not its database, its `wagw_` keys, its
+  grants or its private-chat list. Pair WhatsApp again by QR, create
+  `aab_` keys with capabilities in the console, re-hide private chats
+  under Hidden resources, and install the new skill
+  (`integrations/claude-skill/agent-authority-broker`) in place of
+  WA_GW's. Tool and endpoint names are namespaced
+  (`whatsapp_send_message`, `POST /v1/targets/whatsapp/actions/send_message`);
+  there are no aliases for the old ones.
+- Secrets are generated, never copied or typed: run
+  `python scripts/init_secrets.py` (or let `deploy/push.sh` run it on the
+  host). WA_GW's `ADMIN_TOKEN` has no successor in `.env`: create the owner
+  account with the one-time `SETUP_TOKEN`, then mint `aab_admin_` tokens in
+  the console for the CLI.
+- Everything else is configured in the console: the Telegram bot token
+  (WA_GW's `TELEGRAM_BOT_TOKEN` env var is gone), GitHub App and Google
+  OAuth client credentials, plugin enable and config, and the operator
+  settings. `docs/configuration.md` lists what stays in files and why.
