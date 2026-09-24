@@ -42,9 +42,10 @@ direct on `*`, and writes direct on the 20 known rooms with
 `budget.per_day` = 1000 (the default; `--per-day` changes it). A write
 to an expansion room gets a 403
 `out_of_grant` (hint `request_permission`). The agent then asks for
-`post_item` on exactly that room, with the same budget. The owner approves
-through `decide_grant`, and the agent retries. From then on, writes to
-that room are direct.
+`post_item` on exactly that room, with the same budget and an explicit
+`"mode": "direct"` (an agent request without a mode asks for draft). The
+owner approves through `decide_grant`, and the agent retries. From then on,
+writes to that room are direct.
 
 **Model B: per-action.** The reads are the same. Writes use draft mode on
 every room, so each write goes into the queue as a pending action, and the

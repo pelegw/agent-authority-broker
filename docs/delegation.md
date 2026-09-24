@@ -32,6 +32,19 @@ and answers `201 {"key_id", "name", "key", "expires_at", "role",
 and `capabilities` are required; `role`, `rate_per_min` and the lifetime
 default to the caller's own.
 
+**A capability without `mode` asks for draft.** Every agent-originated
+capability (`delegate` and `request_permission` alike, over REST or MCP)
+that omits `mode` is read as `"mode": "draft"`: its writes and destructive
+actions queue for a human even if the caller could act directly; reads stay
+direct (the algebra splits them out). Autonomy has to be asked for
+explicitly with `"mode": "direct"`, so a forgotten field never buys it. A
+write the manifest cannot draft (`modes: [direct]`) would be unreachable in a
+draft capability, so asking for one without a mode is a `400
+invalid_capabilities` whose hint says to set `"mode": "direct"`. Owner-authored
+grants (creating or editing a key in the console or admin API) are not
+affected: a mode-less capability there stays `direct`.
+(`services/agent.normalize_request`.)
+
 ## How a chain is built
 
 A delegation writes two kinds of rows, and nothing else:

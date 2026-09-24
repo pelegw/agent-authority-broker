@@ -43,6 +43,14 @@ def test_skill_has_a_section_per_enabled_plugin(client, echo_local):
     assert "Base URL: `http://testserver`" in text
 
 
+def test_the_draft_default_is_documented(client, echo_local):
+    text = client.get("/skill").text
+    assert "Omit `mode` and you get draft" in text
+    assert 'Ask for direct explicitly (`"mode": "direct"`)' in text
+    committed = COMMITTED.read_text(encoding="utf-8")
+    assert "Omit `mode` and you get draft" in committed
+
+
 def test_section_disappears_when_the_plugin_is_disabled(client, echo_local):
     settings.set_enabled("echo", False)
     text = client.get("/skill").text

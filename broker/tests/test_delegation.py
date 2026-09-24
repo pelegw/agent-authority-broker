@@ -164,12 +164,39 @@ def test_live_children_are_capped_by_the_operator_setting(client, parent, admin_
 
 def test_draft_parent_can_only_delegate_draft(client, echo_local, make_agent):
     p = make_agent([cap(["post_item"], selector={"room": ["r1"]}, mode="draft")])
-    direct = cap(["post_item"], selector={"room": ["r1"]})
+    direct = cap(["post_item"], selector={"room": ["r1"]}, mode="direct")
     assert delegate(client, p.headers, [direct]).json()["code"] == "clipped"
     r = delegate(client, p.headers, [{**direct, "mode": "draft"}])
     assert r.status_code == 201
     queued = post_room(client, bearer(r.json()), "r1")
     assert queued.status_code == 202 and queued.json()["status"] == "pending_approval"
+
+
+def test_a_delegated_write_without_a_mode_is_draft(client, parent):
+    """Omitting `mode` asks for draft: the child's writes queue for a human
+    even though its parent could act directly. Reads stay direct."""
+    r = delegate(client, parent.headers,
+                 [cap(["list_items", "post_item"], selector={"room": ["r1"]})], name="quiet")
+    assert r.status_code == 201, r.text
+    assert sorted((c["actions"], c["mode"]) for c in r.json()["capabilities"]) == [
+        (["list_items"], "direct"), (["post_item"], "draft")]
+    child = bearer(r.json())
+    assert list_room(client, child, "r1").status_code == 200
+    queued = post_room(client, child, "r1")
+    assert queued.status_code == 202 and queued.json()["status"] == "pending_approval"
+    # Asking for direct explicitly is what buys autonomy.
+    loud = bearer(delegate(client, parent.headers, [cap(["post_item"], selector={
+        "room": ["r1"]}, mode="direct")], name="loud").json())
+    assert post_room(client, loud, "r1").status_code == 200
+
+
+def test_a_write_that_cannot_be_drafted_needs_an_explicit_mode(client, echo_local,
+                                                               make_agent):
+    p = make_agent([cap(["touch_item"])])
+    r = delegate(client, p.headers, [cap(["touch_item"])])
+    assert r.status_code == 400 and r.json()["code"] == "invalid_capabilities"
+    assert "touch_item" in r.json()["error"] and "direct" in r.json()["hint"]
+    assert delegate(client, p.headers, [cap(["touch_item"], mode="direct")]).status_code == 201
 
 
 def test_the_childs_role_bounds_what_it_can_be_given(client, parent):
@@ -184,12 +211,15 @@ def test_the_childs_role_bounds_what_it_can_be_given(client, parent):
 
 
 def test_role_rate_and_lifetime_are_at_most_the_parents(client, echo_local, make_agent):
-    soon = int(time.time()) + 3600
+    # Two hours plus slack: the 1-hour child below must fit even when the
+    # clock ticks between creating the parent and delegating (a full-suite
+    # run once hit exactly that with a parent expiring in one hour).
+    soon = int(time.time()) + 2 * 3600 + 600
     p = make_agent([cap(["list_items"], selector={"room": ["r1"]})], role="read-act", rate=10,
                    expires_at=soon)
     c = [cap(["list_items"], selector={"room": ["r1"]})]
     for kw, field in (({"role": "full"}, "role"), ({"rate_per_min": 11}, "rate_per_min"),
-                      ({"expires_in_hours": 2}, "expires_in_hours")):
+                      ({"expires_in_hours": 3}, "expires_in_hours")):
         r = delegate(client, p.headers, c, name=f"x{field[:4]}", **kw)
         assert r.status_code == 400, (kw, r.text)
         assert r.json()["code"] == "exceeds_parent" and r.json()["field"] == field
@@ -343,7 +373,8 @@ def test_owner_disabling_the_parent_kills_child_and_grandchild(client, admin_hea
 
 def test_lowering_the_parents_role_bounds_the_child_at_once(client, admin_headers, parent):
     child = bearer(delegate(client, parent.headers,
-                            [cap(["post_item"], selector={"room": ["r1"]})]).json())
+                            [cap(["post_item"], selector={"room": ["r1"]}, mode="direct")]
+                            ).json())
     assert post_room(client, child, "r1").status_code == 200
     client.patch(f"/v1/admin/keys/{parent.key_id}", json={"role": "read-draft"},
                  headers=admin_headers)
@@ -408,7 +439,7 @@ def test_delegated_request_permission_cannot_exceed_its_parent(client, admin_hea
         cap(["post_item"], selector={"room": ["r3"]})]}, headers=child)
     assert beyond.status_code == 400 and beyond.json()["code"] == "clipped"
     inside = client.post("/v1/permissions", json={"capabilities": [
-        cap(["post_item"], selector={"room": ["r2"]})]}, headers=child)
+        cap(["post_item"], selector={"room": ["r2"]}, mode="direct")]}, headers=child)
     assert inside.status_code == 202
     client.post(f"/v1/admin/grants/{inside.json()['id']}/approve", headers=admin_headers)
     assert post_room(client, child, "r2").status_code == 200

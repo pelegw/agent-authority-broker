@@ -128,9 +128,11 @@ GENERIC: tuple[Generic, ...] = (
                                                              a.limit)),
     Generic("request_permission",
             "Ask the owner for more authority. capabilities = list of capability "
-            "objects ({target, actions, selector?, constraints?, mode?, budget?}). "
-            "Returns {id, status: pending}; a request beyond what your parent can "
-            "give is refused with the clipped and allowed capabilities.",
+            "objects ({target, actions, selector?, constraints?, mode?, budget?}); omit "
+            "mode and writes are draft (queued for approval), ask for mode: direct "
+            "explicitly to act on your own. Returns {id, status: pending}; a request "
+            "beyond what your parent can give is refused with the clipped and allowed "
+            "capabilities.",
             PermissionBody,
             lambda auth, a: agent.request_permission(auth, a.capabilities, a.reason,
                                                      a.expires_in_hours),
@@ -142,7 +144,8 @@ GENERIC: tuple[Generic, ...] = (
     Generic("delegate",
             "Mint a child key for a sub-agent, carved out of your own authority: you can "
             "only narrow (capabilities, role, rate and lifetime at most yours; your denies "
-            "carry over). No human approval. Returns {key_id, name, key, expires_at, "
+            "carry over; omit mode and its writes are draft). No human approval. "
+            "Returns {key_id, name, key, expires_at, "
             "capabilities}; the key is shown once. A request beyond what you hold is "
             "refused with the clipped and allowed capabilities.",
             DelegateBody,

@@ -259,6 +259,10 @@ def _request_permission(base: str, manifests: list[Manifest], reach: Reach) -> s
         "(a list of ids; absent = any). `constraints` are the target's scalar limits. "
         "`mode` is `direct` or `draft`. `expires_at` is unix seconds. `budget` is "
         '`{"per_minute"?, "per_day"?}`. Each target section below names its dimensions.',
+        "Omit `mode` and you get draft: your writes will queue for a human's approval. "
+        'Ask for direct explicitly (`"mode": "direct"`) when the task needs to act on its '
+        "own. Reads are always direct. A write that cannot be drafted needs "
+        '`"mode": "direct"` (without it the request is a 400).',
         "Ask only for what the task needs, once, then wait. A request beyond what your "
         "parent can give is `400 clipped`, listing `clipped` (what exceeded) and `allowed` "
         "(what could be granted).",
@@ -273,8 +277,9 @@ def _delegate(base: str, manifests: list[Manifest], reach: Reach) -> str:
         code(curl(base, "POST", "/v1/delegations", body)),
         '`201 {"key_id", "name", "key", "expires_at", "capabilities"}` mints a child key for '
         "a sub-agent, carved out of your own authority:",
-        "- Its capabilities must fit inside yours (same format as `request_permission`); "
-        "anything more is `400 clipped` and nothing is created.\n"
+        "- Its capabilities must fit inside yours (same format as `request_permission`, "
+        "and the same default: omit `mode` and its writes are draft); anything more is "
+        "`400 clipped` and nothing is created.\n"
         "- Its `role`, `rate_per_min` and lifetime are at most yours (`400 exceeds_parent`); "
         "they default to yours. Your denies always carry over; `denies` "
         '(`{"<target>": {"<kind>": ["<id>"]}}`) adds more.\n'

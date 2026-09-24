@@ -15,6 +15,7 @@ the import graph): an agent has no path to approving anything.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 
 from .. import db, notify
 from ..actions import queue
@@ -261,15 +262,45 @@ def clipped_error(message: str, hint: str, requested, allowed: list[dict]) -> Po
                        extra={"clipped": [to_json(c) for c in requested], "allowed": allowed})
 
 
+def _default_to_draft(raw, manifests) -> object:
+    """An agent's capability with no `mode` asks for draft: its writes and
+    destructive actions queue for a human unless the agent says `direct`
+    explicitly (reads are always direct; normalize splits them out). Least
+    privilege by default: forgetting a field must never buy autonomy.
+
+    A write that cannot be drafted (manifest `modes: [direct]`) would be
+    unreachable in a draft capability, so asking for one without a mode is a
+    400 that says to ask for direct explicitly, never a silent no-op grant."""
+    if not isinstance(raw, Mapping) or "mode" in raw:
+        return raw                    # explicit (or malformed: from_json reports it)
+    m = manifests.get(raw.get("target"))
+    if m is not None:
+        try:
+            names = m.expand_actions(raw.get("actions") or ())
+        except (ManifestError, TypeError):
+            names = frozenset()       # normalize reports the bad action list
+        stuck = sorted(n for n in names if m.action(n).side_effect != "read"
+                       and "draft" not in m.action(n).effective_modes)
+        if stuck:
+            raise PolicyError(
+                400, f"{m.id}: {', '.join(stuck)} cannot be drafted; without a mode a "
+                     "capability asks for draft", "invalid_capabilities",
+                hint='set "mode": "direct" explicitly to ask for it')
+    return {**raw, "mode": "draft"}
+
+
 def normalize_request(capabilities) -> list[Capability]:
     """Parse and normalize capability JSON an agent sent, against the ENABLED
-    plugins (a disabled plugin cannot be asked for). 400 on anything invalid
-    or on a request that normalizes to nothing."""
+    plugins (a disabled plugin cannot be asked for). A capability without
+    `mode` asks for draft (see _default_to_draft). 400 on anything invalid or
+    on a request that normalizes to nothing. Owner-authored grants do not
+    come through here and keep their explicit (or `direct`) mode."""
     if not isinstance(capabilities, list) or not capabilities:
         raise PolicyError(400, "capabilities must be a non-empty list", "invalid_capabilities")
+    manifests = get_registry().enabled_manifests()
     try:
-        requested = normalize_all([from_json(c) for c in capabilities],
-                                  get_registry().enabled_manifests())
+        requested = normalize_all([from_json(_default_to_draft(c, manifests))
+                                   for c in capabilities], manifests)
     except (ValueError, ManifestError) as exc:
         raise PolicyError(400, f"invalid capability: {exc}", "invalid_capabilities") from exc
     if not requested:
