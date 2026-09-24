@@ -100,4 +100,4 @@ session's attribution trailers.
 - [x] 5. Delegation + generated skill doc (CI drift job is real) + draft-mode default for agent requests
 - [x] 6. GitHub plugin service (App installation tokens per call; PAT fallback reported as proxy)
 - [x] 7. Google plugin service (Gmail, Calendar, Drive over one OAuth connection) + `docs/platform-thesis.md`
-- [ ] 8. Simulation (done), release docs (done), tag 0.2.0 (pending: SQLite flake hunt, Docker verification)
+- [ ] 8. Simulation (done), release docs (done), tag 0.2.0 (SQLite flake fixed; pending: final suite run, Docker verification)

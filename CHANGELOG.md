@@ -384,7 +384,7 @@ decision is recorded in a hash-chained log.
   value counts as `proxy`. Only a plugin that has never reported keeps the
   manifest's claim.
 - The intermittent SQLite failure seen in test runs (the "SQLite
-  flake"): fix in progress.
+  flake"): fixed. `PRAGMA journal_mode=WAL` is set once at `init()` instead of on every connection (two first connections racing the switch failed one of them at once), and the lifespan now waits for in-flight threadpool work (scheduler tick, Telegram tap) before shutdown, which also closes a production gap where shutdown could abandon a delivery mid-flight.
 
 ### Documentation
 - `README.md` rewritten for the release: pitch, architecture, quick start,
