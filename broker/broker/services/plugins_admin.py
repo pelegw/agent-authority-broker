@@ -26,7 +26,7 @@ import re
 from ..audit import audit
 from ..config import get_settings
 from ..errors import PolicyError
-from ..plugins import settings
+from ..plugins import manifest_view, settings
 from ..plugins.adapter import AdapterError
 from ..plugins.registry import get_registry, plugin_rows
 
@@ -63,6 +63,8 @@ def view(plugin_id: str) -> dict:
         "connection": {"kind": m.connection.kind, "enforcement": m.connection.enforcement,
                        "shared": m.connection.shared},
         "actions": sorted(m.action_names),
+        # What the console derives its editors and approval cards from.
+        "manifest": manifest_view.admin_view(m),
     }
 
 

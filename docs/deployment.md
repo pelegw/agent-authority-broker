@@ -4,7 +4,8 @@ How the Agent Authority Broker runs: one Docker Compose project, one container
 per plugin service, and a strict split of which container receives which
 secret. The step-by-step public runbook (EC2, Cloudflare) is
 `deploy/DEPLOY.md`; the design rationale and diagrams are in
-`docs/architecture.md` section 2.
+`docs/architecture.md` section 2. What lives in files versus the console, and
+every console setting with its bounds, is `docs/configuration.md`.
 
 > Status (0.2.0 in progress): `plugin-whatsapp`, `plugin-github` and
 > `plugin-google` are placeholder images that only idle until phases 4, 6 and 7
@@ -44,8 +45,9 @@ docker compose up -d --build
 
 Only the broker is published, on loopback. Origin lockdown is off
 (`ORIGIN_SECRET` is forced empty in the base file) and Cloudflare Access is not
-required. Third-party values in `.env` (Telegram, GitHub App, Google OAuth) can
-stay blank until you enable the feature that needs them.
+required. Third-party credentials (Telegram bot token, GitHub App, Google OAuth
+client) are not in `.env` at all: you enter them in the console when you enable
+the feature that needs them (`docs/configuration.md`).
 
 The WhatsApp pairing QR is printed in `docker compose logs whatsapp-sidecar`
 and served as a PNG at `/v1/admin/plugins/whatsapp/connect/qr.png` (admin only).
@@ -80,12 +82,19 @@ one token and one key.
 
 | Container | Receives | Must never receive |
 |---|---|---|
-| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `TELEGRAM_BOT_TOKEN`, `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE`, `BROKER_DB`, `TZ` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, GitHub App id/private key, Google OAuth client id/secret, the `wa_data` volume |
-| `plugin-whatsapp` | `PLUGIN_TOKEN_WHATSAPP`, `PLUGIN_SECRETS_KEY_WHATSAPP`, `SIDECAR_URL` (`http://whatsapp-sidecar:8081`), `SIDECAR_TOKEN`, `MESSAGES_DB` (`/data/messages.db`), `wa_data` (ro) | Other services' tokens/keys, broker secrets (`DECISION_SIGNING_KEY`, `BROKER_SECRETS_KEY`, `SETUP_TOKEN`, `ORIGIN_SECRET`), `TELEGRAM_BOT_TOKEN` |
+| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE`, `BROKER_DB`, `TZ` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, the `wa_data` volume |
+| `plugin-whatsapp` | `PLUGIN_TOKEN_WHATSAPP`, `PLUGIN_SECRETS_KEY_WHATSAPP`, `SIDECAR_URL` (`http://whatsapp-sidecar:8081`), `SIDECAR_TOKEN`, `MESSAGES_DB` (`/data/messages.db`), `wa_data` (ro) | Other services' tokens/keys, broker secrets (`DECISION_SIGNING_KEY`, `BROKER_SECRETS_KEY`, `SETUP_TOKEN`, `ORIGIN_SECRET`) |
 | `whatsapp-sidecar` | `SIDECAR_TOKEN`, `DEVICE_NAME`, `TZ`, `wa_data` (rw) | Everything else |
-| `plugin-github` | `PLUGIN_TOKEN_GITHUB`, `PLUGIN_SECRETS_KEY_GITHUB`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` (+ the `/run/secrets/github` bind holding the PEM) | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN`, `TELEGRAM_BOT_TOKEN` |
-| `plugin-google` | `PLUGIN_TOKEN_GOOGLE`, `PLUGIN_SECRETS_KEY_GOOGLE`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `SITE_DOMAIN` (to build the redirect URI) | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN`, `TELEGRAM_BOT_TOKEN` |
+| `plugin-github` | `PLUGIN_TOKEN_GITHUB`, `PLUGIN_SECRETS_KEY_GITHUB` (+ the optional `/run/secrets/github` bind holding the PEM) | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN` |
+| `plugin-google` | `PLUGIN_TOKEN_GOOGLE`, `PLUGIN_SECRETS_KEY_GOOGLE`, `SITE_DOMAIN` (to build the redirect URI) | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN` |
 | `edge` | `SITE_DOMAIN`, `ORIGIN_SECRET`, origin certificate + key, Cloudflare origin-pull CA | Every other secret |
+
+Third-party credentials are not in the env split at all (`docs/configuration.md`):
+the owner enters them in the console. The Telegram bot token is stored in
+`broker.db`, encrypted under `BROKER_SECRETS_KEY`; the GitHub App id and key
+and the Google OAuth client id and secret are entered in each plugin's config
+form and relayed once to that plugin's `/configure`, never stored by the
+broker.
 
 `BROKER_PORT` and `GITHUB_APP_KEY_DIR` are read by compose itself (port
 mapping, bind source) and are not passed into any container.
@@ -94,21 +103,21 @@ mapping, bind source) and are not passed into any container.
 
 Two ways, pick one:
 
-1. **Console upload** when connecting GitHub: the key is relayed once to
-   `plugin-github` and stored only in `github_secrets`, encrypted under
-   `PLUGIN_SECRETS_KEY_GITHUB`.
-2. **File bind**: put the PEM at `${GITHUB_APP_KEY_DIR}/app.pem` on the host
-   (default `./data/github-app`, git-ignored and never synced by
+1. **Console** (the default): paste the key into the GitHub plugin's config
+   form (Plugins > GitHub). It is relayed once to `plugin-github` and stored
+   only in `github_secrets`, encrypted under `PLUGIN_SECRETS_KEY_GITHUB`.
+2. **File bind** (optional): put the PEM at `${GITHUB_APP_KEY_DIR}/app.pem` on
+   the host (default `./data/github-app`, git-ignored and never synced by
    `deploy/push.sh`), readable by uid 10001 only
-   (`sudo install -o 10001 -g 10001 -m 0400 app.pem data/github-app/`), and set
-   `GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github/app.pem`. Only
+   (`sudo install -o 10001 -g 10001 -m 0400 app.pem data/github-app/`), and point
+   the GitHub plugin's config form at `/run/secrets/github/app.pem`. Only
    `plugin-github` mounts that directory, read-only.
 
 ## What each volume holds
 
 | Volume | Mounted by | Holds | Encrypted by |
 |---|---|---|---|
-| `broker_data` | broker (`/gwdata`) | `broker.db`: owner account, sessions, admin-token/key hashes, grants, plugin enable flags and non-secret config, hidden resources, action queue, decision record, capacity ledger, audit log | nothing (hashes only; the decision chain is HMAC-signed with `DECISION_SIGNING_KEY`) |
+| `broker_data` | broker (`/gwdata`) | `broker.db`: owner account, sessions, admin-token/key hashes, grants, plugin enable flags and non-secret config, console settings, Telegram link state and bot token, hidden resources, action queue, decision record, capacity ledger, audit log | `BROKER_SECRETS_KEY` for the secrets entered in the console (the Telegram bot token); the rest is hashes or non-secret (the decision chain is HMAC-signed with `DECISION_SIGNING_KEY`) |
 | `wa_data` | whatsapp-sidecar (rw), plugin-whatsapp (ro) | `session.db` (the WhatsApp account session, whatsmeow's own store), `messages.db` (the archive) | **nothing**: the one credential not encrypted at rest, mitigated by volume scoping and non-root containers |
 | `whatsapp_secrets` | plugin-whatsapp (`/secrets`) | plugin-whatsapp's own stored config/secrets | `PLUGIN_SECRETS_KEY_WHATSAPP` |
 | `github_secrets` | plugin-github (`/secrets`) | GitHub App private key (if uploaded), installation id, connect `state` nonces | `PLUGIN_SECRETS_KEY_GITHUB` |
@@ -117,8 +126,10 @@ Two ways, pick one:
 
 Compose prefixes names with the project (`aab_broker_data`, ...). Back up all
 of them together with `.env`; see `deploy/DEPLOY.md` > Operations > Backups.
-The broker's `plugin_secrets` table is reserved and unused in 0.2.0, so
-`BROKER_SECRETS_KEY` currently protects nothing.
+`BROKER_SECRETS_KEY` protects the secrets entered in the console (today the
+Telegram bot token); a `broker_data` backup restored without it means
+re-entering them, and the broker refuses to boot while encrypted values exist
+and the key is missing.
 
 ## Rotating secrets
 
@@ -132,7 +143,7 @@ the new environment (`docker compose up -d <services>`; add
 |---|---|---|
 | `SETUP_TOKEN` | broker | Nothing, unless the owner does not exist yet: then use the new value on the setup page. `docker compose up -d broker`. |
 | `ORIGIN_SECRET` | broker, edge, Cloudflare Transform Rule | Update the Transform Rule's `X-AAB-Origin` value first, then `up -d broker edge` (public overlay). Requests in between get 403. |
-| `BROKER_SECRETS_KEY` | broker | `up -d broker`. Nothing is encrypted under it in 0.2.0. |
+| `BROKER_SECRETS_KEY` | broker | `up -d broker`. Secrets entered in the console no longer decrypt: Channels > Telegram shows "re-enter required" (Telegram stays off until then); paste the bot token again. |
 | `DECISION_SIGNING_KEY` | broker | `up -d broker`. Existing decision rows no longer verify under the new key (`verify` reports the first old row as bad). Rotate only on suspected compromise. |
 | `PLUGIN_TOKEN_WHATSAPP` / `_GITHUB` / `_GOOGLE` | broker and that plugin service | `up -d broker plugin-<service>`: both ends must restart together, calls fail with 503 in between. |
 | `PLUGIN_SECRETS_KEY_WHATSAPP` | plugin-whatsapp | `up -d plugin-whatsapp`; its stored config no longer decrypts, so re-save the WhatsApp plugin settings in the console. The WhatsApp session (in `wa_data`) is unaffected. |
@@ -140,13 +151,14 @@ the new environment (`docker compose up -d <services>`; add
 | `PLUGIN_SECRETS_KEY_GOOGLE` | plugin-google | `up -d plugin-google`, then reconnect Google from the console (the refresh token no longer decrypts). |
 | `SIDECAR_TOKEN` | plugin-whatsapp, whatsapp-sidecar | `up -d plugin-whatsapp whatsapp-sidecar`. No re-pairing needed. |
 
-Third-party values are rotated at their source and edited in `.env` by hand:
+Third-party values are rotated at their source, then re-entered where they
+live (the console for credentials, `.env` for Cloudflare Access):
 
 | Value | Where to rotate | Then |
 |---|---|---|
-| `TELEGRAM_BOT_TOKEN` | @BotFather `/revoke` | `up -d broker`; re-link Telegram from the console if the bot changed. |
-| `GITHUB_APP_PRIVATE_KEY_PATH` file / App key | GitHub App > Private keys: generate new, delete old | Replace the file (or re-upload in the console), `up -d plugin-github`. |
-| `GOOGLE_OAUTH_CLIENT_SECRET` | Google Cloud Console > Credentials > reset secret | `up -d plugin-google` (and re-save it in the console if it was set there). |
+| Telegram bot token | @BotFather `/revoke` | Paste the new token in the console (Channels > Telegram). The poll loop picks it up within seconds, no restart; a token for a different bot drops the link, so link again. |
+| GitHub App private key | GitHub App > Private keys: generate new, delete old | Paste it in the GitHub plugin form, or replace the file in `GITHUB_APP_KEY_DIR` and `up -d plugin-github`. |
+| Google OAuth client secret | Google Cloud Console > Credentials > reset secret | Re-enter it in the Google plugin form. |
 | `CF_ACCESS_AUD` / team domain | Cloudflare Zero Trust | `up -d broker`. |
 | Origin certificate / AOP CA | Cloudflare SSL/TLS > Origin Server | Replace files in `edge/certs`, `up -d edge`. |
 

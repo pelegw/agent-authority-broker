@@ -1,0 +1,2571 @@
+<!DOCTYPE html>
+<!-- The owner console: one static file, no build step, nothing loaded from
+     outside the broker. Served by routers/console.py with a per-request CSP
+     nonce (the only script is the one at the bottom). The page holds no data
+     of its own: it asks GET /auth/status whether to show setup, login or the
+     app, and everything else comes from the admin API with the session cookie.
+
+     Rules this file follows (tests/test_console.py enforces the structural ones):
+       * DOM is built with h()/textContent only; there are no HTML-string sinks.
+         Agents write notes, params and labels that this page shows to the
+         person who approves them, so nothing they send may become markup.
+       * No inline event-handler attributes; handlers are assigned in script.
+       * API paths are string or template literals that start with the path,
+         so the test can check each one exists in the OpenAPI table.
+       * Plaintext keys and tokens are shown once, in a copy box, and never
+         kept anywhere else. Secret config fields are write-only.
+       * Views are section[data-view]; pass 2 fills channels, settings and
+         delegations in place. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<link rel="icon" href="data:,">
+<title>Agent Authority Broker</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f6f9; --panel: #ffffff; --panel-2: #f8fafc; --ink: #1b1f24;
+    --muted: #667085; --line: #e5e8ee; --accent: #2f6feb; --accent-ink: #fff;
+    --green: #1f9d55; --amber: #b7791f; --red: #c0392b; --gray: #7a828c;
+    --shadow: 0 1px 3px rgba(16,24,40,.07), 0 1px 2px rgba(16,24,40,.05);
+    --radius: 12px; --side-w: 218px;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d0f12; --panel: #16181d; --panel-2: #1b1e24; --ink: #e8eaed;
+      --muted: #9aa2ad; --line: #282c33; --accent: #4b83f0; --green: #35b06a;
+      --amber: #d99a3a; --red: #e05c4c; --gray: #8b929c;
+      --shadow: 0 1px 3px rgba(0,0,0,.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14.5px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  [hidden] { display: none !important; }
+  .mono { font-family: var(--mono); font-size: .92em; }
+  .sub { color: var(--muted); font-size: .8rem; }
+  .spacer { flex: 1; }
+
+  /* ---- setup / login gate ---- */
+  .gate { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 1rem; }
+  .gatebox { width: min(420px, 100%); }
+  .gatebox .brand { font-size: 1.15rem; margin: 0 0 .3rem; }
+  .gatebox h2 { font-size: 1rem; margin: .6rem 0 .2rem; }
+  form.stack { display: flex; flex-direction: column; gap: .7rem; }
+  form.stack label { display: flex; flex-direction: column; gap: .28rem; font-size: .8rem; color: var(--muted); }
+  .formerr { color: var(--red); font-size: .88rem; white-space: pre-wrap; margin-top: .6rem; }
+  .formerr:empty { display: none; }
+
+  /* ---- top bar ---- */
+  header {
+    position: sticky; top: 0; z-index: 20; background: var(--panel);
+    border-bottom: 1px solid var(--line); padding: .6rem 1.1rem;
+    display: flex; align-items: center; gap: .7rem; box-shadow: var(--shadow);
+  }
+  header h1 { font-size: 1rem; margin: 0 .4rem 0 0; letter-spacing: .2px; white-space: nowrap; }
+  header .brand-dot { color: var(--green); }
+  header .who { color: var(--muted); font-size: .85rem; white-space: nowrap; }
+  .pill {
+    display: inline-flex; align-items: center; gap: .42rem; font-size: .8rem;
+    padding: .28rem .68rem; border-radius: 999px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--muted); white-space: nowrap; text-decoration: none;
+  }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gray); flex: none; }
+  .pill.ok .dot { background: var(--green); }
+  .pill.warn .dot { background: var(--amber); }
+  .pill.off .dot { background: var(--red); }
+
+  /* ---- layout: left nav + content ---- */
+  .layout { display: flex; min-height: calc(100vh - 53px); }
+  nav.side {
+    width: var(--side-w); flex: none; padding: .9rem .6rem; border-right: 1px solid var(--line);
+    background: var(--panel); display: flex; flex-direction: column; gap: .15rem;
+    position: sticky; top: 53px; align-self: flex-start; height: calc(100vh - 53px); overflow-y: auto;
+  }
+  nav.side a {
+    display: flex; align-items: center; gap: .6rem; padding: .5rem .7rem;
+    border-radius: 8px; color: var(--ink); text-decoration: none; font-weight: 500;
+  }
+  nav.side a:hover { background: var(--panel-2); }
+  nav.side a.active { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
+  nav.side a .nbadge {
+    margin-left: auto; font-size: .72rem; font-weight: 700; min-width: 1.35rem;
+    text-align: center; padding: .08rem .38rem; border-radius: 999px;
+    background: color-mix(in srgb, var(--amber) 18%, transparent); color: var(--amber);
+  }
+  nav.side a .nbadge:empty { display: none; }
+  nav.side .navsec { margin: .8rem .7rem .25rem; font-size: .7rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .07em; color: var(--accent); }
+
+  main { flex: 1; min-width: 0; padding: 1.3rem 1.5rem 3rem; }
+  .view > h2 { font-size: 1.15rem; margin: 0 0 .2rem; }
+  .view > .viewsub { color: var(--muted); font-size: .88rem; margin: 0 0 1.1rem; }
+  .content { max-width: 1020px; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    box-shadow: var(--shadow); padding: 1rem 1.1rem; margin-bottom: .8rem;
+  }
+  .subhead { display: flex; align-items: baseline; gap: .55rem; margin: 1.3rem 0 .6rem; }
+  .card > .subhead:first-child { margin-top: 0; }
+  .subhead h3 { font-size: .95rem; margin: 0; }
+  .subhead .count { color: var(--muted); font-size: .82rem; }
+  .subhead button { margin-left: auto; }
+  .empty { color: var(--muted); padding: 1.1rem 0; text-align: center; }
+  .hint { color: var(--muted); font-size: .88rem; }
+  .toolbar { display: flex; gap: .5rem; margin-bottom: .8rem; }
+  .placeholder { text-align: center; padding: 2rem 1rem; }
+
+  /* overview */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: .8rem; margin-bottom: 1rem; }
+  a.stat, a.pcard { color: inherit; text-decoration: none; display: block; }
+  a.stat:hover, a.pcard:hover { border-color: var(--accent); }
+  .stat .num { font-size: 1.7rem; font-weight: 700; line-height: 1.2; }
+  .stat .lbl { color: var(--muted); font-size: .84rem; }
+  .plugin-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: .8rem; margin-bottom: .8rem; }
+  .pcard .pname { font-weight: 600; }
+  .badges { margin-top: .45rem; display: flex; gap: .3rem; flex-wrap: wrap; }
+
+  /* ---- buttons, inputs ---- */
+  button, .button-link {
+    font: inherit; font-size: .87rem; padding: .45rem .9rem; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--ink);
+    cursor: pointer; transition: filter .12s; text-decoration: none; display: inline-block;
+  }
+  button:hover, .button-link:hover { filter: brightness(.97); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary, .button-link.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+  button.green { background: var(--green); color: #fff; border-color: transparent; }
+  button.red { background: var(--red); color: #fff; border-color: transparent; }
+  button.ghost { background: transparent; }
+  button.link { border: 0; background: transparent; color: var(--accent); padding: .1rem .35rem; font-size: .8rem; }
+  input, select, textarea {
+    font: inherit; padding: .45rem .55rem; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--ink); min-width: 0;
+  }
+  textarea { min-height: 5.5rem; resize: vertical; font-family: var(--mono); font-size: .85rem; }
+  input[type=checkbox] { padding: 0; }
+  label.chk { display: inline-flex; align-items: center; gap: .3rem; font-size: .86rem; color: var(--ink); cursor: pointer; }
+
+  form.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: .7rem; align-items: end; }
+  form.grid > label, .fld { display: flex; flex-direction: column; gap: .28rem; font-size: .8rem; color: var(--muted); }
+  /* Picker fields must NOT be <label>s: a label forwards clicks to its first
+     labelable descendant, which with chips present is a chip's x button. */
+  .wide { grid-column: 1 / -1; }
+  .formhelp { grid-column: 1 / -1; color: var(--muted); font-size: .82rem; margin-top: -.2rem; }
+
+  /* ---- tables ---- */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+  th, td { text-align: left; padding: .55rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: .76rem; text-transform: uppercase; letter-spacing: .05em; }
+  tbody tr:last-child td { border-bottom: 0; }
+  .row-actions { display: flex; gap: .4rem; flex-wrap: wrap; align-items: center; }
+  .more { text-align: center; margin-top: .6rem; }
+
+  /* ---- badges ---- */
+  .badge { display: inline-block; font-size: .74rem; font-weight: 600; padding: .16rem .5rem; border-radius: 999px;
+    background: color-mix(in srgb, var(--gray) 16%, transparent); color: var(--gray); white-space: nowrap; }
+  .badge.ok { background: color-mix(in srgb, var(--green) 16%, transparent); color: var(--green); }
+  .badge.warn { background: color-mix(in srgb, var(--amber) 16%, transparent); color: var(--amber); }
+  .badge.bad { background: color-mix(in srgb, var(--red) 16%, transparent); color: var(--red); }
+  .badge.accent { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+  .badge.eff-write { background: color-mix(in srgb, var(--amber) 16%, transparent); color: var(--amber); }
+  .badge.eff-destructive { background: color-mix(in srgb, var(--red) 16%, transparent); color: var(--red); }
+
+  /* ---- requests ---- */
+  .req .meta { font-size: .82rem; color: var(--muted); display: flex; gap: .45rem; flex-wrap: wrap; align-items: center; }
+  .req .act { color: var(--ink); font-weight: 600; }
+  .req .actions { margin-top: .7rem; display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+  .facts { display: grid; grid-template-columns: max-content 1fr; gap: .2rem .8rem; font-size: .86rem; margin-top: .55rem; }
+  .facts .k { color: var(--muted); }
+  .facts .v { min-width: 0; overflow-wrap: anywhere; }
+  /* Text an agent wrote. Quoted, isolated for bidi (so a right-to-left
+     override inside it cannot reorder the console's own words around it),
+     and wrapped anywhere so a long token cannot push anything out of view. */
+  .agent-text {
+    white-space: pre-wrap; overflow-wrap: anywhere; unicode-bidi: isolate;
+    border-left: 3px solid var(--line); padding: .35rem .7rem; margin: .3rem 0 0;
+    background: var(--panel-2); border-radius: 0 8px 8px 0;
+  }
+  .summary { font-size: .98rem; color: var(--ink); }
+  .quote-label { font-size: .72rem; color: var(--muted); margin-top: .6rem; text-transform: uppercase; letter-spacing: .05em; }
+  details.params { margin-top: .5rem; font-size: .85rem; }
+  details.params summary { cursor: pointer; color: var(--muted); }
+  details.params pre { margin: .4rem 0 0; max-height: 22rem; overflow: auto; }
+  .crumbs { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .15rem; }
+  .crumbs .crumb { color: var(--ink); font-weight: 600; unicode-bidi: isolate; }
+  .crumbs .sep { color: var(--muted); padding: 0 .1rem; }
+  .ids { display: flex; flex-wrap: wrap; gap: .25rem; }
+  .idchip { font-family: var(--mono); font-size: .78rem; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 6px; padding: .05rem .35rem; overflow-wrap: anywhere; unicode-bidi: isolate; }
+
+  /* readable capability */
+  .capview { border: 1px solid var(--line); border-radius: 10px; padding: .6rem .8rem; margin-top: .55rem; }
+  .caphead { display: flex; align-items: center; gap: .45rem; flex-wrap: wrap; }
+  .capview .facts { margin-top: .4rem; }
+  .effrow { display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; margin-bottom: .15rem; }
+
+  /* capability editor */
+  .capblock { border: 1px solid var(--line); border-radius: 10px; padding: .75rem .85rem; margin-bottom: .7rem; background: var(--panel); }
+  .capblock .section { margin-top: .75rem; }
+  .capblock .section > .lbl { font-size: .74rem; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: .05em; margin-bottom: .3rem; }
+  .actgroup { display: flex; flex-wrap: wrap; gap: .35rem .9rem; align-items: center; margin: .25rem 0; }
+  .actgroup > .badge { min-width: 5.6rem; text-align: center; }
+  .shortcuts { font-size: .8rem; color: var(--muted); }
+  .dimrow { display: grid; grid-template-columns: minmax(9rem, 14rem) 1fr; gap: .5rem .8rem; align-items: start; margin: .45rem 0; }
+  .dimrow .dimname { font-size: .86rem; }
+  .dimrow .dimname .sub { display: block; }
+  .dimctl { display: flex; flex-direction: column; gap: .35rem; min-width: 0; align-items: flex-start; }
+  .dimctl > .pickwrap { align-self: stretch; }
+  .capadd { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+  .denyrow { border: 1px solid var(--line); border-radius: 10px; padding: .6rem .7rem; margin-bottom: .5rem;
+    display: grid; grid-template-columns: 1fr 1fr auto; gap: .5rem; align-items: center; }
+  .denyrow .pickmount { grid-column: 1 / -1; }
+  .formsection { grid-column: 1 / -1; margin-top: .4rem; }
+  .formsection > h4 { margin: .2rem 0 .3rem; font-size: .9rem; color: var(--ink); }
+
+  /* ---- resource picker (chips + search) ---- */
+  .picker {
+    display: flex; flex-wrap: wrap; gap: .3rem; align-items: center;
+    padding: .3rem .4rem; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--panel-2); cursor: text;
+  }
+  .picker input { border: 0; background: transparent; flex: 1; min-width: 9rem; padding: .22rem; outline: none; }
+  .chip {
+    display: inline-flex; align-items: center; gap: .25rem; font-size: .8rem;
+    background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent);
+    border-radius: 999px; padding: .14rem .3rem .14rem .6rem; max-width: 100%;
+  }
+  .chip .chiptxt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 12rem; unicode-bidi: isolate; }
+  .chip .chipid { opacity: .78; font-size: .72rem; font-family: var(--mono); overflow-wrap: anywhere; }
+  .chip .chipx { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: .95rem; padding: 0 .2rem; line-height: 1; }
+  .pickresults { margin-top: .3rem; }
+  .pickresults .empty { padding: .45rem 0; }
+  .pickhint { font-size: .75rem; color: var(--muted); margin-top: .2rem; }
+  .pickrow { display: flex; align-items: center; gap: .5rem; padding: .32rem .2rem; border-bottom: 1px solid var(--line); font-size: .85rem; }
+  .pickrow:last-child { border-bottom: 0; }
+  /* Labels are other people's text: the LABEL truncates, the id never does,
+     so a crafted long name cannot push the real id out of view. */
+  .pickrow .lbl { font-weight: 600; max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; unicode-bidi: isolate; }
+  .pickrow .rid { color: var(--muted); font-family: var(--mono); font-size: .78rem; overflow-wrap: anywhere; }
+  .pickrow button { margin-left: auto; }
+
+  /* hidden list */
+  .hrow { display: flex; align-items: center; gap: .6rem; padding: .45rem 0; border-bottom: 1px solid var(--line); font-size: .88rem; flex-wrap: wrap; }
+  .hrow:last-child { border-bottom: 0; }
+  .hrow .lbl { font-weight: 600; unicode-bidi: isolate; }
+  .hrow .rid { color: var(--muted); font-family: var(--mono); font-size: .8rem; overflow-wrap: anywhere; }
+  .hrow button { margin-left: auto; }
+
+  /* plugins */
+  .plugin .phead { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+  .plugin .phead h3 { margin: 0; font-size: 1rem; }
+  .plugin .pstatus { display: flex; gap: .3rem; flex-wrap: wrap; }
+  .plugin .psec { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: .8rem; }
+  .plugin .psec > h4 { margin: 0 0 .5rem; font-size: .9rem; }
+  .cfgfield { display: flex; flex-direction: column; gap: .25rem; margin-bottom: .75rem; font-size: .85rem; }
+  .cfgfield .fname { font-weight: 600; }
+  .cfgfield .fname .req { color: var(--red); }
+  .cfgfield .secretrow { display: flex; gap: .4rem; flex-wrap: wrap; align-items: flex-start; }
+  .cfgfield .secretrow input, .cfgfield .secretrow textarea { flex: 1; min-width: 12rem; }
+  .qrwrap img { width: 220px; height: 220px; border-radius: 8px; background: #fff; padding: 6px; margin: .6rem 0; }
+  details.health { margin-top: .8rem; font-size: .82rem; }
+  details.health summary { cursor: pointer; color: var(--muted); }
+  details.health pre { margin: .4rem 0 0; overflow: auto; max-height: 16rem; }
+
+  /* one-time secret display */
+  .keybanner {
+    background: color-mix(in srgb, var(--green) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--green) 40%, transparent);
+    border-radius: 8px; padding: .7rem .9rem; margin-bottom: .8rem; font-size: .9rem;
+  }
+  .copyrow { display: flex; gap: .4rem; margin-top: .45rem; }
+  .copyrow input { flex: 1; font-family: var(--mono); font-size: .85rem; }
+
+  /* ---- modal ---- */
+  .overlay {
+    position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,.45);
+    display: flex; align-items: center; justify-content: center; padding: 1rem;
+  }
+  .modal { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    box-shadow: 0 12px 40px rgba(0,0,0,.35); width: min(560px, 100%); padding: 1.1rem 1.2rem 0;
+    max-height: calc(100vh - 2rem); overflow: auto; }
+  .modal.wide { width: min(920px, 100%); }
+  .modal h3 { margin: 0 0 .8rem; font-size: 1rem; }
+  .modal .actions { display: flex; gap: .5rem; justify-content: flex-end; margin-top: 1rem; position: sticky; bottom: 0;
+    background: var(--panel); padding: .7rem 0 1rem; border-top: 1px solid var(--line); }
+  .modalerr { color: var(--red); font-size: .88rem; white-space: pre-wrap; margin-top: .6rem; }
+  .modalerr:empty { display: none; }
+
+  /* ---- toasts ---- */
+  /* Top right, under the header: at the bottom they would cover a dialog's buttons. */
+  #toasts { position: fixed; right: 1rem; top: 4.2rem; z-index: 60; display: flex; flex-direction: column; gap: .5rem;
+    max-width: min(420px, calc(100vw - 2rem)); }
+  .toast { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--green);
+    border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,.2); padding: .6rem .8rem; font-size: .88rem;
+    cursor: pointer; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .toast.err { border-left-color: var(--red); }
+  .toast.info { border-left-color: var(--accent); }
+
+  @media (max-width: 880px) {
+    .layout { flex-direction: column; }
+    nav.side {
+      width: auto; flex-direction: row; overflow-x: auto; border-right: 0;
+      border-bottom: 1px solid var(--line); padding: .45rem .6rem; gap: .3rem;
+      position: static; height: auto; align-self: stretch;
+    }
+    nav.side .navsec { display: none; }
+    nav.side a { white-space: nowrap; padding: .4rem .6rem; }
+    main { padding: 1rem .9rem 3rem; }
+    .dimrow, .denyrow { grid-template-columns: 1fr; }
+    header .who { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ================= setup / login ================= -->
+<div class="gate" id="gate" hidden>
+  <div class="card gatebox">
+    <h1 class="brand"><span class="brand-dot">&#9679;</span> Agent Authority Broker</h1>
+    <p class="hint" id="gateMsg"></p>
+    <form class="stack" id="setupForm" hidden autocomplete="off">
+      <h2>First-time setup</h2>
+      <p class="hint">Create the owner account. The setup token is <span class="mono">SETUP_TOKEN</span> in the broker's .env, written by scripts/init_secrets.py. It works exactly once.</p>
+      <label>Setup token<input name="setup_token" type="password" required autocomplete="off" spellcheck="false"></label>
+      <label>Username (3-32 of a-z 0-9 _ . -)<input name="username" required autocomplete="username" spellcheck="false" maxlength="32"></label>
+      <label>Password (at least 12 characters)<input name="password" type="password" required autocomplete="new-password"></label>
+      <label>Repeat the password<input name="password2" type="password" required autocomplete="new-password"></label>
+      <button class="primary" type="submit">Create the owner</button>
+    </form>
+    <form class="stack" id="loginForm" hidden>
+      <h2>Sign in</h2>
+      <label>Username<input name="username" required autocomplete="username" spellcheck="false" maxlength="256"></label>
+      <label>Password<input name="password" type="password" required autocomplete="current-password"></label>
+      <button class="primary" type="submit">Sign in</button>
+    </form>
+    <div class="formerr" id="gateErr" role="alert"></div>
+  </div>
+</div>
+
+<!-- ================= the app ================= -->
+<div id="app" hidden>
+<header>
+  <h1><span class="brand-dot">&#9679;</span> Agent Authority Broker</h1>
+  <a class="pill" id="pluginPill" href="#/plugins"><span class="dot"></span><span id="pluginPillText">plugins</span></a>
+  <div class="spacer"></div>
+  <span class="who" id="whoami"></span>
+  <button class="ghost" id="refreshBtn" type="button" title="Refresh this view">&#8635;</button>
+  <button class="ghost" id="logoutBtn" type="button">Log out</button>
+</header>
+
+<div class="layout">
+  <nav class="side" id="nav">
+    <a href="#/overview" data-view="overview">Overview</a>
+    <div class="navsec">Operate</div>
+    <a href="#/requests" data-view="requests">Requests<span class="nbadge" id="reqBadge"></span></a>
+    <a href="#/scheduled" data-view="scheduled">Scheduled<span class="nbadge" id="schedBadge"></span></a>
+    <a href="#/decisions" data-view="decisions">Decisions</a>
+    <div class="navsec">Configure</div>
+    <a href="#/plugins" data-view="plugins">Plugins</a>
+    <a href="#/keys" data-view="keys">Agent keys</a>
+    <a href="#/delegations" data-view="delegations">Delegations</a>
+    <a href="#/hidden" data-view="hidden">Hidden resources</a>
+    <a href="#/channels" data-view="channels">Channels</a>
+    <div class="navsec">System</div>
+    <a href="#/settings" data-view="settings">Settings</a>
+    <a href="#/account" data-view="account">Account</a>
+  </nav>
+
+  <main><div class="content">
+
+    <!-- ================= Overview ================= -->
+    <section class="view" data-view="overview" hidden>
+      <h2>Overview</h2>
+      <p class="viewsub">What is waiting on you, and whether the plugins and the decision record are healthy.</p>
+      <div class="stats">
+        <a class="card stat" href="#/requests"><div class="num" id="stActions">-</div><div class="lbl">actions awaiting approval</div></a>
+        <a class="card stat" href="#/requests"><div class="num" id="stGrants">-</div><div class="lbl">permission requests</div></a>
+        <a class="card stat" href="#/scheduled"><div class="num" id="stSched">-</div><div class="lbl">scheduled actions</div></a>
+        <a class="card stat" href="#/keys"><div class="num" id="stKeys">-</div><div class="lbl">active agent keys</div></a>
+      </div>
+      <div class="subhead"><h3>Plugins</h3></div>
+      <div class="plugin-grid" id="ovPlugins"></div>
+      <div class="card">
+        <div class="subhead"><h3>Decision record</h3><button type="button" id="ovVerifyBtn">Verify again</button></div>
+        <div id="ovVerify" class="hint">Not checked yet.</div>
+      </div>
+    </section>
+
+    <!-- ================= Requests ================= -->
+    <section class="view" data-view="requests" hidden>
+      <h2>Requests</h2>
+      <p class="viewsub">Everything waiting on your decision: actions agents want to take, and authority they are asking for. Text in a quoted box was written by the agent; treat it as a claim, not as fact.</p>
+      <div class="subhead"><h3>Actions awaiting approval</h3><span class="count" id="actCount"></span></div>
+      <div id="actList"></div>
+      <div class="subhead"><h3>Permission requests</h3><span class="count" id="grantCount"></span></div>
+      <div id="grantList"></div>
+    </section>
+
+    <!-- ================= Scheduled ================= -->
+    <section class="view" data-view="scheduled" hidden>
+      <h2>Scheduled</h2>
+      <p class="viewsub">Approved or automatic actions waiting for their time. Cancel any of them before they run.</p>
+      <div id="schedList"></div>
+    </section>
+
+    <!-- ================= Decisions ================= -->
+    <section class="view" data-view="decisions" hidden>
+      <h2>Decisions</h2>
+      <p class="viewsub">Every allow, draft and deny, with the key chain and grant chain that produced it, plus the outcome of what ran. The record is hash-chained; Verify recomputes the chain.</p>
+      <div class="card">
+        <form class="grid" id="decFilter" autocomplete="off">
+          <label>Key<select name="key"><option value="">any key</option></select></label>
+          <label>Plugin<select name="plugin"><option value="">any plugin</option></select></label>
+          <label>Decision<select name="decision">
+            <option value="">any</option><option value="allow">allow</option>
+            <option value="draft">draft</option><option value="deny">deny</option>
+          </select></label>
+          <label>Since<select name="since">
+            <option value="">all time</option><option value="3600">last hour</option>
+            <option value="86400">last 24 hours</option><option value="604800">last 7 days</option>
+            <option value="2592000">last 30 days</option>
+          </select></label>
+          <button class="primary" type="submit">Apply</button>
+        </form>
+      </div>
+      <div class="card">
+        <div class="subhead"><h3>Chain integrity</h3><button type="button" id="verifyBtn">Verify chain</button></div>
+        <div id="verifyOut" class="hint">Not checked yet.</div>
+      </div>
+      <div class="card table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>When</th><th>Key chain</th><th>Action</th><th>Decision</th><th>Enforced</th></tr></thead>
+          <tbody id="decRows"></tbody>
+        </table>
+        <div class="more"><button type="button" id="decMore" hidden>Load older</button></div>
+      </div>
+    </section>
+
+    <!-- ================= Plugins ================= -->
+    <section class="view" data-view="plugins" hidden>
+      <h2>Plugins</h2>
+      <p class="viewsub">Each target system is a plugin running in its own container. Configure it, enable it, connect it. Disabling a plugin removes its tools on the next request and holds its queued actions; its credentials stay inside the plugin.</p>
+      <div id="pluginList"></div>
+      <div id="pluginRefused"></div>
+    </section>
+
+    <!-- ================= Agent keys ================= -->
+    <section class="view" data-view="keys" hidden>
+      <h2>Agent keys</h2>
+      <p class="viewsub">One key per agent. A key's authority is its grants, capped by its role and by what the enabled, connected plugins can do. Delegated keys show the chain they came from.</p>
+      <div class="toolbar"><button class="primary" type="button" id="newKeyBtn">Create a key</button></div>
+      <div class="card table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>Role</th><th>Rate/min</th><th>Delegated from</th><th>Last used</th><th>Expires</th><th></th></tr></thead>
+          <tbody id="keyRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ================= Delegations (pass 2) ================= -->
+    <section class="view" data-view="delegations" hidden>
+      <h2>Delegations</h2>
+      <p class="viewsub">The tree of keys agents minted for their sub-agents, with revoke.</p>
+      <div class="card placeholder"><div class="hint">Available after the next merge.</div></div>
+    </section>
+
+    <!-- ================= Hidden resources ================= -->
+    <section class="view" data-view="hidden" hidden>
+      <h2>Hidden resources</h2>
+      <p class="viewsub">A hidden resource is invisible to every agent key: absent from lists and a 404 on direct access, exactly like a resource that does not exist. What is stored is the resource's id, so renaming it never unhides it. Per-key denies live on the key (Agent keys, Edit).</p>
+      <div class="card">
+        <form class="grid" id="hideForm" autocomplete="off">
+          <label>Plugin<select id="hideTarget"></select></label>
+          <label>Kind<select id="hideKind"></select></label>
+          <label>Reason<input name="reason" id="hideReason" maxlength="500" placeholder="optional, saved with the entry"></label>
+          <div class="fld wide"><span>Find the resource to hide</span><div id="hidePicker"></div></div>
+        </form>
+      </div>
+      <div class="card">
+        <div class="subhead"><h3>Hidden</h3><span class="count" id="hiddenCount"></span></div>
+        <div id="hiddenList"></div>
+      </div>
+    </section>
+
+    <!-- ================= Channels (pass 2) ================= -->
+    <section class="view" data-view="channels" hidden>
+      <h2>Channels</h2>
+      <p class="viewsub">Approve from your phone: Telegram approval cards with one-tap approve and reject.</p>
+      <div class="card placeholder"><div class="hint">Available after the next merge.</div></div>
+    </section>
+
+    <!-- ================= Settings (pass 2) ================= -->
+    <section class="view" data-view="settings" hidden>
+      <h2>Settings</h2>
+      <p class="viewsub">Operator settings, and what lives in files instead of here (and why).</p>
+      <div class="card placeholder"><div class="hint">Available after the next merge.</div></div>
+    </section>
+
+    <!-- ================= Account ================= -->
+    <section class="view" data-view="account" hidden>
+      <h2>Account</h2>
+      <p class="viewsub" id="acctSub">Your owner account, the admin tokens scripts use, and where you are signed in.</p>
+      <div class="card">
+        <div class="subhead"><h3>Change password</h3></div>
+        <form class="grid" id="pwForm" autocomplete="off">
+          <label>Current password<input name="current" type="password" required autocomplete="current-password"></label>
+          <label>New password (12+ characters)<input name="next" type="password" required autocomplete="new-password"></label>
+          <label>Repeat the new password<input name="next2" type="password" required autocomplete="new-password"></label>
+          <button class="primary" type="submit">Change password</button>
+          <div class="formhelp">Every other session is signed out.</div>
+        </form>
+      </div>
+      <div class="card">
+        <div class="subhead"><h3>Admin tokens</h3><span class="count">for the aab CLI, scripts and deploys</span></div>
+        <div id="tokenBanner" data-ephemeral></div>
+        <form class="grid" id="tokenForm" autocomplete="off">
+          <label>Name<input name="tokname" required maxlength="64" placeholder="e.g. laptop-cli"></label>
+          <label>Expires in hours<input name="hours" type="number" min="1" max="87600" step="1" placeholder="never"></label>
+          <button class="primary" type="submit">Create token</button>
+        </form>
+        <div class="table-wrap" style="margin-top:.8rem">
+          <table>
+            <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th></th></tr></thead>
+            <tbody id="tokenRows"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="subhead"><h3>Sessions</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Signed in</th><th>Last seen</th><th>Expires</th><th>From</th><th></th></tr></thead>
+            <tbody id="sessionRows"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </div></main>
+</div>
+</div>
+
+<div id="toasts" aria-live="polite"></div>
+
+<script nonce="{{NONCE}}">
+"use strict";
+
+// ============================================================ constants
+// Must equal deps.CSRF_HEADER / deps.CSRF_VALUE (tests/test_console.py checks).
+// With the SameSite=Strict session cookie this is the CSRF defence.
+const CSRF_HEADER = "X-Requested-With";
+const CSRF_VALUE = "aab-console";
+// Must equal authority/roles.ROLES, lowest first (tested).
+const ROLES = ["read-only", "read-draft", "read-act", "full"];
+const ROLE_HELP = {
+  "read-only": "Reads only. Nothing it holds can ever write.",
+  "read-draft": "Reads directly; every write or destructive action becomes a draft you approve.",
+  "read-act": "Reads and writes directly, as far as its grants allow; destructive actions are drafts.",
+  "full": "Everything its grants allow, directly.",
+};
+const EFFECTS = ["read", "write", "destructive"];
+// Narrowing forms, split the way a capability stores them (must equal
+// plugins/manifest.SET_FORMS and SCALAR_FORMS; tested).
+const SET_FORMS = ["list", "subtree", "pattern"];
+const SCALAR_FORMS = ["range", "flag", "level"];
+const FORM_TEXT = {
+  list: "one of these",
+  subtree: "these, and everything inside them",
+  pattern: "exactly these strings",
+};
+const VIEWS = ["overview", "requests", "scheduled", "decisions", "plugins", "keys",
+               "delegations", "hidden", "channels", "settings", "account"];
+// Views refreshed by the 15 s poll. Views with forms are never auto-refreshed:
+// a repaint would throw away what the owner is typing.
+const LIVE_VIEWS = new Set(["overview", "requests", "scheduled"]);
+
+// ============================================================ DOM helpers
+const $ = (id) => document.getElementById(id);
+
+// Safe element builder: attributes via setAttribute, text via text nodes.
+// There is no way to pass markup through it, and inline handlers are refused
+// (assign el.onclick in script instead).
+function h(tag, props, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (/^on/i.test(k)) throw new Error("h(): inline handlers are not allowed");
+    if (k === "class") n.className = v;
+    else if (k === "text") n.textContent = v;
+    else if ((k === "href" || k === "src") && !isSafeUrl(String(v))) {
+      throw new Error("h(): refusing a non-https or foreign URL");
+    } else n.setAttribute(k, v === true ? "" : String(v));
+  }
+  for (const c of kids.flat(Infinity)) {
+    if (c === null || c === undefined || c === false) continue;
+    n.append(c instanceof Node ? c : document.createTextNode(showControls(String(c))));
+  }
+  return n;
+}
+// Bidi embedding/override/isolate controls (U+202A-202E, U+2066-2069) are
+// shown as visible markers wherever text is rendered: an agent could use an
+// override to make "evil.exe" read as "exe.live", or reorder a summary. The
+// console's own strings never contain them. LRM/RLM marks are left alone,
+// since real right-to-left names (Hebrew, Arabic) use them legitimately.
+const BIDI_CONTROLS = /[\u202A-\u202E\u2066-\u2069]/g;
+function showControls(text) {
+  return text.replace(BIDI_CONTROLS, (ch) => `[U+${ch.codePointAt(0).toString(16).toUpperCase()}]`);
+}
+// Same-origin paths, or https to anywhere (for install/consent links).
+function isSafeUrl(u) {
+  try {
+    const x = new URL(u, location.href);
+    return x.origin === location.origin || x.protocol === "https:";
+  } catch { return false; }
+}
+// A URL a plugin handed back (OAuth consent, app install): https only.
+function externalUrl(u) {
+  try {
+    const x = new URL(String(u));
+    return x.protocol === "https:" ? x.href : null;
+  } catch { return null; }
+}
+const enc = encodeURIComponent;
+const hasOwn = (o, k) => o !== null && typeof o === "object" && Object.prototype.hasOwnProperty.call(o, k);
+function badge(text, kind) { return h("span", { class: "badge" + (kind ? " " + kind : "") }, text); }
+function empty(text) { return h("div", { class: "empty" }, text); }
+function fact(k, ...v) { return [h("div", { class: "k" }, k), h("div", { class: "v" }, ...v)]; }
+function idChips(ids) { return h("span", { class: "ids" }, (ids || []).map((i) => h("span", { class: "idchip" }, i))); }
+function errText(e) { return e && e.message ? e.message : String(e); }
+// Stable JSON for "did this change?" comparisons.
+function canon(v) {
+  if (Array.isArray(v)) return "[" + v.map(canon).join(",") + "]";
+  if (v && typeof v === "object") {
+    return "{" + Object.keys(v).sort().map((k) => JSON.stringify(k) + ":" + canon(v[k])).join(",") + "}";
+  }
+  return JSON.stringify(v === undefined ? null : v);
+}
+async function withBusy(btn, fn) {
+  if (btn) btn.disabled = true;
+  try { return await fn(); } finally { if (btn) btn.disabled = false; }
+}
+
+// ============================================================ time
+const nowTs = () => Math.floor(Date.now() / 1000);
+function fmtWhen(ts) { return ts ? new Date(ts * 1000).toLocaleString() : "never"; }
+function fmtDate(ts) { return ts ? new Date(ts * 1000).toLocaleDateString() : "never"; }
+function relTime(ts) {
+  if (!ts) return "never";
+  const d = ts - nowTs(), a = Math.abs(d);
+  const s = a < 60 ? "just now" : a < 3600 ? Math.round(a / 60) + " min"
+    : a < 86400 ? Math.round(a / 3600) + " h" : Math.round(a / 86400) + " d";
+  if (s === "just now") return s;
+  return d >= 0 ? "in " + s : s + " ago";
+}
+// <input type=datetime-local> works in local time without a zone.
+function toLocalInput(ts) {
+  if (!ts) return "";
+  const d = new Date(ts * 1000), p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function fromLocalInput(v) {
+  if (!v) return null;
+  const t = new Date(v).getTime();
+  return Number.isFinite(t) ? Math.floor(t / 1000) : null;
+}
+
+// ============================================================ toasts
+function toast(msg, kind = "ok") {
+  const t = h("div", { class: "toast " + kind, role: kind === "err" ? "alert" : "status" }, msg);
+  t.onclick = () => t.remove();
+  $("toasts").append(t);
+  setTimeout(() => t.remove(), kind === "err" ? 9000 : 4500);
+}
+function showErr(e) {
+  if (e instanceof AuthLost) return;       // the login page already says so
+  toast(errText(e), "err");
+}
+
+// ============================================================ API
+class AuthLost extends Error {}
+class ApiError extends Error {
+  constructor(status, message, code) { super(message); this.status = status; this.code = code; }
+}
+// Every call carries the CSRF header (the broker requires it on writes made
+// with the session cookie; sending it on reads too costs nothing). A 401
+// anywhere means the session is gone: back to the login page.
+async function api(path, opts = {}) {
+  const method = (opts.method || "GET").toUpperCase();
+  const headers = { "Accept": "application/json", [CSRF_HEADER]: CSRF_VALUE };
+  let body;
+  if (opts.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    body = JSON.stringify(opts.body);
+  }
+  let res;
+  try {
+    res = await fetch(path, { method, headers, body, credentials: "same-origin", cache: "no-store" });
+  } catch {
+    throw new ApiError(0, "The broker could not be reached.", "network");
+  }
+  if (res.status === 401 && !opts.allow401) {
+    authLost();
+    throw new AuthLost("signed out");
+  }
+  const text = await res.text();
+  let data = null;
+  if (text) { try { data = JSON.parse(text); } catch { data = null; } }
+  if (!res.ok) {
+    const msg = (data && (data.error || (typeof data.detail === "string" ? data.detail : ""))) ||
+      res.statusText || ("HTTP " + res.status);
+    throw new ApiError(res.status, msg, data && data.code);
+  }
+  return data;
+}
+
+// ============================================================ modals
+const modals = [];
+// A modal is a stack entry; Escape and backdrop close the top one unless it
+// is `sticky` (forms with work in them close only through their buttons).
+function openModal({ title, body, buttons = [], wide = false, sticky = false, onClose = null }) {
+  const overlay = h("div", { class: "overlay" });
+  const box = h("div", { class: "modal" + (wide ? " wide" : ""), role: "dialog", "aria-modal": "true" });
+  const titleEl = h("h3", null, title);
+  const bodyEl = h("div", { class: "mbody" }, body);
+  const errEl = h("div", { class: "modalerr", role: "alert" });
+  const actEl = h("div", { class: "actions" });
+  box.append(titleEl, bodyEl, errEl, actEl);
+  overlay.append(box);
+  document.body.append(overlay);
+  const m = {
+    sticky,
+    close() {
+      const i = modals.indexOf(m);
+      if (i < 0) return;
+      modals.splice(i, 1);
+      overlay.remove();
+      if (onClose) onClose();
+    },
+    setError(msg) { errEl.textContent = msg || ""; },
+    setTitle(t) { titleEl.textContent = t; },
+    setBody(node) { bodyEl.replaceChildren(node); },
+    setButtons(list) {
+      actEl.replaceChildren(...list.map((b) => {
+        const btn = h("button", { type: "button", class: b.cls || "" }, b.label);
+        btn.onclick = () => b.onClick(m, btn);
+        return btn;
+      }));
+    },
+  };
+  m.setButtons(buttons);
+  // Backdrop dismiss checks where the press STARTED: a text-selection drag
+  // that ends on the backdrop must not throw the owner's input away.
+  let downOnBackdrop = false;
+  overlay.onmousedown = (e) => { downOnBackdrop = e.target === overlay; };
+  overlay.onclick = (e) => {
+    if (!m.sticky && e.target === overlay && downOnBackdrop) m.close();
+  };
+  modals.push(m);
+  const first = box.querySelector("input:not([type=hidden]):not([readonly]), select, textarea") ||
+    actEl.querySelector("button");
+  if (first) first.focus();
+  return m;
+}
+function closeAllModals() { while (modals.length) modals[modals.length - 1].close(); }
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.isComposing || !modals.length) return;
+  const top = modals[modals.length - 1];
+  if (!top.sticky) top.close();
+});
+// Resolves true only on an explicit OK.
+function confirmBox({ title, text, ok = "OK", danger = false }) {
+  return new Promise((resolve) => {
+    openModal({
+      title, body: h("p", { class: "hint" }, text), onClose: () => resolve(false),
+      buttons: [
+        { label: "Cancel", cls: "ghost", onClick: (m) => m.close() },
+        { label: ok, cls: danger ? "red" : "primary", onClick: (m) => { resolve(true); m.close(); } },
+      ],
+    });
+  });
+}
+// A plaintext credential, shown once. It lives only in this input until the
+// box is removed from the page; nothing else keeps it.
+function secretBox(value, what) {
+  const input = h("input", { type: "text", readonly: true, spellcheck: "false", autocomplete: "off",
+                             "aria-label": what });
+  input.value = value;
+  input.onfocus = () => input.select();
+  const copy = h("button", { type: "button" }, "Copy");
+  copy.onclick = async () => {
+    try { await navigator.clipboard.writeText(input.value); toast("Copied."); }
+    catch { input.focus(); input.select(); toast("Selected: press Ctrl+C (Cmd+C) to copy.", "info"); }
+  };
+  return h("div", { class: "keybanner" },
+    h("div", null, `Your new ${what}. Copy it now: it is never shown again.`),
+    h("div", { class: "copyrow" }, input, copy));
+}
+
+// ============================================================ state
+const state = {
+  me: null,
+  plugins: [], pluginsById: new Map(), refused: [],
+  keys: [], keysById: new Map(),
+  pending: [], grants: [], scheduled: [],
+};
+async function loadPlugins() {
+  const r = await api("/v1/admin/plugins");
+  state.plugins = r.items || [];
+  state.refused = r.refused || [];
+  state.pluginsById = new Map(state.plugins.map((p) => [p.id, p]));
+  paintPluginPill();
+  return state.plugins;
+}
+async function loadKeys() {
+  state.keys = await api("/v1/admin/keys");
+  state.keysById = new Map(state.keys.map((k) => [k.id, k]));
+  return state.keys;
+}
+function manifestOf(pid) { const p = state.pluginsById.get(pid); return p ? p.manifest : null; }
+function pluginName(pid) { const p = state.pluginsById.get(pid); return p ? p.display_name : pid; }
+function actionOf(pid, name) {
+  const m = manifestOf(pid);
+  return m ? m.actions.find((a) => a.name === name) || null : null;
+}
+function effectOf(pid, name) { const a = actionOf(pid, name); return a ? a.side_effect : "unknown"; }
+
+// The plugin's own status answer; the connection details may be nested.
+function healthOf(p) { return (p && p.last_health) || {}; }
+function connInfo(p) {
+  const hl = healthOf(p);
+  return hl.connection && typeof hl.connection === "object" ? { ...hl, ...hl.connection } : hl;
+}
+function pluginStatus(p) {
+  if (!p.enabled) return ["disabled", ""];
+  const hl = healthOf(p);
+  if (!p.connected) return ["not connected", "warn"];
+  if (hl.healthy === false) return ["unhealthy", "bad"];
+  return ["connected", "ok"];
+}
+function pluginBadges(p) {
+  const out = [badge(p.enabled ? "enabled" : "disabled", p.enabled ? "accent" : "")];
+  out.push(badge(p.connected ? "connected" : "not connected", p.connected ? "ok" : "warn"));
+  const hl = healthOf(p);
+  if (hl.healthy === true) out.push(badge("healthy", "ok"));
+  else if (hl.healthy === false) out.push(badge("unhealthy", "bad"));
+  out.push(badge("enforced at " + (p.connection && p.connection.enforcement || "proxy"), ""));
+  return out;
+}
+function paintPluginPill() {
+  const enabled = state.plugins.filter((p) => p.enabled);
+  const up = enabled.filter((p) => pluginStatus(p)[1] === "ok");
+  const pill = $("pluginPill");
+  pill.className = "pill " + (!enabled.length ? "" : up.length === enabled.length ? "ok" : up.length ? "warn" : "off");
+  $("pluginPillText").textContent = enabled.length
+    ? `${up.length}/${enabled.length} plugins up` : "no plugins enabled";
+}
+
+// Key chain root -> leaf, from the keys list (a delegated key's parents).
+function keyChain(keyId, fallbackName) {
+  const out = [], seen = new Set();
+  let id = keyId;
+  while (id !== null && id !== undefined && !seen.has(id) && out.length < 32) {
+    seen.add(id);
+    const k = state.keysById.get(id);
+    if (!k) { out.push({ id, name: out.length ? `#${id}` : (fallbackName || `#${id}`) }); break; }
+    out.push(k);
+    id = k.parent_key_id;
+  }
+  return out.reverse();
+}
+function keyCrumbs(keyId, fallbackName) {
+  const chain = keyChain(keyId, fallbackName);
+  const wrap = h("span", { class: "crumbs" });
+  if (chain.length > 1) wrap.title = "delegated: root key first, acting key last";
+  chain.forEach((k, i) => {
+    if (i) wrap.append(h("span", { class: "sep" }, "›"));
+    wrap.append(h("span", { class: "crumb" }, k.name));
+  });
+  if (!chain.length) wrap.append(h("span", { class: "crumb" }, fallbackName || "?"));
+  return wrap;
+}
+
+// ============================================================ gate: setup / login
+let polling = null, lostShown = false;
+function gateErr(msg) { $("gateErr").textContent = msg || ""; }
+function showGate(which, msg) {
+  stopPolling();
+  stopAllQr();
+  closeAllModals();
+  document.querySelectorAll("[data-ephemeral]").forEach((n) => n.replaceChildren());
+  $("app").hidden = true;
+  $("gate").hidden = false;
+  $("setupForm").hidden = which !== "setup";
+  $("loginForm").hidden = which !== "login";
+  $("gateMsg").textContent = msg || "";
+  gateErr("");
+  const f = which === "setup" ? $("setupForm") : $("loginForm");
+  const first = [...f.querySelectorAll("input")].find((i) => !i.value) || f.querySelector("input");
+  if (first) first.focus();
+}
+function authLost() {
+  if (lostShown) return;
+  lostShown = true;
+  showGate("login", "Your session has ended. Sign in again.");
+}
+async function boot() {
+  let st;
+  try { st = await api("/auth/status", { allow401: true }); }
+  catch (e) {
+    showGate("login");
+    gateErr(e.status === 403 ? "Access denied before sign-in (Cloudflare Access?)." : errText(e));
+    return;
+  }
+  if (!st.setup_completed) showGate("setup");
+  else if (st.login_required) showGate("login");
+  else await enterApp();
+}
+async function enterApp() {
+  try { state.me = await api("/auth/me"); }
+  catch (e) { if (!(e instanceof AuthLost)) { showGate("login"); gateErr(errText(e)); } return; }
+  lostShown = false;
+  $("gate").hidden = true;
+  $("app").hidden = false;
+  $("whoami").textContent = state.me.username;
+  renderRoute();
+  await refreshView(currentView());
+  startPolling();
+}
+$("setupForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.target, btn = f.querySelector("button[type=submit]");
+  gateErr("");
+  const username = f.username.value.trim(), password = f.password.value;
+  if (!/^[a-z0-9_.-]{3,32}$/.test(username)) { gateErr("Username: 3-32 characters of a-z 0-9 _ . -"); return; }
+  if (password.length < 12) { gateErr("Password: at least 12 characters."); return; }
+  if (password !== f.password2.value) { gateErr("The two passwords differ."); return; }
+  try {
+    await withBusy(btn, () => api("/auth/setup", { method: "POST", allow401: true,
+      body: { setup_token: f.setup_token.value.trim(), username, password } }));
+  } catch (err) {
+    gateErr(err.status === 401 ? "The setup token is missing." : errText(err));
+    return;
+  }
+  f.reset();
+  $("loginForm").username.value = username;
+  showGate("login", "Owner created. Sign in with the new password.");
+};
+$("loginForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.target, btn = f.querySelector("button[type=submit]");
+  gateErr("");
+  try {
+    await withBusy(btn, () => api("/auth/login", { method: "POST", allow401: true,
+      body: { username: f.username.value.trim(), password: f.password.value } }));
+  } catch (err) {
+    f.password.value = "";
+    gateErr(err.status === 401 ? "Wrong username or password." : errText(err));
+    return;
+  }
+  f.password.value = "";
+  await enterApp();
+};
+$("logoutBtn").onclick = async () => {
+  try { await api("/auth/logout", { method: "POST", allow401: true }); } catch { /* signing out anyway */ }
+  showGate("login", "Signed out.");
+};
+
+// ============================================================ router + polling
+function currentView() {
+  const fromHash = location.hash.replace(/^#\/?/, "").split("/")[0];
+  if (VIEWS.includes(fromHash)) return fromHash;
+  // /admin/keys (no hash) is a deep link too; the server serves every
+  // /admin/... path with this same page.
+  const fromPath = location.pathname.replace(/^\/admin\/?/, "").split("/")[0];
+  return !location.hash && VIEWS.includes(fromPath) ? fromPath : "overview";
+}
+function renderRoute() {
+  const v = currentView();
+  document.querySelectorAll("section.view").forEach((s) => { s.hidden = s.dataset.view !== v; });
+  document.querySelectorAll("nav.side a").forEach((a) => a.classList.toggle("active", a.dataset.view === v));
+}
+// View name -> loader. Pass 2 adds channels, settings and delegations here.
+const VIEW_REFRESH = {
+  overview: () => refreshOverview(true),
+  requests: refreshRequests,
+  scheduled: refreshScheduled,
+  decisions: refreshDecisions,
+  plugins: refreshPlugins,
+  keys: refreshKeys,
+  hidden: refreshHidden,
+  account: refreshAccount,
+};
+async function refreshView(v) {
+  try {
+    await refreshCounts();
+    if (VIEW_REFRESH[v]) await VIEW_REFRESH[v]();
+  } catch (e) { showErr(e); }
+}
+window.addEventListener("hashchange", () => {
+  if ($("app").hidden) return;
+  stopAllQr();
+  // One-time secrets on the page we are leaving are dropped, not kept around.
+  document.querySelectorAll("[data-ephemeral]").forEach((n) => n.replaceChildren());
+  renderRoute();
+  refreshView(currentView());
+});
+$("refreshBtn").onclick = () => refreshView(currentView());
+function startPolling() { stopPolling(); polling = setInterval(poll, 15000); }
+function stopPolling() { if (polling) clearInterval(polling); polling = null; }
+async function poll() {
+  if (document.hidden || $("app").hidden) return;
+  try {
+    await refreshCounts();
+    const v = currentView();
+    if (LIVE_VIEWS.has(v) && !modals.length) {
+      if (v === "overview") await refreshOverview(false);
+      else await VIEW_REFRESH[v]();
+    }
+  } catch { /* a failed poll stays quiet; the next one retries */ }
+}
+async function refreshCounts() {
+  const [pend, grants, sched] = await Promise.all([
+    api("/v1/admin/actions?status=pending&limit=200"),
+    api("/v1/admin/grants?status=pending&limit=500"),
+    api("/v1/admin/actions?status=scheduled&limit=200"),
+  ]);
+  state.pending = pend.items || [];
+  state.grants = grants || [];
+  state.scheduled = sched.items || [];
+  const fmt = (list, cap) => list.length >= cap ? cap + "+" : String(list.length);
+  const req = state.pending.length + state.grants.length;
+  $("reqBadge").textContent = req ? String(req) : "";
+  $("schedBadge").textContent = state.scheduled.length ? fmt(state.scheduled, 200) : "";
+  $("stActions").textContent = fmt(state.pending, 200);
+  $("stGrants").textContent = String(state.grants.length);
+  $("stSched").textContent = fmt(state.scheduled, 200);
+}
+
+// ============================================================ overview
+async function refreshOverview(withVerify) {
+  await Promise.all([loadPlugins(), loadKeys()]);
+  $("stKeys").textContent = String(state.keys.filter((k) => !k.disabled).length);
+  const grid = $("ovPlugins");
+  grid.replaceChildren();
+  if (!state.plugins.length) {
+    grid.append(empty("No plugin services are registered. The broker discovers them from PLUGIN_URL_<SERVICE> at boot."));
+  }
+  for (const p of state.plugins) {
+    grid.append(h("a", { class: "card pcard", href: "#/plugins" },
+      h("div", { class: "pname" }, p.display_name),
+      h("div", { class: "sub" }, p.id),
+      h("div", { class: "badges" }, pluginBadges(p).slice(0, 3))));
+  }
+  if (withVerify) await runVerify($("ovVerify"));
+}
+$("ovVerifyBtn").onclick = () => withBusy($("ovVerifyBtn"), () => runVerify($("ovVerify")).catch(showErr));
+async function runVerify(out) {
+  out.textContent = "Checking the chain...";
+  paintVerify(out, await api("/v1/admin/decisions/verify"));
+}
+function paintVerify(out, v) {
+  out.replaceChildren();
+  if (!v.ok) {
+    out.append(badge("broken", "bad"),
+      ` The chain breaks at decision #${v.first_bad_id} (${v.checked} rows checked): a row was altered, removed or inserted after it was written.`);
+  } else if (!v.checked) {
+    out.append(badge("empty", ""), " No decisions recorded yet.");
+  } else {
+    out.append(badge("intact", "ok"), " ", badge(v.signed ? "signed" : "unsigned", v.signed ? "ok" : "warn"),
+      v.signed ? ` ${v.checked} rows verified with the signing key.`
+        : ` ${v.checked} rows hash-chained but not HMAC-signed (DECISION_SIGNING_KEY is not set).`);
+  }
+}
+
+// ============================================================ requests
+// Mirrors actions/queue.render_summary: {name} placeholders (params, or
+// <param>_label), with {{ and }} as literal braces. Output is used as text.
+function renderSummary(tpl, params, labels) {
+  let out = "", i = 0;
+  while (i < tpl.length) {
+    const c = tpl[i];
+    if ((c === "{" || c === "}") && tpl[i + 1] === c) { out += c; i += 2; continue; }
+    if (c === "{") {
+      const j = tpl.indexOf("}", i);
+      if (j < 0) { out += tpl.slice(i); break; }
+      const name = tpl.slice(i + 1, j);
+      const v = hasOwn(labels, name) ? labels[name] : hasOwn(params, name) ? params[name] : "";
+      out += v === null || v === undefined ? "" : typeof v === "string" ? v : JSON.stringify(v);
+      i = j + 1;
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+function actionSummary(a) {
+  const act = actionOf(a.target, a.action);
+  if (!act || !act.summary_template) return "";
+  const labels = {};
+  if (act.selector_param) {
+    labels[act.selector_param + "_label"] = a.resource_label || (a.params || {})[act.selector_param] || "";
+  }
+  return renderSummary(act.summary_template, a.params || {}, labels);
+}
+const openParams = new Set();      // keeps "All parameters" open across polls
+function paramsDetails(id, params) {
+  const d = h("details", { class: "params" },
+    h("summary", null, "All parameters"),
+    h("pre", { class: "agent-text mono" }, JSON.stringify(params || {}, null, 2)));
+  d.open = openParams.has(id);
+  d.ontoggle = () => { if (d.open) openParams.add(id); else openParams.delete(id); };
+  return d;
+}
+function actionCard(a, mode) {
+  const act = actionOf(a.target, a.action);
+  const card = h("div", { class: "card req" });
+  const meta = h("div", { class: "meta" }, keyCrumbs(a.key_id, a.key_name), h("span", null, "→"),
+    h("span", { class: "act" }, `${pluginName(a.target)} · ${a.action}`),
+    act ? badge(act.side_effect, "eff-" + act.side_effect) : null,
+    h("span", null, "queued " + relTime(a.created_at)));
+  if (a.held) meta.append(badge("held: plugin disabled", "warn"));
+  card.append(meta);
+  const summary = actionSummary(a);
+  if (summary) card.append(h("div", { class: "agent-text summary" }, summary));
+  const facts = h("div", { class: "facts" });
+  const selParam = act && act.selector_param;
+  const rawTarget = selParam ? (a.params || {})[selParam] : null;
+  if (a.resource_label || rawTarget) {
+    facts.append(...fact("Resource", a.resource_label || "",
+      rawTarget && rawTarget !== a.resource_label ? [" ", h("span", { class: "idchip" }, String(rawTarget))] : null));
+  }
+  if (a.run_at) facts.append(...fact(mode === "scheduled" ? "Runs" : "Runs at", `${fmtWhen(a.run_at)} (${relTime(a.run_at)})`));
+  if (mode === "pending" && a.expires_at) facts.append(...fact("Expires", `${relTime(a.expires_at)} if not decided`));
+  if (mode === "scheduled" && a.approval_source) facts.append(...fact("Approval", a.approval_source === "automatic" ? "automatic (the key may act directly)" : "approved by you"));
+  card.append(facts);
+  if (a.note) card.append(h("div", { class: "quote-label" }, "Agent's note"), h("div", { class: "agent-text" }, a.note));
+  card.append(paramsDetails(a.id, a.params));
+  const actions = h("div", { class: "actions" });
+  if (mode === "pending") {
+    const approve = h("button", { type: "button", class: "green" }, a.run_at ? "Approve (runs later)" : "Approve");
+    const reject = h("button", { type: "button", class: "red" }, "Reject");
+    if (a.held) { approve.disabled = true; approve.title = "Enable the plugin to approve this action."; }
+    approve.onclick = () => decideAction(a, "approve", [approve, reject]);
+    reject.onclick = () => decideAction(a, "reject", [approve, reject]);
+    actions.append(approve, reject);
+  } else {
+    const cancel = h("button", { type: "button", class: "red" }, "Cancel");
+    cancel.onclick = () => cancelScheduled(a, cancel);
+    actions.append(cancel);
+  }
+  card.append(actions);
+  return card;
+}
+async function decideAction(a, verb, btns) {
+  btns.forEach((b) => { b.disabled = true; });
+  try {
+    const r = await api(`/v1/admin/actions/${enc(a.id)}/${verb}`, { method: "POST" });
+    if (verb === "reject") toast("Rejected.");
+    else if (r && r.status === "scheduled") toast(`Approved. It runs ${relTime(r.run_at)}.`);
+    else toast("Approved and done.");
+  } catch (e) {
+    showErr(e);
+    btns.forEach((b) => { b.disabled = false; });
+  }
+  refreshView("requests");
+}
+async function cancelScheduled(a, btn) {
+  const ok = await confirmBox({ title: "Cancel this scheduled action?",
+    text: `${pluginName(a.target)} · ${a.action}, due ${fmtWhen(a.run_at)}. It will not run.`,
+    ok: "Cancel it", danger: true });
+  if (!ok) return;
+  try {
+    await withBusy(btn, () => api(`/v1/admin/actions/${enc(a.id)}/cancel`, { method: "POST" }));
+    toast("Canceled.");
+  } catch (e) { showErr(e); }
+  refreshView("scheduled");
+}
+
+// A capability as the owner reads it: which plugin, which actions by side
+// effect, which resources, which limits, mode, expiry and budget. Budgets
+// are per grant, so an approval ADDS capacity; the card says so explicitly.
+function budgetText(b, hasWrites) {
+  if (!hasWrites) return [h("span", null, "not charged (reads are never budgeted)")];
+  const parts = [];
+  if (b && b.per_day !== undefined && b.per_day !== null) parts.push(`adds ${b.per_day}/day`);
+  if (b && b.per_minute !== undefined && b.per_minute !== null) parts.push(`adds ${b.per_minute}/minute`);
+  if (!parts.length) return [badge("unlimited", "warn"), " no budget: approving adds uncapped write capacity"];
+  return [h("b", null, parts.join(", ")), " of write capacity on top of the key's other grants"];
+}
+function capView(cap) {
+  const m = manifestOf(cap.target);
+  const box = h("div", { class: "capview" });
+  box.append(h("div", { class: "caphead" }, h("b", null, pluginName(cap.target)),
+    h("span", { class: "sub mono" }, cap.target),
+    m ? null : badge("plugin not registered", "warn")));
+  const facts = h("div", { class: "facts" });
+  const byEffect = {};
+  for (const name of cap.actions || []) (byEffect[effectOf(cap.target, name)] ||= []).push(name);
+  const actRows = h("div");
+  for (const eff of [...EFFECTS, "unknown"]) {
+    if (!byEffect[eff]) continue;
+    actRows.append(h("div", { class: "effrow" }, badge(eff, "eff-" + eff), byEffect[eff].join(", ")));
+  }
+  facts.append(...fact("Actions", actRows));
+  const hasWrites = (cap.actions || []).some((n) => effectOf(cap.target, n) !== "read");
+  const sel = cap.selector || {};
+  const dims = new Set([...(m ? m.selectors.map((s) => s.name) : []), ...Object.keys(sel)]);
+  for (const d of dims) {
+    const spec = m && m.selectors.find((s) => s.name === d);
+    facts.append(...fact(d, hasOwn(sel, d) ? [spec ? FORM_TEXT[spec.form] + ": " : "", idChips(sel[d])] : "any"));
+  }
+  const cons = cap.constraints || {};
+  const cnames = new Set([...(m ? m.constraints.map((c) => c.name) : []), ...Object.keys(cons)]);
+  for (const c of cnames) {
+    facts.append(...fact(c, hasOwn(cons, c) ? String(cons[c]) : "unconstrained"));
+  }
+  if (hasWrites) {
+    facts.append(...fact("Mode", cap.mode === "direct"
+      ? [badge("direct", "warn"), " writes act without asking you"]
+      : [badge("draft", "ok"), " every write waits for your approval"]));
+  }
+  facts.append(...fact("Expires", cap.expires_at ? `${fmtWhen(cap.expires_at)} (${relTime(cap.expires_at)})` : "no expiry of its own"));
+  facts.append(...fact("Budget", budgetText(cap.budget, hasWrites)));
+  box.append(facts);
+  return box;
+}
+function grantCard(g) {
+  const card = h("div", { class: "card req" });
+  const k = state.keysById.get(g.key_id);
+  const meta = h("div", { class: "meta" }, keyCrumbs(g.key_id), h("span", null, "asks for more authority"),
+    badge(g.kind, "accent"), k ? badge("role " + k.role, "") : null, h("span", null, relTime(g.created_at)));
+  if (g.requested_by_key_id && g.requested_by_key_id !== g.key_id) {
+    meta.append(h("span", null, "requested by"), keyCrumbs(g.requested_by_key_id));
+  }
+  card.append(meta);
+  if (g.reason) card.append(h("div", { class: "quote-label" }, "Agent's reason"), h("div", { class: "agent-text" }, g.reason));
+  card.append(h("div", { class: "facts" }, ...fact("Grant expires",
+    g.expires_at ? `${fmtWhen(g.expires_at)} (${relTime(g.expires_at)})` : "never (until revoked)")));
+  for (const c of g.capabilities || []) card.append(capView(c));
+  const actions = h("div", { class: "actions" });
+  const approve = h("button", { type: "button", class: "green" }, "Approve");
+  const reject = h("button", { type: "button", class: "red" }, "Reject");
+  approve.onclick = () => decideGrant(g, "approve", [approve, reject]);
+  reject.onclick = () => decideGrant(g, "reject", [approve, reject]);
+  actions.append(approve, reject);
+  card.append(actions);
+  return card;
+}
+async function decideGrant(g, verb, btns) {
+  btns.forEach((b) => { b.disabled = true; });
+  try {
+    await api(`/v1/admin/grants/${enc(g.id)}/${verb}`, { method: "POST" });
+    toast(verb === "approve" ? "Granted." : "Rejected.");
+  } catch (e) {
+    showErr(e);
+    btns.forEach((b) => { b.disabled = false; });
+  }
+  refreshView("requests");
+}
+async function refreshRequests() {
+  await Promise.all([loadPlugins(), loadKeys()]);
+  const al = $("actList"), gl = $("grantList");
+  al.replaceChildren();
+  gl.replaceChildren();
+  $("actCount").textContent = state.pending.length ? `${state.pending.length} waiting` : "";
+  $("grantCount").textContent = state.grants.length ? `${state.grants.length} waiting` : "";
+  if (!state.pending.length) al.append(empty("No actions are waiting for approval."));
+  for (const a of state.pending) al.append(actionCard(a, "pending"));
+  if (!state.grants.length) gl.append(empty("No permission requests."));
+  for (const g of state.grants) gl.append(grantCard(g));
+}
+
+// ============================================================ scheduled
+async function refreshScheduled() {
+  await Promise.all([loadPlugins(), loadKeys()]);
+  const list = $("schedList");
+  list.replaceChildren();
+  if (!state.scheduled.length) list.append(empty("Nothing is scheduled."));
+  for (const a of state.scheduled) list.append(actionCard(a, "scheduled"));
+}
+
+// ============================================================ decisions
+let decCursor = null;
+function fillSelect(sel, options, keepFirst = true) {
+  const cur = sel.value;
+  const first = keepFirst ? sel.options[0] : null;
+  sel.replaceChildren(...(first ? [first] : []),
+    ...options.map(([v, t]) => h("option", { value: v }, t)));
+  if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+}
+async function refreshDecisions() {
+  await Promise.all([loadPlugins(), loadKeys()]);
+  const f = $("decFilter");
+  fillSelect(f.key, state.keys.map((k) => [String(k.id), k.name]));
+  fillSelect(f.plugin, state.plugins.map((p) => [p.id, p.display_name]));
+  await loadDecisions(false);
+}
+function decisionQuery(cursor) {
+  const f = $("decFilter"), q = new URLSearchParams({ limit: "50" });
+  if (f.key.value) q.set("key", f.key.value);
+  if (f.plugin.value) q.set("target", f.plugin.value);
+  if (f.decision.value) q.set("decision", f.decision.value);
+  if (f.since.value) q.set("since", String(nowTs() - Number(f.since.value)));
+  if (cursor !== null && cursor !== undefined) q.set("cursor", String(cursor));
+  return q.toString();
+}
+async function loadDecisions(append) {
+  const r = await api(`/v1/admin/decisions?${decisionQuery(append ? decCursor : null)}`);
+  const rows = $("decRows");
+  if (!append) rows.replaceChildren();
+  for (const d of r.items || []) rows.append(decisionRow(d));
+  if (!append && !(r.items || []).length) {
+    rows.append(h("tr", null, h("td", { colspan: "6" }, empty("No decisions match."))));
+  }
+  decCursor = r.next_cursor;
+  $("decMore").hidden = decCursor === null || decCursor === undefined;
+}
+const DECISION_KIND = { allow: "ok", draft: "warn", deny: "bad" };
+function decisionRow(d) {
+  const chain = (d.grant_chain || []).map((g) => h("span", { class: "idchip", title: g }, String(g).slice(0, 8)));
+  const keyCell = h("td", null, keyCrumbs(d.key_id, d.key_name));
+  if (chain.length) {
+    keyCell.append(h("div", { class: "sub" }, "grants ",
+      chain.flatMap((c, i) => (i ? [h("span", { class: "sep" }, " › "), c] : [c]))));
+  }
+  const actCell = h("td", null, h("div", null, `${d.target}.${d.action}`));
+  if (d.resource) actCell.append(h("div", { class: "sub mono" }, d.resource));
+  const decCell = h("td");
+  if (d.kind === "outcome") {
+    decCell.append(badge("outcome", ""), " ", h("span", { class: "mono" }, d.outcome || ""));
+  } else {
+    decCell.append(badge(d.decision || "?", DECISION_KIND[d.decision] || ""));
+    if (d.reason) decCell.append(h("div", { class: "sub" }, d.reason));
+  }
+  if (d.actor_via) decCell.append(h("div", { class: "sub" }, `by the owner via ${d.actor_via}`));
+  const enf = h("td", null, h("div", { class: "badges" },
+    Object.entries(d.enforced_where || {}).map(([dim, where]) =>
+      badge(`${dim}: ${where}`, where === "target" ? "ok" : ""))));
+  return h("tr", null,
+    h("td", { class: "mono" }, "#" + d.id),
+    h("td", null, fmtWhen(d.ts), h("div", { class: "sub" }, relTime(d.ts))),
+    keyCell, actCell, decCell, enf);
+}
+$("decFilter").onsubmit = (e) => { e.preventDefault(); loadDecisions(false).catch(showErr); };
+$("decMore").onclick = () => withBusy($("decMore"), () => loadDecisions(true).catch(showErr));
+$("verifyBtn").onclick = () => withBusy($("verifyBtn"), () => runVerify($("verifyOut")).catch(showErr));
+
+// ============================================================ resource picker
+// resourcePicker(target, kind): chips + name search over /v1/admin/resolve.
+// Selection only: what each chip stores, and what a form submits, is the
+// resource id; the label is display sugar and other people's text, so the id
+// stays visible next to it. Kinds the plugin cannot resolve take typed ids.
+// With opts.onPick the picker has no chips: picking calls onPick({id,label}).
+function resourcePicker(target, kind, opts = {}) {
+  const m = manifestOf(target);
+  const res = m && hasOwn(m.resources, kind) ? m.resources[kind] : null;
+  const canResolve = !!(res && res.resolve);
+  const what = res ? res.display.toLowerCase() : kind;
+  const chips = [];
+  const single = typeof opts.onPick === "function";
+  const input = h("input", { type: "text", autocomplete: "off", spellcheck: "false",
+    placeholder: opts.placeholder || (canResolve ? `search ${what} by name, or type an id` : `type a ${what} id and press Enter`) });
+  const box = h("div", { class: "picker" }, input);
+  const results = h("div", { class: "pickresults" });
+  const wrap = h("div", { class: "pickwrap" }, box, results);
+  if (res && res.id_format) wrap.append(h("div", { class: "pickhint" }, "Ids: " + res.id_format));
+  box.onclick = () => input.focus();
+  function paint() {
+    // replaceChildren() detaches the input, which blurs it; keep the focus so
+    // an async label lookup cannot eat the owner's typing.
+    const hadFocus = document.activeElement === input;
+    box.replaceChildren();
+    for (const c of chips) {
+      const chip = h("span", { class: "chip" });
+      if (c.label) chip.append(h("span", { class: "chiptxt", title: c.label }, c.label));
+      chip.append(h("span", { class: "chipid" }, c.id));
+      const x = h("button", { type: "button", class: "chipx", title: "remove " + c.id }, "×");
+      x.onclick = (e) => { e.stopPropagation(); chips.splice(chips.indexOf(c), 1); paint(); fire(); };
+      chip.append(x);
+      box.append(chip);
+    }
+    box.append(input);
+    if (hadFocus) input.focus();
+  }
+  function fire() { wrap.dispatchEvent(new Event("change", { bubbles: true })); }
+  let gen = 0, timer = null;
+  function add(id, label) {
+    if (single) opts.onPick({ id, label: label || "" });
+    else if (!chips.some((c) => c.id === id)) { chips.push({ id, label: label || "" }); paint(); fire(); }
+    gen++;
+    input.value = "";
+    results.replaceChildren();
+    input.focus();
+  }
+  function row(label, id, onAdd, muted) {
+    const btn = h("button", { type: "button" }, opts.pickLabel || "Add");
+    btn.onclick = onAdd;
+    return h("div", { class: "pickrow" },
+      h("span", { class: "lbl", title: label }, label), muted ? h("span", { class: "sub" }, muted) : h("span", { class: "rid" }, id), btn);
+  }
+  async function search() {
+    const g = ++gen;
+    const q = input.value.trim();
+    results.replaceChildren();
+    if (!q) return;
+    let matches = [], failed = null;
+    if (canResolve) {
+      try {
+        matches = await api(`/v1/admin/resolve?${new URLSearchParams({ target, kind, q, limit: "8" })}`);
+      } catch (e) {
+        if (e instanceof AuthLost) return;
+        failed = e;
+      }
+      if (g !== gen) return;            // a newer search, or add(), superseded this one
+    }
+    results.replaceChildren();
+    if (failed) results.append(empty("Name lookup failed: " + errText(failed)));
+    for (const r of matches || []) {
+      if (r && typeof r.id === "string") results.append(row(r.label || "(no name)", r.id, () => add(r.id, r.label || "")));
+    }
+    // Always offer the typed text as an id: name lookup is a convenience,
+    // never a gate (the broker normalizes ids where the plugin can).
+    results.append(row(q, q, () => add(q, ""), "use exactly as typed"));
+  }
+  input.oninput = () => { clearTimeout(timer); timer = setTimeout(search, 250); };
+  input.onkeydown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      clearTimeout(timer);
+      const q = input.value.trim();
+      if (!canResolve && q) add(q, "");
+      else search();
+    } else if (e.key === "Escape" && results.childElementCount) {
+      // First Escape closes the dropdown only, never the dialog around it.
+      e.preventDefault();
+      e.stopPropagation();
+      dismiss();
+    }
+  };
+  function dismiss() {
+    const had = results.childElementCount > 0;
+    clearTimeout(timer);
+    gen++;
+    results.replaceChildren();
+    return had;
+  }
+  async function prettify() {
+    // Best effort: fill labels for chips loaded as bare ids.
+    if (!canResolve) return;
+    let changed = false;
+    await Promise.all(chips.slice(0, 25).map(async (c) => {
+      if (c.label) return;
+      try {
+        const found = await api(`/v1/admin/resolve?${new URLSearchParams({ target, kind, q: c.id, limit: "5" })}`);
+        const hit = (found || []).find((x) => x && x.id === c.id);
+        if (hit && hit.label) { c.label = hit.label; changed = true; }
+      } catch { /* labels are cosmetic */ }
+    }));
+    if (changed) paint();
+  }
+  paint();
+  return {
+    el: wrap,
+    get: () => chips.map((c) => c.id),
+    set(ids) {
+      chips.length = 0;
+      for (const id of ids || []) chips.push({ id, label: "" });
+      gen++; input.value = ""; results.replaceChildren(); paint(); prettify();
+    },
+    clear() { chips.length = 0; gen++; input.value = ""; results.replaceChildren(); paint(); },
+    // Text typed but never added: for free-text kinds it is added; otherwise
+    // it is returned so the caller can refuse to drop it silently.
+    flush() {
+      const q = input.value.trim();
+      if (!q) return null;
+      if (!canResolve) { add(q, ""); return null; }
+      return q;
+    },
+    dismiss,
+  };
+}
+
+// ============================================================ capability editor
+// Generated from the manifests: per plugin, actions grouped by side effect,
+// a selector picker per set-form dimension ("any" by default), an input per
+// scalar constraint, mode, budget and expiry. Produces capability JSON as
+// authority/capability.from_json reads it; the broker normalizes it.
+/* scalar-inputs:start */
+const SCALAR_INPUTS = {
+  range(c, v) {
+    const i = h("input", { type: "number", min: "0", step: "1", placeholder: "no limit" });
+    if (v !== undefined && v !== null) i.value = String(v);
+    return { el: i, get() {
+      const t = i.value.trim();
+      if (t === "") return undefined;
+      const n = Number(t);
+      if (!Number.isInteger(n) || n < 0) throw new Error(`${c.name}: a whole number of at least 0, or empty for no limit.`);
+      return n;
+    } };
+  },
+  flag(c, v) {
+    // true is the top of a flag (unrestricted), so it is simply left out.
+    const cb = h("input", { type: "checkbox" });
+    cb.checked = v === undefined || v === null ? true : v === true;
+    return { el: h("label", { class: "chk" }, cb, "allowed"), get: () => (cb.checked ? undefined : false) };
+  },
+  level(c, v) {
+    const values = c.values || [];
+    const sel = h("select", null, values.map((x) => h("option", { value: x }, x)));
+    const top = values[values.length - 1];
+    sel.value = v === undefined || v === null || !values.includes(v) ? top : v;
+    return { el: sel, get: () => (sel.value === top ? undefined : sel.value) };
+  },
+};
+/* scalar-inputs:end */
+function appliesText(list) { return list.includes("*") ? "all actions" : list.join(", "); }
+function capBlock(cap, fresh, onRemove) {
+  const m = manifestOf(cap.target);
+  const el = h("div", { class: "capblock" });
+  const remove = h("button", { type: "button", class: "ghost" }, "Remove");
+  remove.onclick = onRemove;
+  el.append(h("div", { class: "caphead" }, h("b", null, pluginName(cap.target)),
+    h("span", { class: "sub mono" }, cap.target), h("span", { class: "spacer" }), remove));
+  if (!m) {
+    // Kept exactly as stored: the editor never rewrites what it cannot read.
+    el.append(h("div", { class: "hint" }, "This plugin is not registered right now; the capability is kept unchanged."), capView(cap));
+    return { el, get: () => cap, dismiss: () => false };
+  }
+  const changed = () => el.dispatchEvent(new Event("change", { bubbles: true }));
+
+  // ---- actions, grouped by side effect
+  const boxes = new Map();
+  const chosen = new Set(cap.actions || []);
+  const actSec = h("div", { class: "section" }, h("div", { class: "lbl" }, "Actions"));
+  const shortcuts = h("div", { class: "shortcuts" }, "Select: ");
+  const SHORTCUTS = [["*", "all"], ["read_*", "all reads"], ["write_*", "all writes"],
+                     ["destructive_*", "all destructive"], ["", "none"]];
+  for (const [glob, label] of SHORTCUTS) {
+    const eff = glob.endsWith("_*") ? glob.slice(0, -2) : null;
+    if (eff && !m.actions.some((a) => a.side_effect === eff)) continue;
+    const b = h("button", { type: "button", class: "link" }, label);
+    b.onclick = () => {
+      for (const a of m.actions) {
+        const cb = boxes.get(a.name);
+        if (glob === "") cb.checked = false;
+        else if (glob === "*" || a.side_effect === eff) cb.checked = true;
+      }
+      syncMode();
+      changed();
+    };
+    shortcuts.append(b);
+  }
+  actSec.append(shortcuts);
+  for (const eff of EFFECTS) {
+    const acts = m.actions.filter((a) => a.side_effect === eff);
+    if (!acts.length) continue;
+    const row = h("div", { class: "actgroup" }, badge(eff, "eff-" + eff));
+    for (const a of acts) {
+      const cb = h("input", { type: "checkbox" });
+      cb.checked = chosen.has(a.name);
+      cb.onchange = syncMode;
+      boxes.set(a.name, cb);
+      row.append(h("label", { class: "chk", title: a.doc || a.name }, cb, a.name));
+    }
+    actSec.append(row);
+  }
+  el.append(actSec);
+
+  // ---- mode (only meaningful for writes; reads are always direct)
+  const modeSel = h("select", null,
+    h("option", { value: "draft" }, "draft: every write waits for your approval"),
+    h("option", { value: "direct" }, "direct: writes act without asking"));
+  modeSel.value = fresh ? "draft" : (cap.mode === "direct" ? "direct" : "draft");
+  const modeSec = h("div", { class: "section" }, h("div", { class: "lbl" }, "Mode"), modeSel);
+  el.append(modeSec);
+  const anyWrite = () => [...boxes].some(([n, cb]) => cb.checked && effectOf(cap.target, n) !== "read");
+  function syncMode() { modeSec.hidden = !anyWrite(); }
+  syncMode();
+
+  // ---- selectors: one per set-form dimension
+  const selInputs = [];
+  if (m.selectors.length) {
+    const sec = h("div", { class: "section" }, h("div", { class: "lbl" }, "Resources"));
+    for (const s of m.selectors) {
+      const current = cap.selector && hasOwn(cap.selector, s.name) ? cap.selector[s.name] : null;
+      const scope = h("select", null, h("option", { value: "any" }, "any"),
+        h("option", { value: "only" }, "only " + FORM_TEXT[s.form]));
+      const picker = resourcePicker(cap.target, s.resource || s.name);
+      if (Array.isArray(current) && current.length) { scope.value = "only"; picker.set(current); }
+      picker.el.hidden = scope.value !== "only";
+      scope.onchange = () => { picker.el.hidden = scope.value !== "only"; };
+      sec.append(h("div", { class: "dimrow" },
+        h("div", { class: "dimname" }, h("b", null, s.name),
+          h("span", { class: "sub" }, `${s.form}, enforced at ${s.enforcement}`),
+          h("span", { class: "sub" }, "applies to " + appliesText(s.applies_to)),
+          s.doc ? h("span", { class: "sub" }, s.doc) : null),
+        h("div", { class: "dimctl" }, scope, picker.el)));
+      selInputs.push({ s, scope, picker });
+    }
+    el.append(sec);
+  }
+
+  // ---- constraints: one per scalar form
+  const conInputs = [];
+  if (m.constraints.length) {
+    const sec = h("div", { class: "section" }, h("div", { class: "lbl" }, "Limits"));
+    for (const c of m.constraints) {
+      const cur = cap.constraints && hasOwn(cap.constraints, c.name) ? cap.constraints[c.name] : undefined;
+      // A new capability starts from the manifest's suggested default; an
+      // existing one shows what it holds (absent = unconstrained).
+      const input = SCALAR_INPUTS[c.form](c, fresh ? c.default : cur);
+      sec.append(h("div", { class: "dimrow" },
+        h("div", { class: "dimname" }, h("b", null, c.name),
+          h("span", { class: "sub" }, `${c.form}, enforced at ${c.enforcement}`),
+          h("span", { class: "sub" }, "applies to " + appliesText(c.applies_to)),
+          c.doc ? h("span", { class: "sub" }, c.doc) : null),
+        h("div", { class: "dimctl" }, input.el)));
+      conInputs.push({ c, input });
+    }
+    el.append(sec);
+  }
+
+  // ---- budget and expiry
+  const b = cap.budget || {};
+  const perMin = h("input", { type: "number", min: "0", step: "1", placeholder: "unlimited" });
+  const perDay = h("input", { type: "number", min: "0", step: "1", placeholder: "unlimited" });
+  if (b.per_minute !== undefined && b.per_minute !== null) perMin.value = String(b.per_minute);
+  if (b.per_day !== undefined && b.per_day !== null) perDay.value = String(b.per_day);
+  const exp = h("input", { type: "datetime-local" });
+  exp.value = toLocalInput(cap.expires_at);
+  el.append(h("div", { class: "section" }, h("div", { class: "lbl" }, "Budget and expiry"),
+    h("div", { class: "dimrow" }, h("div", { class: "dimname" }, "Writes per minute"), h("div", { class: "dimctl" }, perMin)),
+    h("div", { class: "dimrow" }, h("div", { class: "dimname" }, "Writes per day"), h("div", { class: "dimctl" }, perDay)),
+    h("div", { class: "dimrow" }, h("div", { class: "dimname" }, "Expires", h("span", { class: "sub" }, "empty = no expiry")),
+      h("div", { class: "dimctl" }, exp))));
+
+  return {
+    el,
+    dismiss: () => selInputs.map((x) => x.picker.dismiss()).some(Boolean),
+    // Throws an Error naming the problem; never returns a half-valid capability.
+    get() {
+      const label = pluginName(cap.target);
+      const actions = [...boxes].filter(([, cb]) => cb.checked).map(([n]) => n);
+      if (!actions.length) throw new Error(`${label}: pick at least one action, or remove this capability.`);
+      const out = { target: cap.target, actions, selector: {}, constraints: {},
+                    mode: anyWrite() ? modeSel.value : "direct", expires_at: null, budget: {} };
+      for (const { s, scope, picker } of selInputs) {
+        if (scope.value !== "only") continue;
+        const left = picker.flush();
+        if (left) throw new Error(`${label}, ${s.name}: "${left}" is typed but not added. Pick a result, or clear it.`);
+        const ids = picker.get();
+        if (!ids.length) throw new Error(`${label}, ${s.name}: "only" needs at least one entry (or choose any).`);
+        out.selector[s.name] = ids;
+      }
+      for (const { c, input } of conInputs) {
+        const v = input.get();
+        if (v !== undefined) out.constraints[c.name] = v;
+      }
+      for (const [field, inp] of [["per_minute", perMin], ["per_day", perDay]]) {
+        const t = inp.value.trim();
+        if (t === "") continue;
+        const n = Number(t);
+        if (!Number.isInteger(n) || n < 0) throw new Error(`${label}: ${field} must be a whole number of at least 0.`);
+        out.budget[field] = n;
+      }
+      if (exp.value) {
+        const ts = fromLocalInput(exp.value);
+        if (!ts || ts <= nowTs()) throw new Error(`${label}: the expiry must be in the future.`);
+        out.expires_at = ts;
+      }
+      return out;
+    },
+  };
+}
+function capabilityEditor(caps) {
+  const root = h("div", { class: "capeditor" });
+  const list = h("div");
+  const none = empty("No capabilities: this key can do nothing until you add one, or it asks and you approve.");
+  const blocks = [];
+  let dirty = false;
+  root.addEventListener("input", () => { dirty = true; });
+  root.addEventListener("change", () => { dirty = true; });
+  const paintEmpty = () => { none.hidden = blocks.length > 0; };
+  function add(cap, fresh) {
+    const b = capBlock(cap, fresh, () => {
+      blocks.splice(blocks.indexOf(b), 1);
+      b.el.remove();
+      dirty = true;
+      paintEmpty();
+    });
+    blocks.push(b);
+    list.append(b.el);
+    paintEmpty();
+  }
+  const targetSel = h("select", { "aria-label": "plugin" },
+    state.plugins.map((p) => h("option", { value: p.id }, p.display_name + (p.enabled ? "" : " (disabled)"))));
+  const addBtn = h("button", { type: "button" }, "Add a capability");
+  addBtn.onclick = () => {
+    if (!targetSel.value) return;
+    add({ target: targetSel.value, actions: [] }, true);
+    dirty = true;
+  };
+  const addRow = h("div", { class: "capadd" }, targetSel, addBtn);
+  if (!state.plugins.length) addRow.replaceChildren(h("span", { class: "hint" }, "No plugins are registered, so there is nothing to grant yet."));
+  root.append(list, none, addRow);
+  for (const c of caps || []) add(c, false);
+  paintEmpty();
+  return {
+    el: root,
+    get: () => blocks.map((b) => b.get()),
+    isDirty: () => dirty,
+    dismiss: () => blocks.map((b) => b.dismiss()).some(Boolean),
+  };
+}
+
+// ============================================================ denies editor
+// Per-key deny sets {target: {kind: [ids]}}: outside the grant lattice, they
+// only ever grow along a delegation chain. Kinds are the manifest's resource
+// kinds plus set-form dimensions that have no resource kind of their own.
+function denyKinds(pid) {
+  const m = manifestOf(pid);
+  if (!m) return [];
+  const kinds = Object.entries(m.resources).map(([k, r]) => [k, r.display]);
+  for (const s of m.selectors) if (!s.resource && !kinds.some(([k]) => k === s.name)) kinds.push([s.name, s.name]);
+  return kinds;
+}
+function deniesEditor(initial) {
+  const root = h("div", { class: "denies" });
+  const list = h("div");
+  const rows = [];
+  let dirty = false;
+  root.addEventListener("input", () => { dirty = true; });
+  root.addEventListener("change", () => { dirty = true; });
+  function addRow(target, kind, ids) {
+    const tSel = h("select", { "aria-label": "plugin" });
+    const pids = state.plugins.map((p) => [p.id, p.display_name]);
+    // A deny on a plugin that is not registered right now is kept, not dropped.
+    if (target && !state.pluginsById.has(target)) pids.push([target, target + " (not registered)"]);
+    tSel.append(...pids.map(([v, t]) => h("option", { value: v }, t)));
+    if (target) tSel.value = target;
+    const kSel = h("select", { "aria-label": "kind" });
+    const mount = h("div", { class: "pickmount" });
+    const r = { picker: null, tSel, kSel };
+    function buildPicker(keep) {
+      r.picker = resourcePicker(tSel.value, kSel.value, { placeholder: "search, or type an id to deny" });
+      mount.replaceChildren(r.picker.el);
+      if (keep && keep.length) r.picker.set(keep);
+    }
+    function buildKinds(k, keep) {
+      const kinds = denyKinds(tSel.value);
+      if (k && !kinds.some(([x]) => x === k)) kinds.push([k, k]);
+      kSel.replaceChildren(...kinds.map(([v, t]) => h("option", { value: v }, t)));
+      if (k) kSel.value = k;
+      buildPicker(keep);
+    }
+    tSel.onchange = () => buildKinds(null, []);
+    kSel.onchange = () => buildPicker([]);
+    const rm = h("button", { type: "button", class: "ghost" }, "Remove");
+    const rowEl = h("div", { class: "denyrow" }, tSel, kSel, rm, mount);
+    rm.onclick = () => { rows.splice(rows.indexOf(r), 1); rowEl.remove(); dirty = true; };
+    buildKinds(kind, ids);
+    rows.push(r);
+    list.append(rowEl);
+  }
+  const add = h("button", { type: "button" }, "Add a deny");
+  add.onclick = () => { if (state.plugins.length) { addRow(null, null, []); dirty = true; } };
+  root.append(list, add);
+  for (const [t, kinds] of Object.entries(initial || {})) {
+    for (const [k, ids] of Object.entries(kinds || {})) addRow(t, k, ids);
+  }
+  return {
+    el: root,
+    isDirty: () => dirty,
+    dismiss: () => rows.map((r) => r.picker.dismiss()).some(Boolean),
+    get() {
+      const out = {};
+      for (const r of rows) {
+        const left = r.picker.flush();
+        if (left) throw new Error(`Deny list: "${left}" is typed but not added. Pick a result, or clear it.`);
+        const ids = r.picker.get();
+        if (!ids.length || !r.tSel.value || !r.kSel.value) continue;
+        const slot = ((out[r.tSel.value] ||= {})[r.kSel.value] ||= []);
+        for (const id of ids) if (!slot.includes(id)) slot.push(id);
+      }
+      for (const kinds of Object.values(out)) for (const k of Object.keys(kinds)) kinds[k].sort();
+      return out;
+    },
+  };
+}
+
+// ============================================================ keys
+async function refreshKeys() {
+  await Promise.all([loadPlugins(), loadKeys()]);
+  const rows = $("keyRows");
+  rows.replaceChildren();
+  if (!state.keys.length) rows.append(h("tr", null, h("td", { colspan: "7" }, empty("No agent keys yet."))));
+  for (const k of state.keys) {
+    const name = h("td", null, h("div", null, h("b", null, k.name)));
+    if (k.rotating) name.append(h("div", { class: "sub" }, "rotating: the old secret still works"));
+    if (k.created_by === "delegation") name.append(h("div", { class: "sub" }, "created by delegation"));
+    const role = h("td", null, k.disabled ? badge("disabled", "bad") : badge(k.role, k.role === "full" ? "warn" : ""));
+    const parent = h("td", null, k.parent_key_id !== null && k.parent_key_id !== undefined
+      ? keyCrumbs(k.parent_key_id) : h("span", { class: "sub" }, "root key"));
+    const used = h("td", null, h("div", null, k.last_used_at ? relTime(k.last_used_at) : "never"));
+    if (k.last_used_ip) used.append(h("div", { class: "sub mono" }, k.last_used_ip));
+    const expired = k.expires_at && k.expires_at <= nowTs();
+    const expires = h("td", null, fmtDate(k.expires_at), expired ? [" ", badge("expired", "bad")] : null);
+    const edit = h("button", { type: "button" }, "Edit");
+    edit.onclick = () => openEditKey(k.id);
+    const rotate = h("button", { type: "button", class: "ghost" }, "Rotate");
+    rotate.onclick = () => rotateKey(k, rotate);
+    const toggle = h("button", { type: "button", class: "ghost" }, k.disabled ? "Enable" : "Disable");
+    toggle.onclick = () => setKeyDisabled(k, !k.disabled, toggle);
+    rows.append(h("tr", null, name, role, h("td", null, String(k.rate_per_min)), parent, used, expires,
+      h("td", null, h("div", { class: "row-actions" }, edit, rotate, toggle))));
+  }
+}
+function roleSelect(value) {
+  const sel = h("select", { name: "role" }, ROLES.map((r) => h("option", { value: r }, r)));
+  sel.value = value || "read-only";
+  const help = h("div", { class: "formhelp" });
+  const paint = () => { help.textContent = ROLE_HELP[sel.value] || ""; };
+  sel.addEventListener("change", paint);
+  paint();
+  return { sel, help };
+}
+function openCreateKey() {
+  const name = h("input", { name: "name", required: true, maxlength: "64", placeholder: "e.g. claude-desktop" });
+  const role = roleSelect("read-only");
+  const rate = h("input", { type: "number", min: "1", max: "10000", step: "1", value: "6" });
+  const exp = h("input", { type: "datetime-local" });
+  const capEd = capabilityEditor([]);
+  const denEd = deniesEditor({});
+  const form = h("form", { class: "grid", autocomplete: "off" },
+    h("label", null, "Name", name), h("label", null, "Role", role.sel),
+    h("label", null, "Calls per minute", rate), h("label", null, "Key expires (empty = never)", exp),
+    role.help,
+    h("div", { class: "formsection" }, h("h4", null, "Capabilities (the key's root grant)"), capEd.el),
+    h("div", { class: "formsection" }, h("h4", null, "Denies (never these, whatever the grants say)"), denEd.el));
+  form.onsubmit = (e) => e.preventDefault();
+  openModal({
+    title: "Create an agent key", body: form, wide: true, sticky: true,
+    buttons: [
+      { label: "Cancel", cls: "ghost", onClick: (m) => m.close() },
+      { label: "Create key", cls: "primary", onClick: (m, btn) => submitCreateKey(m, btn, { name, role, rate, exp, capEd, denEd }) },
+    ],
+  });
+}
+async function submitCreateKey(m, btn, f) {
+  m.setError("");
+  let body;
+  try {
+    const name = f.name.value.trim();
+    if (!name) throw new Error("Give the key a name.");
+    const rate = Number(f.rate.value);
+    if (!Number.isInteger(rate) || rate < 1 || rate > 10000) throw new Error("Calls per minute: a whole number from 1 to 10000.");
+    const exp = f.exp.value ? fromLocalInput(f.exp.value) : null;
+    if (f.exp.value && (!exp || exp <= nowTs())) throw new Error("The key's expiry must be in the future.");
+    body = { name, role: f.role.sel.value, rate_per_min: rate, expires_at: exp,
+             capabilities: f.capEd.get(), denies: f.denEd.get() };
+  } catch (e) { m.setError(errText(e)); return; }
+  let r;
+  try { r = await withBusy(btn, () => api("/v1/admin/keys", { method: "POST", body })); }
+  catch (e) { if (!(e instanceof AuthLost)) m.setError(errText(e)); return; }
+  m.setTitle(`Key "${r.name}" created`);
+  m.setBody(h("div", null, secretBox(r.key, "agent key"),
+    h("p", { class: "hint" }, "The agent sends it as an Authorization: Bearer header on REST calls, or configures it for the MCP endpoint."),
+    r.grant_id ? null : h("p", { class: "hint" }, "It holds no capabilities yet, so it can do nothing until you add some or approve its requests.")));
+  m.setButtons([{ label: "Done", cls: "primary", onClick: (mm) => mm.close() }]);
+  refreshKeys().catch(showErr);
+}
+function rootGrantOf(k) {
+  return (k.grants || []).find((g) => g.kind === "root" && !g.parent_grant_id && g.status === "active") || null;
+}
+async function openEditKey(id) {
+  let k;
+  try { k = await api(`/v1/admin/keys/${enc(id)}`); } catch (e) { showErr(e); return; }
+  const delegated = k.parent_key_id !== null && k.parent_key_id !== undefined;
+  const role = roleSelect(k.role);
+  const rate = h("input", { type: "number", min: "1", max: "10000", step: "1", value: String(k.rate_per_min) });
+  const exp = h("input", { type: "datetime-local" });
+  exp.value = toLocalInput(k.expires_at);
+  const disabled = h("input", { type: "checkbox" });
+  disabled.checked = !!k.disabled;
+  const denEd = deniesEditor(k.denies || {});
+  const root = rootGrantOf(k);
+  const capEd = delegated ? null : capabilityEditor(root ? root.capabilities : []);
+  const others = (k.grants || []).filter((g) => g !== root);
+  const grantsSec = h("div", { class: "formsection" }, h("h4", null, "Other grants"));
+  if (!others.length) grantsSec.append(h("div", { class: "hint" }, "None."));
+  for (const g of others) {
+    const line = h("div", { class: "hrow" }, badge(g.kind, "accent"),
+      badge(g.status, g.status === "active" ? "ok" : g.status === "pending" ? "warn" : ""),
+      h("span", { class: "sub" }, `${(g.capabilities || []).length} capabilities · created ${relTime(g.created_at)}` +
+        (g.expires_at ? ` · expires ${relTime(g.expires_at)}` : "")));
+    if (g.status === "active") {
+      const rv = h("button", { type: "button", class: "ghost" }, "Revoke");
+      rv.onclick = () => revokeGrant(g, rv, line);
+      line.append(rv);
+    }
+    grantsSec.append(line);
+  }
+  const form = h("form", { class: "grid", autocomplete: "off" },
+    h("label", null, "Role", role.sel), h("label", null, "Calls per minute", rate),
+    h("label", null, "Key expires (empty = never)", exp),
+    h("label", { class: "chk" }, disabled, "disabled"),
+    role.help,
+    delegated
+      ? h("div", { class: "formsection" }, h("h4", null, "Authority"),
+          h("p", { class: "hint" }, "Delegated from ", keyCrumbs(k.parent_key_id),
+            ". Its authority comes from its parent's grants; narrow those, or disable or revoke this key."))
+      : h("div", { class: "formsection" }, h("h4", null, "Capabilities (root grant)"),
+          h("p", { class: "hint" }, "Narrowing takes effect at once for this key and every key delegated from it."), capEd.el),
+    h("div", { class: "formsection" }, h("h4", null, "Denies"), denEd.el),
+    grantsSec);
+  form.onsubmit = (e) => e.preventDefault();
+  openModal({
+    title: `Edit key "${k.name}"`, body: form, wide: true, sticky: true,
+    buttons: [
+      { label: "Cancel", cls: "ghost", onClick: (m) => m.close() },
+      { label: "Save changes", cls: "primary", onClick: (m, btn) => submitEditKey(m, btn, k, { role, rate, exp, disabled, denEd, capEd }) },
+    ],
+  });
+}
+async function submitEditKey(m, btn, k, f) {
+  m.setError("");
+  const body = {};
+  try {
+    if (f.role.sel.value !== k.role) body.role = f.role.sel.value;
+    const rate = Number(f.rate.value);
+    if (!Number.isInteger(rate) || rate < 1 || rate > 10000) throw new Error("Calls per minute: a whole number from 1 to 10000.");
+    if (rate !== k.rate_per_min) body.rate_per_min = rate;
+    const exp = f.exp.value ? fromLocalInput(f.exp.value) : null;
+    if (f.exp.value && (!exp || exp <= nowTs())) throw new Error("The key's expiry must be in the future.");
+    if (!exp && k.expires_at) body.clear_expiry = true;
+    else if (exp && exp !== k.expires_at) body.expires_at = exp;
+    if (f.disabled.checked !== !!k.disabled) body.disabled = f.disabled.checked;
+    const denies = f.denEd.get();
+    if (canon(denies) !== canon(k.denies || {})) body.denies = denies;
+    if (f.capEd && f.capEd.isDirty()) body.capabilities = f.capEd.get();
+  } catch (e) { m.setError(errText(e)); return; }
+  if (!Object.keys(body).length) { m.setError("Nothing changed."); return; }
+  if (body.capabilities && !body.capabilities.length) {
+    const ok = await confirmBox({ title: "Remove every capability?",
+      text: "This revokes the key's root grant. It keeps working only through other grants it holds.",
+      ok: "Revoke root grant", danger: true });
+    if (!ok) return;
+  }
+  try { await withBusy(btn, () => api(`/v1/admin/keys/${enc(k.id)}`, { method: "PATCH", body })); }
+  catch (e) { if (!(e instanceof AuthLost)) m.setError(errText(e)); return; }
+  m.close();
+  toast(`Saved "${k.name}".`);
+  refreshKeys().catch(showErr);
+}
+async function revokeGrant(g, btn, line) {
+  const ok = await confirmBox({ title: "Revoke this grant?",
+    text: "It stops counting at once, for this key and every key delegated from it.", ok: "Revoke", danger: true });
+  if (!ok) return;
+  try {
+    await withBusy(btn, () => api(`/v1/admin/grants/${enc(g.id)}/revoke`, { method: "POST" }));
+    btn.remove();
+    line.prepend(badge("revoked", "bad"));
+    toast("Grant revoked.");
+  } catch (e) { showErr(e); }
+}
+async function rotateKey(k, btn) {
+  const ok = await confirmBox({ title: `Rotate "${k.name}"?`,
+    text: "A new secret is issued now. The old one keeps working for the grace window so the agent can switch over.",
+    ok: "Rotate" });
+  if (!ok) return;
+  let r;
+  try { r = await withBusy(btn, () => api(`/v1/admin/keys/${enc(k.id)}/rotate`, { method: "POST" })); }
+  catch (e) { showErr(e); return; }
+  openModal({ title: `"${k.name}" rotated`, sticky: true, body: h("div", null, secretBox(r.key, "agent key"),
+    h("p", { class: "hint" }, r.note || "")),
+    buttons: [{ label: "Done", cls: "primary", onClick: (m) => m.close() }] });
+  refreshKeys().catch(showErr);
+}
+async function setKeyDisabled(k, disabled, btn) {
+  if (disabled) {
+    const ok = await confirmBox({ title: `Disable "${k.name}"?`,
+      text: "It stops working immediately, and so does every key delegated from it. You can enable it again.",
+      ok: "Disable", danger: true });
+    if (!ok) return;
+  }
+  try {
+    await withBusy(btn, () => api(`/v1/admin/keys/${enc(k.id)}`, { method: "PATCH", body: { disabled } }));
+    toast(disabled ? `"${k.name}" disabled.` : `"${k.name}" enabled.`);
+  } catch (e) { showErr(e); }
+  refreshKeys().catch(showErr);
+}
+$("newKeyBtn").onclick = async () => {
+  try { await loadPlugins(); } catch (e) { showErr(e); return; }
+  openCreateKey();
+};
+
+// ============================================================ hidden resources
+let hidePicker = null;
+function hideableTargets() {
+  return state.plugins.filter((p) => Object.values(p.manifest.resources).some((r) => r.hideable));
+}
+function mountHidePicker() {
+  const t = $("hideTarget").value, k = $("hideKind").value;
+  if (!t || !k) { $("hidePicker").replaceChildren(h("div", { class: "hint" }, "No plugin has hideable resources.")); return; }
+  hidePicker = resourcePicker(t, k, { pickLabel: "Hide", onPick: (item) => hideResource(t, k, item) });
+  $("hidePicker").replaceChildren(hidePicker.el);
+}
+function fillHideKinds() {
+  const p = state.pluginsById.get($("hideTarget").value);
+  const kinds = p ? Object.entries(p.manifest.resources).filter(([, r]) => r.hideable) : [];
+  fillSelect($("hideKind"), kinds.map(([k, r]) => [k, r.display]), false);
+  mountHidePicker();
+}
+$("hideTarget").onchange = fillHideKinds;
+$("hideKind").onchange = mountHidePicker;
+$("hideForm").onsubmit = (e) => e.preventDefault();
+async function refreshHidden() {
+  await loadPlugins();
+  const before = $("hideTarget").value;
+  fillSelect($("hideTarget"), hideableTargets().map((p) => [p.id, p.display_name]), false);
+  if (!before || $("hideTarget").value !== before || !hidePicker) fillHideKinds();
+  await loadHiddenList();
+}
+async function loadHiddenList() {
+  const rows = await api("/v1/admin/hidden");
+  $("hiddenCount").textContent = rows.length ? String(rows.length) : "";
+  const list = $("hiddenList");
+  list.replaceChildren();
+  if (!rows.length) { list.append(empty("Nothing is hidden.")); return; }
+  for (const r of rows) {
+    const m = manifestOf(r.target);
+    const kind = m && hasOwn(m.resources, r.kind) ? m.resources[r.kind].display : r.kind;
+    const rm = h("button", { type: "button", class: "ghost" }, "Unhide");
+    rm.onclick = () => unhide(r, rm);
+    list.append(h("div", { class: "hrow" },
+      badge(pluginName(r.target), "accent"), h("span", { class: "sub" }, kind),
+      h("span", { class: "lbl" }, r.label || "(no label)"), h("span", { class: "rid" }, r.resource_id),
+      r.reason ? h("span", { class: "sub" }, "· " + r.reason) : null,
+      h("span", { class: "sub" }, "· " + relTime(r.created_at)), rm));
+  }
+}
+// The label is captured now, from the search result the owner clicked, so
+// the list stays readable even if the plugin is later offline.
+async function hideResource(target, kind, item) {
+  try {
+    await api("/v1/admin/hidden", { method: "POST", body: {
+      target, kind, resource_id: item.id, label: (item.label || "").slice(0, 200),
+      reason: $("hideReason").value.trim().slice(0, 500) } });
+    toast(`Hidden: ${item.label || item.id}`);
+    $("hideReason").value = "";
+  } catch (e) { showErr(e); }
+  loadHiddenList().catch(showErr);
+}
+async function unhide(r, btn) {
+  const ok = await confirmBox({ title: "Unhide this resource?",
+    text: `${r.label || r.resource_id} becomes visible again to every key whose grants reach it.`, ok: "Unhide" });
+  if (!ok) return;
+  try {
+    await withBusy(btn, () => api(`/v1/admin/hidden/${enc(r.target)}/${enc(r.kind)}/${enc(r.resource_id)}`, { method: "DELETE" }));
+    toast("Unhidden.");
+  } catch (e) { showErr(e); }
+  loadHiddenList().catch(showErr);
+}
+
+// ============================================================ plugins
+const pluginUI = new Map();        // plugin id -> the card's live parts
+const qrRuns = new Map();          // plugin id -> {stopped, timer}
+function stopQr(pid) {
+  const run = qrRuns.get(pid);
+  if (run) { run.stopped = true; clearTimeout(run.timer); qrRuns.delete(pid); }
+}
+function stopAllQr() { for (const pid of [...qrRuns.keys()]) stopQr(pid); }
+
+async function refreshPlugins() {
+  stopAllQr();
+  await loadPlugins();
+  const list = $("pluginList");
+  list.replaceChildren();
+  pluginUI.clear();
+  if (!state.plugins.length) {
+    list.append(h("div", { class: "card" }, empty("No plugin services are registered. The broker discovers them from PLUGIN_URL_<SERVICE> and PLUGIN_TOKEN_<SERVICE> at boot.")));
+  }
+  for (const p of state.plugins) list.append(pluginCard(p));
+  const ref = $("pluginRefused");
+  ref.replaceChildren();
+  if (state.refused.length) {
+    const card = h("div", { class: "card" }, h("div", { class: "subhead" }, h("h3", null, "Refused plugins")),
+      h("p", { class: "hint" }, "These services answered, but their manifests did not match the broker's vendored copy, so nothing from them is used."));
+    for (const r of state.refused) card.append(h("div", { class: "hrow" }, h("span", { class: "lbl" }, r.id), h("span", { class: "sub" }, r.reason)));
+    ref.append(card);
+  }
+}
+function pluginCard(p) {
+  const card = h("div", { class: "card plugin" });
+  const status = h("span", { class: "pstatus" });
+  const toggle = h("button", { type: "button" });
+  const healthBtn = h("button", { type: "button", class: "ghost" }, "Check health");
+  card.append(h("div", { class: "phead" },
+    h("div", null, h("h3", null, p.display_name), h("div", { class: "sub" }, `${p.id} · v${p.version} · service ${p.service}`)),
+    h("span", { class: "spacer" }), status, healthBtn, toggle));
+  if (p.description) card.append(h("p", { class: "hint" }, p.description));
+  const configEl = h("div");
+  const connEl = h("div");
+  const healthEl = h("details", { class: "health" });
+  card.append(h("div", { class: "psec" }, h("h4", null, "Configuration"), configEl),
+              h("div", { class: "psec" }, h("h4", null, "Connection"), connEl), healthEl);
+  const ui = { p, status, toggle, configEl, connEl, healthEl, qr: null };
+  pluginUI.set(p.id, ui);
+  toggle.onclick = () => togglePlugin(ui);
+  healthBtn.onclick = () => withBusy(healthBtn, async () => {
+    try { updatePlugin(await api(`/v1/admin/plugins/${enc(ui.p.id)}/health`, { method: "POST" })); toast("Health refreshed."); }
+    catch (e) { showErr(e); }
+  });
+  paintPluginHead(ui);
+  renderConfig(ui);
+  renderConnection(ui);
+  return card;
+}
+function paintPluginHead(ui) {
+  const p = ui.p;
+  ui.status.replaceChildren(...pluginBadges(p));
+  ui.toggle.textContent = p.enabled ? "Disable" : "Enable";
+  ui.toggle.className = p.enabled ? "ghost" : "primary";
+  ui.healthEl.replaceChildren(h("summary", null, "Last status report"),
+    h("pre", { class: "mono" }, JSON.stringify(healthOf(p), null, 2)));
+  paintSecrets(ui);
+}
+// A fresh view of one plugin: repaint its header and connection panel, but
+// not its config form (that would throw away unsaved edits).
+function updatePlugin(p) {
+  if (!p || !p.id) return;
+  state.pluginsById.set(p.id, p);
+  state.plugins = state.plugins.map((x) => (x.id === p.id ? p : x));
+  paintPluginPill();
+  const ui = pluginUI.get(p.id);
+  if (!ui) return;
+  ui.p = p;
+  paintPluginHead(ui);
+  if (!qrRuns.has(p.id)) renderConnection(ui);
+}
+// After connect/disconnect: sibling plugins sharing a service changed too.
+async function reloadPluginStates() {
+  await loadPlugins();
+  for (const p of state.plugins) updatePlugin(p);
+}
+async function togglePlugin(ui) {
+  const p = ui.p;
+  if (p.enabled) {
+    const ok = await confirmBox({ title: `Disable ${p.display_name}?`,
+      text: "Its tools and routes vanish for every agent on the next request. Queued actions are held, not dropped, and its credentials stay inside the plugin. You can enable it again at any time.",
+      ok: "Disable", danger: true });
+    if (!ok) return;
+  }
+  try {
+    const v = await withBusy(ui.toggle, () => api(p.enabled
+      ? `/v1/admin/plugins/${enc(p.id)}/disable` : `/v1/admin/plugins/${enc(p.id)}/enable`, { method: "POST" }));
+    updatePlugin(v);
+    toast(v.enabled ? `${v.display_name} enabled.` : `${v.display_name} disabled.`);
+  } catch (e) { showErr(e); }
+}
+
+// ---- config form, rendered from the manifest's config_schema.
+// One renderer per field type the manifest schema allows (tested against
+// plugins/manifest.ConfigField). Secret fields never render a value.
+/* config-renderers:start */
+const CONFIG_RENDERERS = {
+  string(f, v) {
+    const i = h("input", { type: "text", spellcheck: "false", placeholder: f.default !== null && f.default !== undefined ? String(f.default) : "" });
+    if (v !== undefined && v !== null) i.value = String(v);
+    return { el: i, get: () => (i.value === "" ? null : i.value) };
+  },
+  text(f, v) {
+    const t = h("textarea", { spellcheck: "false" });
+    if (v !== undefined && v !== null) t.value = String(v);
+    return { el: t, get: () => (t.value === "" ? null : t.value) };
+  },
+  integer(f, v) {
+    const i = h("input", { type: "number", step: "1" });
+    if (v !== undefined && v !== null) i.value = String(v);
+    return { el: i, get() {
+      const t = i.value.trim();
+      if (t === "") return null;
+      const n = Number(t);
+      if (!Number.isInteger(n)) throw new Error(`${f.name} must be a whole number.`);
+      return n;
+    } };
+  },
+  boolean(f, v) {
+    const cb = h("input", { type: "checkbox" });
+    cb.checked = v === true;
+    return { el: h("label", { class: "chk" }, cb, "on"), get: () => cb.checked };
+  },
+  enum(f, v) {
+    const dflt = f.default !== null && f.default !== undefined ? `default (${f.default})` : "not set";
+    const sel = h("select", null, h("option", { value: "" }, dflt),
+      (f.values || []).map((x) => h("option", { value: x }, x)));
+    if (v !== undefined && v !== null) sel.value = String(v);
+    return { el: sel, get: () => (sel.value === "" ? null : sel.value) };
+  },
+};
+/* config-renderers:end */
+function renderConfig(ui) {
+  const p = ui.p, el = ui.configEl;
+  el.replaceChildren();
+  ui.secrets = new Map();
+  const schema = p.config_schema || [];
+  if (!schema.length) { el.append(h("div", { class: "hint" }, "This plugin has no settings.")); return; }
+  const plain = [];
+  for (const f of schema) {
+    const head = h("div", { class: "fname" }, f.name, f.required ? h("span", { class: "req", title: "required" }, " *") : null,
+      f.secret ? [" ", badge("secret, write-only", "accent")] : null);
+    const field = h("div", { class: "cfgfield" }, head);
+    if (f.secret) field.append(secretField(ui, f));
+    else {
+      const render = CONFIG_RENDERERS[f.type];
+      if (!render) { field.append(h("div", { class: "formerr" }, `Unsupported field type ${f.type}.`)); el.append(field); continue; }
+      const input = render(f, hasOwn(p.config, f.name) ? p.config[f.name] : undefined);
+      field.append(input.el);
+      plain.push({ f, input });
+    }
+    if (f.help) field.append(h("div", { class: "sub" }, f.help));
+    el.append(field);
+  }
+  if (plain.length) {
+    const save = h("button", { type: "button", class: "primary" }, "Save settings");
+    save.onclick = () => saveConfig(ui, plain, save);
+    el.append(h("div", { class: "row-actions" }, save,
+      h("span", { class: "sub" }, "Empty resets a field to its default. Saving an enabled plugin re-sends its settings to it.")));
+  }
+}
+async function saveConfig(ui, plain, btn) {
+  const changes = {};
+  try {
+    for (const { f, input } of plain) {
+      const v = input.get();
+      const cur = hasOwn(ui.p.config, f.name) ? ui.p.config[f.name] : null;
+      // An unset boolean shows as off; leaving it off is not a change.
+      if (f.type === "boolean" && cur === null && v === false) continue;
+      if (canon(v) !== canon(cur)) changes[f.name] = v;
+    }
+  } catch (e) { toast(errText(e), "err"); return; }
+  if (!Object.keys(changes).length) { toast("Nothing changed.", "info"); return; }
+  try {
+    const v = await withBusy(btn, () => api(`/v1/admin/plugins/${enc(ui.p.id)}`, { method: "PATCH", body: { config: changes } }));
+    updatePlugin(v);
+    renderConfig(pluginUI.get(v.id) || ui);
+    toast("Settings saved.");
+  } catch (e) { showErr(e); }
+}
+// Write-only: the value goes to the plugin once and is cleared from the page
+// whatever the outcome. The broker keeps none of it; whether one is set is
+// known only if the plugin's status report says so (<name>_set).
+function paintSecrets(ui) {
+  for (const [name, s] of ui.secrets || []) {
+    const known = healthOf(ui.p)[name + "_set"];
+    s.status.replaceChildren(known === true ? badge("set", "ok") : known === false ? badge("not set", "warn")
+      : h("span", { class: "sub" }, "stored in the plugin, never shown"));
+    s.set.textContent = known === true ? "Replace" : known === false ? "Set" : "Set / replace";
+  }
+}
+function secretField(ui, f) {
+  const input = f.type === "text"
+    ? h("textarea", { spellcheck: "false", autocomplete: "off", placeholder: "paste a new value" })
+    : h("input", { type: "password", autocomplete: "new-password", spellcheck: "false", placeholder: "type a new value" });
+  const set = h("button", { type: "button", class: "primary" });
+  const status = h("span");
+  const clear = h("button", { type: "button", class: "ghost" }, "Clear");
+  set.onclick = async () => {
+    const value = input.value;
+    if (!value) { toast(`Type a value for ${f.name} first.`, "info"); return; }
+    input.value = "";
+    try {
+      await withBusy(set, () => api(`/v1/admin/plugins/${enc(ui.p.id)}`, { method: "PATCH", body: { config: { [f.name]: value } } }));
+      toast(`${f.name} sent to the plugin.`);
+      // The plugin, not the broker, knows whether it now holds the value.
+      updatePlugin(await api(`/v1/admin/plugins/${enc(ui.p.id)}/health`, { method: "POST" }));
+    } catch (e) { showErr(e); }
+  };
+  clear.onclick = async () => {
+    const ok = await confirmBox({ title: `Clear ${f.name}?`, text: "The plugin forgets this value. Anything that needs it stops working until you set it again.", ok: "Clear", danger: true });
+    if (!ok) return;
+    try {
+      await withBusy(clear, () => api(`/v1/admin/plugins/${enc(ui.p.id)}`, { method: "PATCH", body: { config: { [f.name]: null } } }));
+      toast(`${f.name} cleared.`);
+      updatePlugin(await api(`/v1/admin/plugins/${enc(ui.p.id)}/health`, { method: "POST" }));
+    } catch (e) { showErr(e); }
+  };
+  ui.secrets.set(f.name, { status, set });
+  paintSecrets(ui);
+  return h("div", null, h("div", { class: "secretrow" }, input, set, clear), h("div", { class: "sub" }, status));
+}
+
+// ---- connection panel, by the manifest's connection.kind (every kind the
+// manifest schema allows has an entry; tested).
+/* connectors:start */
+const CONNECTORS = {
+  none(ui, c, el) {
+    el.append(h("div", { class: "hint" }, "Nothing to connect: this plugin holds no credential."));
+  },
+  sidecar_qr: connectSidecarQr,
+  github_app: connectGithubApp,
+  google_oauth: connectGoogle,
+};
+/* connectors:end */
+function renderConnection(ui) {
+  const p = ui.p, el = ui.connEl;
+  el.replaceChildren();
+  ui.qr = null;
+  const kind = p.connection && p.connection.kind;
+  const fn = CONNECTORS[kind];
+  if (!fn) { el.append(h("div", { class: "formerr" }, `Unknown connection kind ${kind}.`)); return; }
+  fn(ui, connInfo(p), el);
+  if (p.connection && p.connection.enforcement === "target") {
+    el.append(h("div", { class: "sub" }, "Enforced at the target: its credential is minted per call with only the permissions the call needs."));
+  } else {
+    el.append(h("div", { class: "sub" }, "Enforced by the broker (proxy): the connected account can do more than any grant allows; the broker is what restricts it."));
+  }
+}
+function disconnectButton(ui, label) {
+  const b = h("button", { type: "button", class: "ghost" }, label || "Disconnect");
+  b.onclick = async () => {
+    const ok = await confirmBox({ title: `Disconnect ${ui.p.display_name}?`,
+      text: "The plugin wipes its stored credential. Agents lose access until you connect again.", ok: "Disconnect", danger: true });
+    if (!ok) return;
+    try {
+      await withBusy(b, () => api(`/v1/admin/plugins/${enc(ui.p.id)}/disconnect`, { method: "POST" }));
+      toast("Disconnected.");
+    } catch (e) { showErr(e); }
+    reloadPluginStates().catch(showErr);
+  };
+  return b;
+}
+async function connectStart(ui, btn) {
+  return withBusy(btn, () => api(`/v1/admin/plugins/${enc(ui.p.id)}/connect/start`, { method: "POST" }));
+}
+function accountText(c) { return c.account || c.push_name || c.login || c.email || c.jid || ""; }
+
+// WhatsApp-style pairing: the QR is re-fetched every 5 s while the plugin
+// reports waiting_for_qr; once it reports connected, connect/finish runs.
+function connectSidecarQr(ui, c, el) {
+  const p = ui.p;
+  if (p.connected) {
+    el.append(h("div", null, badge("linked", "ok"), " ", accountText(c) || "a linked device"),
+      h("div", { class: "row-actions", style: "margin-top:.5rem" }, disconnectButton(ui, "Unlink")));
+    return;
+  }
+  if (!p.enabled) { el.append(h("div", { class: "hint" }, "Enable the plugin first, then pair a device.")); return; }
+  const status = h("div", { class: "hint" }, "Not linked.");
+  const img = h("img", { alt: "pairing QR code", hidden: true });
+  img.onerror = () => { img.hidden = true; };
+  const start = h("button", { type: "button", class: "primary" }, "Pair a device");
+  start.onclick = async () => {
+    try { await connectStart(ui, start); startQr(ui); } catch (e) { showErr(e); }
+  };
+  el.append(status, h("div", { class: "qrwrap" }, img), h("div", { class: "row-actions" }, start));
+  ui.qr = { img, status };
+  if (c.waiting_for_qr) startQr(ui);
+}
+function startQr(ui) {
+  const pid = ui.p.id;
+  if (qrRuns.has(pid)) return;
+  const run = { stopped: false, timer: null, finishing: false };
+  qrRuns.set(pid, run);
+  const next = () => { if (!run.stopped) run.timer = setTimeout(tick, 5000); };
+  async function tick() {
+    if (run.stopped) return;
+    if (currentView() !== "plugins" || $("app").hidden || !pluginUI.has(pid)) { stopQr(pid); return; }
+    let v;
+    try { v = await api(`/v1/admin/plugins/${enc(pid)}/health`, { method: "POST" }); }
+    catch (e) { if (e instanceof AuthLost) { stopQr(pid); return; } next(); return; }
+    if (run.stopped) return;
+    const c = connInfo(v);
+    const cur = pluginUI.get(pid);
+    if (v.connected) {
+      stopQr(pid);
+      try { await api(`/v1/admin/plugins/${enc(pid)}/connect/finish`, { method: "POST", body: {} }); }
+      catch (e) { showErr(e); }
+      await reloadPluginStates().catch(showErr);
+      toast(`${v.display_name} linked.`);
+      return;
+    }
+    if (cur) {
+      cur.p = v;
+      paintPluginHead(cur);
+      if (cur.qr) {
+        if (c.waiting_for_qr) {
+          cur.qr.img.src = `/v1/admin/plugins/${enc(pid)}/connect/qr.png?t=${Date.now()}`;
+          cur.qr.img.hidden = false;
+          cur.qr.status.textContent = "Scan this code from the app on your phone (Linked devices, then Link a device). It refreshes every few seconds.";
+        } else {
+          cur.qr.img.hidden = true;
+          cur.qr.status.textContent = "Waiting for the plugin to issue a pairing code...";
+        }
+      }
+    }
+    next();
+  }
+  tick();
+}
+// GitHub App: install on github.com (the callback page finishes it), or
+// paste the installation id by hand.
+function connectGithubApp(ui, c, el) {
+  const p = ui.p;
+  if (p.connected) {
+    el.append(h("div", null, badge("installed", "ok"), " ", accountText(c) || "GitHub App installation"));
+    if (c.permissions && typeof c.permissions === "object") {
+      el.append(h("div", { class: "facts" }, ...fact("Installed permissions",
+        idChips(Object.entries(c.permissions).map(([k, v]) => `${k}: ${v}`)))));
+    }
+  }
+  const slot = h("div");
+  const start = h("button", { type: "button", class: p.connected ? "ghost" : "primary" }, p.connected ? "Install on more accounts" : "Install the GitHub App");
+  start.onclick = async () => {
+    let r;
+    try { r = await connectStart(ui, start); } catch (e) { showErr(e); return; }
+    const url = externalUrl(r && r.url);
+    if (!url) { toast("The plugin returned no usable https link. Check its App settings.", "err"); return; }
+    slot.replaceChildren(h("p", null, h("a", { class: "button-link primary", href: url, target: "_blank", rel: "noopener noreferrer" }, "Open GitHub to install the app")),
+      h("p", { class: "hint" }, "GitHub sends you back to the broker, which finishes the connection. If it does not, paste the installation id below."));
+  };
+  const inst = h("input", { type: "text", inputmode: "numeric", placeholder: "installation id, e.g. 12345678", maxlength: "20" });
+  const finish = h("button", { type: "button" }, "Finish with this id");
+  finish.onclick = async () => {
+    const id = inst.value.trim();
+    if (!/^[0-9]{1,20}$/.test(id)) { toast("An installation id is a number.", "err"); return; }
+    try {
+      await withBusy(finish, () => api(`/v1/admin/plugins/${enc(p.id)}/connect/finish`, { method: "POST", body: { installation_id: id } }));
+      inst.value = "";
+      toast("Connected.");
+    } catch (e) { showErr(e); }
+    reloadPluginStates().catch(showErr);
+  };
+  el.append(h("div", { class: "row-actions", style: "margin:.5rem 0" }, start, p.connected ? disconnectButton(ui) : null), slot,
+    h("div", { class: "row-actions" }, inst, finish));
+}
+// Google: one consent covers every Google plugin the service hosts; the
+// callback page finishes it. Status lists granted and missing scopes.
+function connectGoogle(ui, c, el) {
+  const p = ui.p;
+  const list = (x) => (Array.isArray(x) ? x.filter((s) => typeof s === "string") : []);
+  const granted = list(c.granted_scopes), missing = list(c.missing_scopes);
+  if (p.connected) el.append(h("div", null, badge("connected", "ok"), " ", accountText(c) || "Google account"));
+  const facts = h("div", { class: "facts" });
+  if (granted.length) facts.append(...fact("Granted scopes", idChips(granted)));
+  if (missing.length) facts.append(...fact("Missing scopes", [badge("reconnect to grant", "warn"), " ", idChips(missing)]));
+  if (facts.childElementCount) el.append(facts);
+  const slot = h("div");
+  const start = h("button", { type: "button", class: "primary" },
+    !p.connected ? "Connect Google" : missing.length ? "Reconnect to grant missing scopes" : "Reconnect Google");
+  start.onclick = async () => {
+    let r;
+    try { r = await connectStart(ui, start); } catch (e) { showErr(e); return; }
+    const url = externalUrl(r && r.url);
+    if (!url) { toast("The plugin returned no usable https link. Check its OAuth client settings.", "err"); return; }
+    window.open(url, "_blank", "noopener,noreferrer");
+    // Popup blockers may stop window.open after an await; the link always works.
+    slot.replaceChildren(h("p", null, h("a", { class: "button-link", href: url, target: "_blank", rel: "noopener noreferrer" }, "Open the Google consent page")),
+      h("p", { class: "hint" }, "Google sends you back to the broker, which finishes the connection. Then press Check health here."));
+  };
+  el.append(h("div", { class: "row-actions", style: "margin:.5rem 0" }, start, p.connected ? disconnectButton(ui) : null), slot);
+}
+
+// ============================================================ account
+async function refreshAccount() {
+  const [me, tokens, sessions] = await Promise.all([
+    api("/auth/me"), api("/v1/admin/tokens"), api("/v1/admin/sessions")]);
+  state.me = me;
+  $("acctSub").textContent = `Signed in as ${me.username} (via ${me.via}); this credential expires ${relTime(me.expires_at)}. Admin tokens let scripts act as you; sessions are where you are signed in.`;
+  const tr = $("tokenRows");
+  tr.replaceChildren();
+  if (!tokens.length) tr.append(h("tr", null, h("td", { colspan: "6" }, empty("No admin tokens."))));
+  for (const t of tokens) {
+    const live = !t.revoked && !t.expired;
+    const statusB = t.revoked ? badge("revoked", "bad") : t.expired ? badge("expired", "warn") : badge("active", "ok");
+    const cell = h("td");
+    if (live) {
+      const rv = h("button", { type: "button", class: "ghost" }, "Revoke");
+      rv.onclick = () => revokeToken(t, rv);
+      cell.append(rv);
+    }
+    tr.append(h("tr", null, h("td", null, h("b", null, t.name)), h("td", null, fmtWhen(t.created_at)),
+      h("td", null, t.last_used_at ? relTime(t.last_used_at) : "never"), h("td", null, fmtWhen(t.expires_at)),
+      h("td", null, statusB), cell));
+  }
+  const sr = $("sessionRows");
+  sr.replaceChildren();
+  for (const s of sessions) {
+    const rv = h("button", { type: "button", class: "ghost" }, s.current ? "Sign out here" : "Revoke");
+    rv.onclick = () => revokeSession(s, rv);
+    sr.append(h("tr", null,
+      h("td", null, fmtWhen(s.created_at), s.current ? [" ", badge("current", "accent")] : null),
+      h("td", null, relTime(s.last_seen_at)), h("td", null, relTime(s.expires_at)),
+      h("td", null, h("div", { class: "mono" }, s.ip || ""), h("div", { class: "sub" }, s.user_agent || "")),
+      h("td", null, rv)));
+  }
+}
+$("pwForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.target, btn = f.querySelector("button[type=submit]");
+  if (f.next.value.length < 12) { toast("The new password needs at least 12 characters.", "err"); return; }
+  if (f.next.value !== f.next2.value) { toast("The new passwords differ.", "err"); return; }
+  try {
+    const r = await withBusy(btn, () => api("/v1/admin/password", { method: "POST",
+      body: { current_password: f.current.value, new_password: f.next.value } }));
+    f.reset();
+    toast(`Password changed. ${r.sessions_revoked} other session(s) signed out.`);
+    refreshAccount().catch(showErr);
+  } catch (err) {
+    f.current.value = "";
+    showErr(err);
+  }
+};
+$("tokenForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.target, btn = f.querySelector("button[type=submit]");
+  const name = f.tokname.value.trim();
+  const hours = f.hours.value ? Number(f.hours.value) : null;
+  if (!name) return;
+  if (hours !== null && (!Number.isInteger(hours) || hours < 1)) { toast("Expiry: a whole number of hours, or empty.", "err"); return; }
+  try {
+    const r = await withBusy(btn, () => api("/v1/admin/tokens", { method: "POST", body: { name, expires_in_hours: hours } }));
+    f.reset();
+    $("tokenBanner").replaceChildren(secretBox(r.token, `admin token "${r.name}"`));
+    refreshAccount().catch(showErr);
+  } catch (err) { showErr(err); }
+};
+async function revokeToken(t, btn) {
+  const ok = await confirmBox({ title: `Revoke "${t.name}"?`, text: "Anything using this token loses access at once.", ok: "Revoke", danger: true });
+  if (!ok) return;
+  try {
+    await withBusy(btn, () => api(`/v1/admin/tokens/${enc(t.id)}/revoke`, { method: "POST" }));
+    toast("Token revoked.");
+  } catch (e) { showErr(e); }
+  refreshAccount().catch(showErr);
+}
+async function revokeSession(s, btn) {
+  const ok = await confirmBox({ title: s.current ? "Sign out this browser?" : "Revoke this session?",
+    text: s.current ? "You will be back at the sign-in page." : "That browser is signed out at once.",
+    ok: s.current ? "Sign out" : "Revoke", danger: !s.current });
+  if (!ok) return;
+  try {
+    await withBusy(btn, () => api(`/v1/admin/sessions/${enc(s.id)}/revoke`, { method: "POST" }));
+  } catch (e) { showErr(e); return; }
+  if (s.current) { showGate("login", "Signed out."); return; }
+  toast("Session revoked.");
+  refreshAccount().catch(showErr);
+}
+
+// ============================================================ start
+boot();
+</script>
+</body>
+</html>

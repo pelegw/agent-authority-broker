@@ -99,7 +99,8 @@ def test_scheduling_validation(echo_local, make_agent):
         assert e.value.status == 400, kw
 
 
-def test_resolve_run_at():
+def test_resolve_run_at(env):
+    # env: the scheduling bounds are runtime settings, read from the database.
     assert queue.resolve_run_at(None, None) is None
     assert queue.resolve_run_at(None, 60) >= int(time.time()) + 59
 
