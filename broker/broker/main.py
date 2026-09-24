@@ -12,14 +12,15 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from . import __version__, db, openapi_doc
+from . import __version__, crypto, db, openapi_doc
 from .actions import scheduler
 from .config import get_settings, validate_exposure
 from .errors import PolicyError
+from .notify import telegram_inbound
 from .origin import OriginGuardMiddleware
 from .plugins.registry import get_registry, init_registry
-from .routers import (actions, admin, admin_keys, admin_ops, admin_plugins, auth, health, me,
-                      oauth, permissions, targets)
+from .routers import (actions, admin, admin_keys, admin_ops, admin_plugins, admin_settings,
+                      admin_telegram, auth, health, me, oauth, permissions, targets)
 
 
 @asynccontextmanager
@@ -28,17 +29,23 @@ async def lifespan(app: FastAPI):
     # with the admin plane left on the owner password alone).
     validate_exposure(get_settings())
     db.init()
+    # Secrets entered in the console (the Telegram bot token) must stay
+    # readable: refuse to boot if they exist but BROKER_SECRETS_KEY is missing.
+    crypto.check_boot()
     # Discover plugin services from env; unreachable ones are retried lazily.
     init_registry()
-    task = asyncio.create_task(scheduler.scheduler_loop())
-    # Next lane: the Telegram poll loop starts here, and the MCP session
-    # manager runs around the yield.
+    tasks = [asyncio.create_task(scheduler.scheduler_loop()),
+             # Runs the Telegram poll loop while a bot token is stored and
+             # stops it when the token is cleared: no restart is ever needed.
+             asyncio.create_task(telegram_inbound.supervise())]
+    # Next lane: the MCP session manager runs around the yield.
     try:
         yield
     finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        for task in tasks:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 # In public mode the interactive API docs (which reveal the full surface) are
@@ -54,7 +61,7 @@ api = FastAPI(
 # Every router whose routes form the admin plane; each is guarded router-wide
 # by require_admin (tests/identity/test_admin_tokens.py walks this list).
 ADMIN_ROUTERS = (admin.router, admin_plugins.router, admin_keys.router, admin_ops.router,
-                 oauth.router)
+                 oauth.router, admin_telegram.router, admin_settings.router)
 
 api.include_router(health.router)
 # Pre-login owner endpoints (status/setup/login/logout): outside require_admin.

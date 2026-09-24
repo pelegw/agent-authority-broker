@@ -22,7 +22,6 @@ from ..authority.ceiling import ceiling
 from ..authority.effective import effective_with_chains
 from ..authority.grant import clipped, narrow
 from ..authority.store import GrantInvariantError
-from ..config import get_settings
 from ..engine import adapter_error
 from ..errors import PolicyError
 from ..hidden import deny_sets, is_denied
@@ -31,6 +30,7 @@ from ..plugins.adapter import AdapterError
 from ..plugins.manifest import ManifestError
 from ..plugins.registry import get_registry
 from ..policy import enforced_where
+from ..runtime_settings import runtime_settings
 
 
 def _caps_by_target(auth) -> dict[str, list[tuple[Capability, tuple[str, ...]]]]:
@@ -179,7 +179,7 @@ def request_permission(auth, capabilities: list, reason: str = "",
     if expires_in_hours is not None:
         if isinstance(expires_in_hours, bool) or expires_in_hours <= 0:
             raise PolicyError(400, "expires_in_hours must be positive", "bad_request")
-        expires_at = now + min(expires_in_hours, get_settings().grant_max_hours) * 3600
+        expires_at = now + min(expires_in_hours, runtime_settings().grant_max_hours) * 3600
     lattice = reg.lattice()
     reason = (reason or "")[:1000]
     try:

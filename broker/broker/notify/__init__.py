@@ -4,8 +4,11 @@ Ported from WA_GW notify/: a pluggable seam (`Notifier`, base.py) with every
 call NON-FATAL. A channel failure is audited and swallowed so it can never
 break the agent's request or the queue insert that triggered it.
 
-The provider list is empty in this phase; the Telegram lane appends its
-module to `_PROVIDERS` (or makes `_providers()` return it when configured).
+Providers: anything listed in `_PROVIDERS` (tests use it), plus Telegram
+whenever it is live: a bot token stored, the channel enabled, and the
+owner's chat linked (all managed from the console, no restart). Only the
+outbound half of Telegram is imported here; the approve path lives in
+notify/telegram_inbound.py, which nothing on the agent surface imports.
 """
 
 from ..audit import audit
@@ -14,7 +17,13 @@ _PROVIDERS: list = []
 
 
 def _providers() -> list:
-    return list(_PROVIDERS)
+    provs = list(_PROVIDERS)
+    # Imported lazily: telegram pulls in cards and crypto, which the many
+    # importers of this package (the action queue) should not pay for at load.
+    from . import telegram
+    if telegram.active():
+        provs.append(telegram)
+    return provs
 
 
 def _fan_out(method: str, item: dict) -> None:

@@ -214,3 +214,77 @@ def make_agent(owner):
 def cap(actions, **kw):
     """Shorthand for an echo capability dict."""
     return {"target": "echo", "actions": list(actions), **kw}
+
+
+# ---- broker secrets and Telegram ---------------------------------------------------
+
+TELEGRAM_TOKEN = "123456789:AAtesttokentesttokentesttokentest01"
+TELEGRAM_CHAT = "4242"
+TELEGRAM_USER = "4242"      # private chat: chat id == user id
+
+
+@pytest.fixture(autouse=True)
+def _reset_telegram_globals(monkeypatch):
+    """Telegram keeps in-process state (pending link code, cached bot
+    username, poll health) and the broker secrets key may be in a
+    developer's shell; start every test from none of it."""
+    monkeypatch.delenv("BROKER_SECRETS_KEY", raising=False)
+    from broker.config import get_settings
+    get_settings.cache_clear()
+    yield
+    from broker.notify import telegram as tg
+    tg._link = None
+    tg._bot_username = None
+    tg._poll.update(running=False, last_ok_at=None, last_error=None, consecutive_errors=0)
+
+
+@pytest.fixture()
+def secrets_key(env, monkeypatch):
+    """A fresh BROKER_SECRETS_KEY for the broker-side secret store."""
+    from cryptography.fernet import Fernet
+
+    from broker.config import get_settings
+    key = Fernet.generate_key().decode()
+    monkeypatch.setenv("BROKER_SECRETS_KEY", key)
+    get_settings.cache_clear()
+    return key
+
+
+@pytest.fixture()
+def fake_telegram(env, owner, secrets_key, monkeypatch):
+    """Telegram fully live (token stored, enabled, owner's chat linked) with
+    the low-level HTTP ops replaced by a recording double. `inject(update)`
+    queues updates that `_get_updates` drains FIFO (the WA_GW pattern)."""
+    from broker import crypto, db
+    from broker.notify import telegram as tg
+    crypto.put(crypto.BROKER_SLOT, tg.TOKEN_NAME, TELEGRAM_TOKEN)
+    db.set_config(tg.CFG_BOT_ID, TELEGRAM_TOKEN.split(":")[0])
+    db.set_config(tg.CFG_ENABLED, "1")
+    db.set_config(tg.CFG_CHAT, TELEGRAM_CHAT)
+    db.set_config(tg.CFG_USER, TELEGRAM_USER)
+    db.set_config(tg.CFG_PRINCIPAL, owner.id)
+
+    rec = {"sent": [], "answered": [], "edited": [], "api": [], "_updates": []}
+
+    def send_message(text, keyboard=None):
+        rec["sent"].append({"text": text, "keyboard": keyboard})
+        return {"message_id": len(rec["sent"])}
+
+    def get_updates(offset, timeout):
+        out, rec["_updates"] = rec["_updates"], []
+        return out
+
+    def api(method, _http_timeout=15.0, **payload):
+        rec["api"].append(method)          # no network (deleteWebhook etc.)
+        return {}
+
+    monkeypatch.setattr(tg, "_api", api)
+    monkeypatch.setattr(tg, "_api_send_message", send_message)
+    monkeypatch.setattr(tg, "_answer_callback",
+                        lambda cb_id, text="": rec["answered"].append({"cb": cb_id, "text": text}))
+    monkeypatch.setattr(tg, "_edit_message",
+                        lambda mid, text: rec["edited"].append({"mid": mid, "text": text}))
+    monkeypatch.setattr(tg, "_get_updates", get_updates)
+    monkeypatch.setattr(tg, "_get_me", lambda: "aab_test_bot")
+    rec["inject"] = lambda u: rec["_updates"].append(u)
+    return rec
