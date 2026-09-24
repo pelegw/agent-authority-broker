@@ -11,5 +11,6 @@ Design documents land here as the phases that need them are built:
 | `deployment.md` | phase 3 | One container per plugin service: local and public run, networks, the env split per container, what each volume holds, rotation per secret. |
 | `plugin-api.md` | phase 3 | The internal plugin API served by `aab-plugin-runtime` (`/manifests`, `/perform`, connect flows, `X-Plugin-Token`, 503/502 contract). |
 | `platform-thesis.md` | phase 7 | What adding Google after GitHub cost: manifest fields, engine files touched (target zero), shared adapter code. |
+| `approval-volume.md` | phase 8 | Simulated human interrupts under standing grants vs per-action approval (8-hour reference numbers), budget exhaustion, and what the simulation does not model. |
 
 The public deploy runbook (EC2 + Cloudflare) is `deploy/DEPLOY.md`. The implementation plan is referenced from `CLAUDE.md`.

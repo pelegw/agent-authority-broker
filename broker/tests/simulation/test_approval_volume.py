@@ -53,6 +53,14 @@ def test_standing_interrupts_taper_off(three_hours):
     assert hourly[0] > hourly[-1]
 
 
+
+def test_default_budget_fits_the_workload(three_hours):
+    # The default per_day is sized so the reference workload never hits a
+    # 429; exhaustion is shown separately with --per-day 200.
+    assert three_hours["per_day_budget"] == 1000
+    assert all(m["budget_429"] == 0 for m in three_hours["models"].values())
+    assert all(m["performed"] == m["actions"] for m in three_hours["models"].values())
+
 def test_every_action_ends_performed_or_over_budget():
     # A tiny per_day budget makes both models hit 429s; every action still
     # ends exactly once, either performed or refused for budget.

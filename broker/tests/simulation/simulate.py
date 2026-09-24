@@ -22,7 +22,7 @@ from . import models
 from .workload import generate
 
 DEFAULT_SEED = 7
-DEFAULT_PER_DAY = 200
+DEFAULT_PER_DAY = 1000
 
 
 def simulate(hours: int = 8, seed: int = DEFAULT_SEED, per_hour: int = 300,
