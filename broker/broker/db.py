@@ -304,13 +304,16 @@ def _migrate(conn) -> None:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 
 
-def init() -> None:
+def init() -> str:
     """Switch the file to WAL, create tables if missing and add any new
-    columns. Called at startup, before anything else opens the database."""
+    columns. Called at startup, before anything else opens the database.
+    Returns the journal mode (`wal` unless the filesystem refused it), which
+    the boot log reports."""
     with contextlib.closing(connect()) as conn, conn:
-        _enable_wal(conn)
+        mode = _enable_wal(conn)
         conn.executescript(SCHEMA)
         _migrate(conn)
+    return mode
 
 
 # ---- runtime key/value config (app_config) --------------------------------

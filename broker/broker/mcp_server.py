@@ -48,6 +48,7 @@ from . import __version__, mcp_tools
 from .agent_auth import authenticate
 from .auth import AuthContext
 from .errors import PolicyError
+from .logging_setup import kv
 from .runtime_settings import runtime_settings
 from .services import agent
 from .skill.generator import base_url_from
@@ -92,7 +93,7 @@ async def call_tool(name: str, arguments: dict | None) -> types.CallToolResult:
     except Exception:
         # Log it here (without the arguments, which may carry message text),
         # but never hand the agent a trace or an internal message.
-        log.exception("MCP tool %s failed", name)
+        log.exception("MCP tool failed %s", kv(tool=name))
         return mcp_tools.text_result({"error": "internal error", "code": "internal"},
                                      error=True)
 
@@ -139,7 +140,7 @@ async def read_resource(uri) -> list[ReadResourceContents]:
         text = await _run(agent.skill_doc, auth, _request_base_url())
     except Exception:
         # Same rule as tools: log here, never hand the agent internals.
-        log.exception("MCP resource %s failed", SKILL_URI)
+        log.exception("MCP resource failed %s", kv(resource=SKILL_URI))
         raise _mcp_error(types.INTERNAL_ERROR, "internal error") from None
     return [ReadResourceContents(content=text, mime_type="text/markdown")]
 

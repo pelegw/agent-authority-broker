@@ -29,6 +29,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from . import db
 from .config import get_settings
+from .logging_setup import kv
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ def put(slot: str, name: str, value: str) -> None:
             " VALUES (?, ?, ?, ?) ON CONFLICT(slot, name) DO UPDATE SET"
             " ciphertext = excluded.ciphertext, updated_at = excluded.updated_at",
             (slot, name, token, int(time.time())))
+    log.info("secret stored %s", kv(slot=slot, name=name))
 
 
 def _row(slot: str, name: str):
@@ -114,8 +116,11 @@ def get(slot: str, name: str) -> str | None:
 def delete(slot: str, name: str) -> bool:
     """Remove one secret. Works without the key (clearing needs no decrypt)."""
     with db.connect() as conn:
-        return conn.execute("DELETE FROM plugin_secrets WHERE slot = ? AND name = ?",
-                            (slot, name)).rowcount > 0
+        removed = conn.execute("DELETE FROM plugin_secrets WHERE slot = ? AND name = ?",
+                               (slot, name)).rowcount > 0
+    if removed:
+        log.info("secret deleted %s", kv(slot=slot, name=name))
+    return removed
 
 
 def state(slot: str, name: str) -> str:
@@ -162,5 +167,5 @@ def check_boot() -> None:
                   if state(r["slot"], r["name"]) == "unreadable"]
     if unreadable:
         # Names only; the console shows these as "re-enter required".
-        log.warning("secrets that no longer decrypt under BROKER_SECRETS_KEY "
-                    "(re-enter them in the console): %s", ", ".join(unreadable))
+        log.warning("secrets no longer decrypt under BROKER_SECRETS_KEY; re-enter them in "
+                    "the console %s", kv(secrets=unreadable))

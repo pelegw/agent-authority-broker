@@ -8,11 +8,15 @@ In-process state is fine because the broker runs exactly one worker; it resets
 on restart, which only ever helps a legitimate owner.
 """
 
+import logging
 import threading
 import time
 from collections import defaultdict, deque
 
 from ..errors import PolicyError
+from ..logging_setup import kv
+
+log = logging.getLogger(__name__)
 
 MAX_FAILURES = 5
 WINDOW_SECONDS = 60
@@ -42,6 +46,8 @@ def check(ip: str) -> None:
             del _failures[ip]   # keep the map from growing with one-off IPs
             return
         if len(q) >= MAX_FAILURES:
+            log.warning("owner credential attempts rate-limited %s",
+                        kv(ip=ip, failures=len(q), window_seconds=WINDOW_SECONDS))
             raise PolicyError(429, "too many failed attempts; try again in a minute")
 
 

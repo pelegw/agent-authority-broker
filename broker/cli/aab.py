@@ -251,7 +251,19 @@ def _engine_request(c: httpx.Client, args) -> httpx.Response | None:
     return None
 
 
+def _log_to_stderr() -> None:
+    """The CLI's stdout is its output (JSON, the skill doc). `simulate` and
+    `skill` run broker code in this process, so logging is set up here
+    first: to stderr, at WARNING unless LOG_LEVEL says otherwise. The app's
+    own configure() at import is then a no-op (one process, one setup)."""
+    from broker import logging_setup
+    env = dict(os.environ)
+    env.setdefault("LOG_LEVEL", "WARNING")
+    logging_setup.configure("aab-cli", env, stream="stderr")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _log_to_stderr()
     args = build_parser().parse_args(argv)
     if args.cmd == "skill":
         return _skill(args)

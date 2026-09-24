@@ -146,13 +146,23 @@ def authenticate_bearer(authorization: str | None, client_ip: str = "") -> AuthC
     secret works until prev_expires_at), the whole parent chain, and the
     principal. Records throttled last-used metadata.
     """
+    return check_bearer(authorization, client_ip)[0]
+
+
+def check_bearer(authorization: str | None,
+                 client_ip: str = "") -> tuple[AuthContext | None, str]:
+    """authenticate_bearer, plus WHY a refusal refused: a short reason class
+    for the operator's log line (never the header, never shown to the
+    caller, who gets the same 401 whatever the reason)."""
+    if authorization is None:
+        return None, "missing"
     if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
-        return None
+        return None, "malformed"
     token = authorization.removeprefix("Bearer ").strip()
-    if not token.startswith(KEY_PREFIX) or token.startswith(ADMIN_TOKEN_PREFIX):
-        return None
-    if not token.isascii():
-        return None
+    if token.startswith(ADMIN_TOKEN_PREFIX):
+        return None, "admin_token"
+    if not token.startswith(KEY_PREFIX) or not token.isascii():
+        return None, "malformed"
     now = int(time.time())
     token_hash = hash_key(token)
     conn = db.connect()
@@ -168,16 +178,18 @@ def authenticate_bearer(authorization: str | None, client_ip: str = "") -> AuthC
                 (token_hash, token_hash, now),
             ).fetchone()
             if row is None:
-                return None
+                return None, "unknown_key"
             chain = key_chain(row["id"], conn)
-            if _chain_problem(chain, now) is not None or chain[-1]["id"] != row["id"]:
-                return None
+            problem = _chain_problem(chain, now)
+            if problem is not None or chain[-1]["id"] != row["id"]:
+                return None, "chain:" + (problem or "broken chain").replace(" ", "_")
             if not _principal_ok(conn, row["principal_id"]):
-                return None
+                return None, "principal_disabled"
             try:
                 denies = merged_denies(chain)
             except ValueError:
-                return None      # unreadable denies must not parse as "no denies"
+                # unreadable denies must not parse as "no denies"
+                return None, "denies_unreadable"
             _touch_last_used(conn, row, now, client_ip)
     finally:
         conn.close()
@@ -193,7 +205,7 @@ def authenticate_bearer(authorization: str | None, client_ip: str = "") -> AuthC
         depth=len(chain) - 1, denies=denies,
         chain_key_ids=tuple(link["id"] for link in chain),
         chain_roles=tuple(link["role"] for link in chain),
-    )
+    ), "ok"
 
 
 def context_for_key(key_id: int) -> AuthContext | None:
@@ -347,5 +359,6 @@ def disable_key(key_id: int) -> bool:
 
 
 __all__ = ["ADMIN_TOKEN_PREFIX", "AuthContext", "KEY_PREFIX", "NewKey", "ROLES",
-           "authenticate_bearer", "context_for_key", "create_key", "disable_key", "generate_key",
-           "hash_key", "key_chain", "max_delegation_depth", "rotate_key"]
+           "authenticate_bearer", "check_bearer", "context_for_key", "create_key",
+           "disable_key", "generate_key", "hash_key", "key_chain", "max_delegation_depth",
+           "rotate_key"]

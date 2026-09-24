@@ -34,6 +34,7 @@ from .. import db
 from ..audit import audit
 from ..authority.grant import Lattice
 from ..config import plugin_services
+from ..logging_setup import kv
 from ..runtime_settings import runtime_settings
 from .adapter import Adapter, AdapterError, ClientFactory, InProcessAdapter, RemoteAdapter, request
 from .manifest import ID_RE, Manifest, ManifestError, load_manifest
@@ -96,7 +97,7 @@ class Registry:
             reason = f"plugin id already served by {self._entries[pid].service!r}"
         if reason:
             self.refused[label] = reason
-            log.warning("refusing plugin %s from %s: %s", label, service, reason)
+            log.warning("plugin refused %s", kv(plugin=label, service=service, reason=reason))
             audit("system", "plugin.refused", label, {"service": service, "reason": reason},
                   result="denied")
             return None
@@ -117,8 +118,12 @@ class Registry:
             if pinned is None:
                 return False
             adapter.manifest = pinned
+            known = pinned.id in self._entries
             self._entries[pinned.id] = Entry(pinned, adapter, adapter.service)
             ensure_row(pinned.id)
+            if not known:
+                log.info("plugin registered %s", kv(plugin=pinned.id, service=adapter.service,
+                                                    version=pinned.version))
             return True
 
     def register_in_process(self, impl: Any, vendored: Manifest,
@@ -152,20 +157,26 @@ class Registry:
                            factory=self._factory)
         except AdapterError as exc:
             # Down at boot is normal (containers start in any order): retry later.
+            # The status says which: 503 not reachable, 401 token refused.
             self._pending[service] = (url, token)
-            log.warning("plugin service %s not reachable yet: %s", service, exc.message)
+            log.warning("plugin service not reachable yet; will retry %s",
+                        kv(service=service, status=exc.status,
+                           retry_seconds=_REDISCOVER_SECONDS))
             return
         offered = body.get("manifests")
         if not isinstance(offered, list):
+            log.warning("plugin refused %s", kv(service=service, reason="malformed /manifests"))
             audit("system", "plugin.refused", service,
                   {"service": service, "reason": "malformed /manifests"}, result="denied")
             return
+        log.info("plugin service discovered %s", kv(
+            service=service, plugins=[m.get("id") for m in offered if isinstance(m, dict)]))
         for m in offered:
             pid = m.get("id") if isinstance(m, dict) else None
             try:
                 vendored = self.vendored(pid) if isinstance(pid, str) else None
             except ManifestError as exc:
-                log.error("vendored manifest for %s is invalid: %s", pid, exc)
+                log.error("vendored manifest is invalid %s", kv(plugin=pid, error=str(exc)))
                 vendored = None
             if vendored is None:
                 self._pin(m, None, service)
@@ -173,6 +184,11 @@ class Registry:
             adapter = RemoteAdapter(service, url, token, vendored, live_plugin_timeout,
                                     self._factory)
             self.register(adapter, m, vendored)
+
+    def pending_services(self) -> list[str]:
+        """Configured services not reached yet (retried on a later call)."""
+        with self._lock:
+            return sorted(self._pending)
 
     def _maybe_rediscover(self) -> None:
         if self._pending and time.monotonic() >= self._next_discovery:

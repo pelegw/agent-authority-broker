@@ -30,6 +30,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 from .errors import AdapterError
+from .logging_setup import kv
 
 _SLOT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _SUFFIX = ".secrets"
@@ -99,9 +100,10 @@ class SecretStore:
             current = self.read_all(slot)
         except SecretsUnreadable:
             # The slot name only: never contents, old or new.
-            log.warning("secret slot %r does not decrypt with the current key; "
-                        "replacing it with the values being written", slot)
+            log.warning("secret slot does not decrypt with the current key; replacing it "
+                        "with the values being written %s", kv(slot=slot))
             current = {}
+        before = set(current)
         for name, value in values.items():
             if not isinstance(name, str) or not name:
                 raise AdapterError(400, "secret names must be non-empty strings")
@@ -113,11 +115,18 @@ class SecretStore:
                 raise AdapterError(400, f"secret {name!r} must be a string")
         self._atomic_write(self._path(slot), self._fernet.encrypt(
             json.dumps(current, sort_keys=True).encode()))
+        # Slot and field names only, and only what changed: clearing a name
+        # that was never set (a config form's empty field) is not news.
+        stored = sorted(n for n, v in values.items() if v not in (None, ""))
+        removed = sorted(n for n, v in values.items() if v in (None, "") and n in before)
+        if stored or removed:
+            log.info("secret slot written %s", kv(slot=slot, stored=stored, removed=removed))
 
     def wipe(self, slot: str) -> None:
         path = self._path(slot)
         if path.exists():
             path.unlink()
+            log.info("secret slot wiped %s", kv(slot=slot))
 
     @staticmethod
     def _atomic_write(path: Path, data: bytes) -> None:

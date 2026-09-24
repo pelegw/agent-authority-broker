@@ -24,14 +24,22 @@ Status mapping (docs/plugin-api.md, "Errors"):
 
 `GitHubError` keeps GitHub's own status and message for handlers that need
 to tell cases apart (e.g. 422 "Reference already exists" -> 409).
+
+Every refusal or failure logs one line: the method, GitHub's status (or the
+transport error's class) and the status it maps to. Never the path (it can
+name a file or a branch from the params), the bearer or GitHub's message.
 """
 
+import logging
 import time
 from collections.abc import Callable
 
 import httpx
 
 from aab_plugin_runtime import AdapterError
+from aab_plugin_runtime.logging_setup import kv
+
+log = logging.getLogger("aab_plugin_github.api")
 
 API_URL = "https://api.github.com"
 API_VERSION = "2022-11-28"
@@ -105,11 +113,24 @@ class GitHubAPI:
             with self._client() as c:
                 resp = c.request(method, path, json=json, params=params, headers=headers)
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            log.warning("github api unreachable %s", kv(method=method, error=type(exc).__name__,
+                                                        maps_to=503))
             raise GitHubError(503, f"GitHub unreachable ({type(exc).__name__})") from exc
         except httpx.HTTPError as exc:
+            log.warning("github api call failed %s", kv(method=method, error=type(exc).__name__,
+                                                        maps_to=unknown))
             raise GitHubError(unknown, "GitHub request failed with unknown outcome "
                                        f"({type(exc).__name__})") from exc
-        self._raise_for(resp, unknown)
+        try:
+            self._raise_for(resp, unknown)
+        except GitHubError as exc:
+            status = resp.status_code
+            log.log(logging.WARNING if status >= 500 or status in (401, 429) else logging.INFO,
+                    "github api refused %s", kv(method=method, github_status=status,
+                                                status_class=f"{status // 100}xx",
+                                                maps_to=exc.status,
+                                                retry_after=getattr(exc, "retry_after", None)))
+            raise
         return resp
 
     def json(self, resp: httpx.Response, *, before_effect: bool = False):

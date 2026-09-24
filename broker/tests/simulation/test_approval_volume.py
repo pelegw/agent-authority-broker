@@ -104,7 +104,7 @@ def test_sandbox_restores_process_state():
     assert os.environ.get("BROKER_DB") == before_db
 
 
-def test_aab_simulate_cli(capsys):
+def test_aab_simulate_cli(capsys, logs_to_stderr):
     from cli import aab
     assert aab.main(["simulate", "--hours", "1", "--seed", "3", "--json"]) == 0
     out = json.loads(capsys.readouterr().out)

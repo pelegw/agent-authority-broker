@@ -7,6 +7,8 @@ prove it). Handlers that need to know who is acting also declare
 per request, so the guard still runs only once.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
@@ -14,8 +16,10 @@ from ..audit import audit
 from ..deps import AdminContext, client_ip, require_admin
 from ..errors import PolicyError
 from ..identity import admin_tokens, principals, ratelimit, sessions
+from ..logging_setup import kv
 
 router = APIRouter(dependencies=[Depends(require_admin)])
+log = logging.getLogger(__name__)
 
 
 def _audit(ctx: AdminContext, action: str, resource: str = "",
@@ -51,12 +55,16 @@ def change_password(body: PasswordBody, request: Request,
     if not principals.check_password(ctx.principal_id, body.current_password):
         ratelimit.record_failure(ip)
         _audit(ctx, "auth.password_change", detail={"ip": ip}, result="denied")
+        log.warning("owner password change refused: wrong current password %s",
+                    kv(username=ctx.username, via=ctx.via, ip=ip))
         raise PolicyError(403, "current password is incorrect", "wrong_password")
     principals.set_password(ctx.principal_id, body.new_password)
     # A token-authenticated change has no session to keep: log out every session.
     keep = ctx.credential_id if ctx.via == "session" else None
     revoked = sessions.revoke_all_except(ctx.principal_id, keep)
     _audit(ctx, "auth.password_change", detail={"ip": ip, "sessions_revoked": revoked})
+    log.info("owner password changed %s",
+             kv(username=ctx.username, via=ctx.via, sessions_revoked=revoked, ip=ip))
     return {"ok": True, "sessions_revoked": revoked}
 
 
@@ -73,6 +81,10 @@ def create_token(body: TokenBody, ctx: AdminContext = Depends(require_admin)) ->
     created = admin_tokens.create(ctx.principal_id, body.name, body.expires_in_hours)
     _audit(ctx, "admin_token.create", created["id"],
            {"name": body.name, "expires_at": created["expires_at"]})
+    # The id and name only: the plaintext exists in the response alone.
+    log.info("admin token created %s", kv(token_id=created["id"], name=body.name,
+                                          expires_at=created["expires_at"],
+                                          by=ctx.username, via=ctx.via))
     return created
 
 
@@ -86,6 +98,7 @@ def revoke_token(token_id: str, ctx: AdminContext = Depends(require_admin)) -> d
     if not admin_tokens.revoke(ctx.principal_id, token_id):
         raise PolicyError(404, "no such token")
     _audit(ctx, "admin_token.revoke", token_id)
+    log.info("admin token revoked %s", kv(token_id=token_id, by=ctx.username, via=ctx.via))
     return {"ok": True}
 
 
@@ -102,4 +115,8 @@ def revoke_session(session_id: str, ctx: AdminContext = Depends(require_admin)) 
     if not sessions.revoke(ctx.principal_id, session_id):
         raise PolicyError(404, "no such session")
     _audit(ctx, "session.revoke", session_id)
+    # A prefix of the stored id (a hash, not the cookie) is enough to match
+    # the console's session list.
+    log.info("owner session revoked %s", kv(session=session_id[:12], by=ctx.username,
+                                            via=ctx.via))
     return {"ok": True}

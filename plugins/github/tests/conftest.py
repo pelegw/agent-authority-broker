@@ -21,6 +21,7 @@ except ImportError:
     sys.path.insert(0, str(_RUNTIME))
 
 import yaml  # noqa: E402
+from aab_plugin_runtime import logging_setup  # noqa: E402
 from cryptography.fernet import Fernet  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -30,6 +31,11 @@ from aab_plugin_github.main import create_app  # noqa: E402
 
 from .fakes import (APP_ID, APP_SLUG, INSTALLATION_ID, PAT, PRIVATE_KEY_PEM,  # noqa: E402
                     Clock, FakeGitHub)
+
+# Logging is configured once, at collection, as the plugin process does when
+# it builds its app: serve() inside a test then leaves the handlers alone
+# instead of swapping them under a running log capture.
+logging_setup.configure("plugin-github")
 
 PLUGIN_TOKEN = "github-plugin-token-0123456789abcdef"
 MANIFEST = yaml.safe_load(MANIFEST_PATH.read_text(encoding="utf-8"))

@@ -39,6 +39,7 @@ identity/ (a test walks the import graph).
 from __future__ import annotations
 
 import dataclasses
+import logging
 import re
 import time
 
@@ -53,6 +54,7 @@ from ..authority.roles import ROLE_RANK, ROLES, role_caps
 from ..authority.store import GrantInvariantError
 from ..errors import PolicyError
 from ..ledger import rate_limiter
+from ..logging_setup import kv
 from ..plugins.registry import get_registry
 from ..runtime_settings import runtime_settings
 from .agent import clipped_error, live_children, normalize_request, visible_caps
@@ -65,6 +67,8 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
 # from SQLite's integer range). Always further capped by the caller's own.
 MAX_HOURS = 24 * 365 * 10
 _GRANT_LIST_LIMIT = 1000
+
+log = logging.getLogger(__name__)
 
 
 def _exceeds(field: str, message: str, limit) -> PolicyError:
@@ -173,6 +177,8 @@ def delegate(auth, name: str, capabilities: list, reason: str = "",
     pooled = dedupe(c for n in narrowed for c in n.capabilities)
     clip = [r for r in requested if not any(lattice.le(r, c) for c in pooled)]
     if clip:
+        log.info("delegation refused: exceeds the caller's authority %s",
+                 kv(key=auth.name, requested=len(requested), clipped=len(clip)))
         raise clipped_error("exceeds what you can delegate", "delegate only the allowed "
                             "capabilities (you can only narrow your own authority)",
                             clip, visible_caps(auth, pooled))
@@ -194,11 +200,16 @@ def delegate(auth, name: str, capabilities: list, reason: str = "",
         _undo(new.key_id, grants)
         audit(auth.name, "delegation.create", str(new.key_id), {"name": full_name},
               result="error")
+        log.warning("delegation undone: the caller's authority changed mid-way %s",
+                    kv(key=auth.name, child_key_id=new.key_id))
         raise PolicyError(409, "your authority changed while delegating; nothing was "
                                "created, try again", "conflict") from exc
     audit(auth.name, "delegation.create", str(new.key_id),
           {"name": full_name, "role": role, "rate_per_min": rate, "expires_at": expires_at,
            "grants": [g.id for g in grants], "parent_grants": [g.parent_grant_id for g in grants]})
+    log.info("delegation created %s", kv(
+        key=auth.name, child_key_id=new.key_id, child=full_name, role=role, rate_per_min=rate,
+        expires_at=expires_at, depth=auth.depth + 1, grants=[g.id for g in grants]))
     return {"key_id": new.key_id, "name": full_name, "key": new.plaintext,
             "expires_at": expires_at, "role": role, "rate_per_min": rate,
             "capabilities": visible_caps(auth, pooled, own_denies),
@@ -278,4 +289,6 @@ def revoke_delegation(auth, key_id: int) -> dict:
                and store.set_status(g.id, "revoked", None, "agent")]
     audit(auth.name, "delegation.revoke", str(key_id),
           {"name": chain[-1]["name"], "grants": revoked})
+    log.info("delegation revoked %s", kv(key=auth.name, child_key_id=key_id,
+                                         child=chain[-1]["name"], grants_revoked=len(revoked)))
     return {"key_id": key_id, "name": chain[-1]["name"], "status": "revoked"}

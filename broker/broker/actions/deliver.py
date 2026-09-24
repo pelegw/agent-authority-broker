@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import time
 from dataclasses import replace
 
@@ -36,10 +37,13 @@ from ..audit import audit
 from ..auth import context_for_key
 from ..errors import PolicyError
 from ..hidden import deny_sets, is_denied
+from ..logging_setup import kv
 from ..plugins.adapter import CallScope
 from ..plugins.registry import get_registry
 from ..policy import NOT_FOUND, Decision, evaluate
 from . import queue
+
+log = logging.getLogger(__name__)
 
 
 def claim(action_id: str, new_status: str, now: int, from_status: str = "pending", *,
@@ -123,9 +127,13 @@ def deliver_claimed(action_id: str, row: dict, release_status: str, actor: str,
         _set(action_id, "canceled", {"error": "key disabled or expired"})
         audit(actor, "action.denied", action_id, {"reason": "key disabled or expired"},
               result="denied")
+        log.info("action canceled at delivery: its key is disabled or expired %s",
+                 kv(action_id=action_id, target=target, action=action))
         raise PolicyError(403, "the action's key is disabled or expired", "forbidden")
     if not get_registry().is_enabled(target):
         _set(action_id, release_status)          # held, not dropped
+        log.info("action held: plugin disabled %s",
+                 kv(action_id=action_id, target=target, action=action, status=release_status))
         raise PolicyError(409, "plugin is disabled; the action is held", "held")
 
     request_id = engine.new_request_id()
@@ -147,6 +155,9 @@ def deliver_claimed(action_id: str, row: dict, release_status: str, actor: str,
         else:
             _set(action_id, "canceled", {"error": d.message or d.reason})
         audit(actor, "action.denied", action_id, {"reason": d.reason}, result="denied")
+        log.info("action not delivered: denied at re-check %s", kv(
+            action_id=action_id, reason=d.reason, status=d.status,
+            row_status=release_status if d.status == 503 else "canceled"))
         raise engine.deny_error(d)
 
     try:
@@ -157,9 +168,13 @@ def deliver_claimed(action_id: str, row: dict, release_status: str, actor: str,
         if exc.status in (429, 503):
             _set(action_id, release_status)      # transient: retry later
             audit(actor, "action.deferred", action_id, {"status": exc.status}, result="error")
+            log.info("action deferred; will retry %s", kv(
+                action_id=action_id, status=exc.status, row_status=release_status))
         else:
             _set(action_id, "failed", {"error": str(exc), "status": exc.status})
             audit(actor, "action.failed", action_id, {"status": exc.status}, result="error")
+            log.warning("action failed %s", kv(action_id=action_id, status=exc.status,
+                                               code=exc.code))
         raise
     stored = ({"binary": True, "mime": result.mime,
                "b64": base64.b64encode(result.binary).decode()} if result.binary is not None
@@ -167,4 +182,6 @@ def deliver_claimed(action_id: str, row: dict, release_status: str, actor: str,
     _set(action_id, "done", stored)
     audit(actor, "action.done", action_id, {"target": target, "action": action,
                                             "on_behalf_of": key_ctx.name})
+    log.info("action delivered %s", kv(action_id=action_id, target=target, action=action,
+                                       key=key_ctx.name, by=actor))
     return {"id": action_id, "status": "done", "result": stored}

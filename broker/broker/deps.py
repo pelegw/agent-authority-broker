@@ -7,6 +7,7 @@ pre-login `/auth/*` endpoints. `client_ip` is the trusted caller address.
 Phase 2 appends `current_auth` (aab_ agent-key bearer auth) at the end.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Literal
 
@@ -16,6 +17,9 @@ from . import cf_access
 from .config import get_settings
 from .errors import PolicyError
 from .identity import admin_tokens, sessions
+from .logging_setup import kv, set_actor
+
+log = logging.getLogger(__name__)
 
 # Custom header the console sends on every state-changing request. Together with
 # SameSite=Strict on the session cookie this is the CSRF defence: a cross-site
@@ -38,9 +42,13 @@ class AdminContext:
     expires_at: int | None = None  # when this credential stops working, if ever
 
 
-def _unauthorized() -> PolicyError:
+def _unauthorized(request: Request | None, reason: str) -> PolicyError:
     # One message for every credential failure: the caller learns that it is not
-    # authenticated, never which part (missing, expired, revoked, disabled) failed.
+    # authenticated, never which part (missing, expired, revoked, disabled)
+    # failed. The operator's log line says which class it was.
+    log.warning("admin authentication failed %s", kv(
+        reason=reason, path=request.url.path if request is not None else None,
+        ip=client_ip(request) if request is not None else None))
     return PolicyError(401, "admin authentication required", "unauthorized")
 
 
@@ -57,6 +65,8 @@ def require_cf_access(cf_access_jwt_assertion: str | None = Header(None)) -> Non
         # Header name maps: Cf-Access-Jwt-Assertion -> cf_access_jwt_assertion.
         cf_access.verify(cf_access_jwt_assertion)
     except cf_access.AccessError as e:
+        # The error class only: the verifier's text can quote the token.
+        log.warning("cloudflare access identity refused %s", kv(error=type(e).__name__))
         raise PolicyError(403, "Cloudflare Access identity required", "forbidden") from e
 
 
@@ -78,22 +88,27 @@ def require_admin(
     if authorization is not None:
         scheme, _, token = authorization.partition(" ")
         if scheme != "Bearer" or not token.strip():
-            raise _unauthorized()
+            raise _unauthorized(request, "malformed")
         auth = admin_tokens.authenticate(token.strip())
         if auth is None:
-            raise _unauthorized()
+            raise _unauthorized(request, "unknown_or_revoked_token")
+        set_actor(f"owner:{auth.username}")
         return AdminContext(auth.principal_id, auth.username, "token", auth.id,
                             auth.expires_at)
 
-    session = sessions.lookup(request.cookies.get(sessions.COOKIE_NAME))
+    cookie = request.cookies.get(sessions.COOKIE_NAME)
+    session = sessions.lookup(cookie)
     if session is None:
-        raise _unauthorized()
+        raise _unauthorized(request, "invalid_or_expired_session" if cookie else "no_session")
     # Cookies ride along on cross-site requests; bearer tokens never do, which is
     # why only cookie-authenticated writes need the custom header.
     if request.method not in _SAFE_METHODS and \
             request.headers.get(CSRF_HEADER) != CSRF_VALUE:
+        log.warning("admin request refused: missing CSRF header %s",
+                    kv(path=request.url.path, ip=client_ip(request)))
         raise PolicyError(403, f"missing {CSRF_HEADER}: {CSRF_VALUE} header", "csrf")
     session = sessions.touch(session)
+    set_actor(f"owner:{session.username}")
     return AdminContext(session.principal_id, session.username, "session", session.id,
                         session.expires_at())
 

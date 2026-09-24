@@ -13,7 +13,7 @@ from .conftest import cap
 
 
 @pytest.fixture()
-def run(env, monkeypatch, admin_token, capsys):
+def run(env, monkeypatch, admin_token, capsys, logs_to_stderr):
     from broker.main import app
     monkeypatch.setattr(aab.httpx, "Client",
                         lambda base_url, headers, timeout: TestClient(app, base_url=base_url,

@@ -24,12 +24,17 @@ Long-poll: a `long_poll` action that declares a `cursor` param, called
 without one, is a bootstrap ("start from now"): it is answered at once
 whatever `wait` says, since holding it would skip everything that arrives
 during the wait.
+
+Logging: one `decision` line per recorded decision and one `outcome` line
+per recorded outcome, under the request id the rows carry, so a log line and
+its decision row can always be matched. Never params, only their hash's row.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 import uuid
@@ -40,6 +45,7 @@ from . import decisions, ledger
 from .actions import queue
 from .errors import PolicyError
 from .hidden import is_denied
+from .logging_setup import current_request_id, kv
 from .plugins.adapter import UNENCODABLE, AdapterError, CallScope, Result, encodable
 from .plugins.manifest import Action
 from .plugins.registry import get_registry
@@ -52,6 +58,8 @@ _ADAPTER_ERRORS = {
 }
 _WALK_DEPTH = 3
 
+log = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class EngineResult:
@@ -63,18 +71,41 @@ class EngineResult:
 
 
 def new_request_id() -> str:
-    return uuid.uuid4().hex
+    """The id of the HTTP request or background job in progress (set by
+    request_log / the job), so the decision record's `request_id` is the one
+    on the request's log lines; a fresh one when there is none."""
+    return current_request_id() or uuid.uuid4().hex
 
 
 def record_decision(auth, target: str, action: str, params: Any, d: Decision,
                     request_id: str, *, actor_principal: str | None = None,
                     actor_via: str | None = None) -> int:
-    return decisions.record(
+    row_id = decisions.record(
         request_id=request_id, kind="decision", auth=auth, target=target, action=action,
         grant_chain=d.grant_chain_ids, resource=d.resource,
         p_hash=safe_params_hash(d.params if d.params else params), decision=d.decision,
         reason=d.reason, enforced_where=d.enforced_where, actor_principal=actor_principal,
         actor_via=actor_via)
+    log.info("decision %s", kv(
+        decision=d.decision, reason=d.reason, status=d.status, target=target, action=action,
+        key=auth.name, resource=d.resource, chain=len(d.grant_chain_ids), row=row_id,
+        approved_by=actor_principal))
+    return row_id
+
+
+_OUTCOME_STATUS = {"ok": 200, "filtered": 404, "unknown": 502, "unavailable": 503,
+                   "revoked": 403}
+
+
+def _log_outcome(auth, target: str, action: str, value: str, started: float | None) -> None:
+    status = _OUTCOME_STATUS.get(value)
+    if status is None:
+        code = value.removeprefix("error:")
+        status = int(code) if code.isdigit() else 429 if value in (
+            "budget_exhausted", "rate_limited") else 0
+    log.log(logging.WARNING if status >= 500 else logging.INFO, "outcome %s", kv(
+        outcome=value, status=status, target=target, action=action, key=auth.name,
+        duration_ms=None if started is None else round((time.perf_counter() - started) * 1000)))
 
 
 def safe_params_hash(params: Any) -> str:
@@ -169,12 +200,14 @@ def execute(auth, d: Decision, target: str, action: str, request_id: str, *,
     reg = get_registry()
     adapter = reg.adapter(target)
     scope = d.scope or CallScope(request_id=request_id)
+    started = time.perf_counter()
 
     def outcome(value: str) -> None:
         decisions.record(request_id=request_id, kind="outcome", auth=auth, target=target,
                          action=action, grant_chain=d.grant_chain_ids, resource=d.resource,
                          p_hash=decisions.params_hash(d.params), outcome=value,
                          actor_principal=actor_principal, actor_via=actor_via)
+        _log_outcome(auth, target, action, value, started)
 
     if adapter is None:
         outcome("error:404")
@@ -184,6 +217,11 @@ def execute(auth, d: Decision, target: str, action: str, request_id: str, *,
         try:
             reservation = ledger.reserve(auth, d.grant_chain_ids, target, action)
         except PolicyError as exc:
+            # Which grant ran out (or the key's per-minute rate): the one
+            # thing an operator needs to act on a 429.
+            log.warning("budget refused %s", kv(
+                code=exc.code, grant=exc.extra.get("grant_id"), budget=exc.extra.get("budget"),
+                key=auth.name, rate_per_min=auth.rate_per_min, target=target, action=action))
             outcome(exc.code)
             raise
     try:
@@ -314,6 +352,7 @@ def close_poll(auth, poll: Poll, outcome: str = "ok") -> None:
     decisions.record(request_id=poll.request_id, kind="outcome", auth=auth,
                      target=poll.target, action=poll.action,
                      p_hash=safe_params_hash(poll.params), outcome=outcome)
+    _log_outcome(auth, poll.target, poll.action, outcome, None)
 
 
 def is_empty(data: Any) -> bool:

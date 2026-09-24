@@ -42,4 +42,4 @@ def build_adapters(transport: httpx.BaseTransport | None = None,
 
 def create_app(environ: Mapping[str, str] | None = None) -> FastAPI:
     env = os.environ if environ is None else environ
-    return from_env(build_adapters(), dict(env))
+    return from_env(build_adapters(), dict(env), service="google")

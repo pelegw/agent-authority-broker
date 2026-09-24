@@ -11,9 +11,13 @@ outbound half of Telegram is imported here; the approve path lives in
 notify/telegram_inbound.py, which nothing on the agent surface imports.
 """
 
+import logging
+
 from ..audit import audit
+from ..logging_setup import kv
 
 _PROVIDERS: list = []
+log = logging.getLogger(__name__)
 
 
 def _providers() -> list:
@@ -34,14 +38,20 @@ def _fan_out(method: str, item: dict) -> None:
     except Exception as exc:
         audit("system", "notify.failed", str(item.get("id", "")),
               {"phase": "select", "error": type(exc).__name__}, result="error")
+        log.warning("notification failed %s", kv(phase="select", error=type(exc).__name__))
         return
     for p in providers:
         try:
             getattr(p, method)(item)
         except Exception as exc:          # a channel outage never breaks the caller
+            provider = getattr(p, "__name__", type(p).__name__)
             audit("system", "notify.failed", str(item.get("id", "")),
-                  {"provider": getattr(p, "__name__", type(p).__name__), "method": method,
+                  {"provider": provider, "method": method,
                    "error": type(exc).__name__}, result="error")
+            # The class and status only: a Telegram error text can quote the chat.
+            log.warning("notification failed %s", kv(
+                provider=provider, method=method, id=item.get("id"),
+                error=type(exc).__name__, status=getattr(exc, "status", None)))
 
 
 def notify_action(action: dict) -> None:
