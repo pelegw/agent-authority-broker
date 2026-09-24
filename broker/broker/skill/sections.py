@@ -1,4 +1,4 @@
-"""The skill doc's sections, one function each, as plain f-string Markdown.
+"""The skill doc's guide-wide sections, one function each, as f-string Markdown.
 
 Everything target-specific comes from the manifest passed in; nothing here
 names a plugin. REST comes first in every section (many agents only have
@@ -8,21 +8,20 @@ call, what a normal answer looks like, and the few rules that keep it safe.
 
 Pure functions of their arguments (no database, no registry, no clock
 except where a key's own expiry is shown), so the all-plugins doc renders
-byte-identically for the CI drift check.
+byte-identically for the CI drift check. Each target's own section is
+plugin_section.py; the formatting helpers are markdown.py.
 """
 
 from __future__ import annotations
 
 import json
-import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 from ..plugins.manifest import Action, Manifest
-
-AUTH_HEADER = "Authorization: Bearer $AAB_KEY"
-PLACEHOLDER = "{{BASE_URL}}"
-ACTIONS_PATH = "/v1/targets/{target}/actions/{action}"
+# PLACEHOLDER is re-exported: callers read it as sections.PLACEHOLDER.
+from .markdown import (ACTIONS_PATH, PLACEHOLDER, action_path, code, curl, join,  # noqa: F401
+                       listing, when)
 
 # Generic MCP tools and the REST route each mirrors. tests/test_skill.py
 # asserts this matches mcp_generic.GENERIC, so the doc cannot drift from it.
@@ -89,111 +88,6 @@ ERRORS = (
     ("503", "`unavailable`, `not_connected`",
      "Not performed. Safe to retry later."),
 )
-
-
-# ---- small helpers ----------------------------------------------------------------
-
-def join(parts: Iterable[str]) -> str:
-    return "\n\n".join(p.strip("\n") for p in parts if p and p.strip())
-
-
-def _shell_json(value: Any) -> str:
-    """JSON for a single-quoted shell argument."""
-    return json.dumps(value, ensure_ascii=False).replace("'", "'\\''")
-
-
-def curl(base: str, method: str, path: str, body: Any = None) -> str:
-    if body is None:
-        return f'curl -s {"" if method == "GET" else f"-X {method} "}{base}{path} -H "{AUTH_HEADER}"'
-    return (f"curl -s -X {method} {base}{path} \\\n"
-            f'  -H "{AUTH_HEADER}" -H "Content-Type: application/json" \\\n'
-            f"  -d '{_shell_json(body)}'")
-
-
-def code(text: str, lang: str = "bash") -> str:
-    return f"```{lang}\n{text}\n```"
-
-
-def when(ts: int | None) -> str:
-    """A unix time for humans and agents alike (UTC, minute precision)."""
-    if ts is None:
-        return "never"
-    return time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime(ts))
-
-
-def action_path(target: str, action: str) -> str:
-    return ACTIONS_PATH.format(target=target, action=action)
-
-
-def listing(names: list[str]) -> str:
-    """"A", "A and B", "A, B and C"."""
-    if len(names) <= 1:
-        return names[0] if names else ""
-    return ", ".join(names[:-1]) + " and " + names[-1]
-
-
-def _bounds(lo, hi, unit: str = "") -> str:
-    if lo is not None and hi is not None:
-        return f"{lo}-{hi}{unit}"
-    if lo is not None:
-        return f">= {lo}{unit}"
-    return f"<= {hi}{unit}"
-
-
-def _param_type(spec: Mapping) -> str:
-    if "enum" in spec:
-        return " | ".join(str(v) for v in spec["enum"])
-    kind = spec.get("type", "any")
-    if kind == "array":
-        kind = f"array of {(spec.get('items') or {}).get('type', 'any')}"
-    lo, hi = spec.get("minimum"), spec.get("maximum")
-    if lo is not None or hi is not None:
-        kind += " " + _bounds(lo, hi)
-    lo, hi = spec.get("minLength"), spec.get("maxLength")
-    if (lo is not None and lo > 1) or hi is not None:
-        kind += ", " + _bounds(lo, hi, " chars")
-    return kind
-
-
-def param_signature(act: Action) -> str:
-    """Compact form for the action table: required params marked `*`."""
-    props = act.params.get("properties") or {}
-    if not props:
-        return "none"
-    required = set(act.params.get("required") or ())
-    return ", ".join(f"`{n}{'*' if n in required else ''}`" for n in props)
-
-
-def param_inline(act: Action) -> str:
-    """Every param on one line: name (type, bounds; required | default)
-    and its description."""
-    props = act.params.get("properties") or {}
-    required = set(act.params.get("required") or ())
-    out = []
-    for name, spec in props.items():
-        detail = _param_type(spec)
-        if name in required:
-            detail += ", required"
-        elif "default" in spec:
-            detail += f", default {json.dumps(spec['default'], ensure_ascii=False)}"
-        desc = (spec.get("description") or "").strip().rstrip(".")
-        out.append(f"`{name}` ({detail}){': ' + desc if desc else ''}")
-    return "; ".join(out)
-
-
-def _modes(act: Action) -> str:
-    return ", ".join(act.effective_modes)
-
-
-def _controls(act: Action) -> list[str]:
-    out = []
-    if act.side_effect != "read" and "draft" in act.effective_modes:
-        out.append("`as_draft`")
-    if act.schedulable:
-        out.append("`run_at` | `delay_seconds`")
-    if out:
-        out.append("`note`")
-    return out
 
 
 # ---- sections -------------------------------------------------------------------------
@@ -480,105 +374,6 @@ def targets_intro(base: str, filtered: bool, unreachable: list[str]) -> str:
             lines += ["", "No authority yet on: " + ", ".join(f"`{t}`" for t in unreachable)
                       + "."]
     return "\n".join(lines)
-
-
-def enforcement_note(m: Manifest) -> str:
-    items = [*m.narrowings, *m.constraints]
-    if m.connection.enforcement == "proxy":
-        return ("Enforcement: every limit on this target is applied by the broker "
-                "(`proxy`); the connection itself has the account's full access.")
-    target = sorted(getattr(i, "dimension", None) or i.name for i in items
-                    if i.enforcement == "target")
-    proxy = sorted(getattr(i, "dimension", None) or i.name for i in items
-                   if i.enforcement != "target")
-    out = "Enforcement: "
-    if target:
-        out += (", ".join(f"`{d}`" for d in target) + " enforced by the target itself "
-                "(`target`: the broker mints a credential limited to your grant)")
-    if proxy:
-        out += ("; " if target else "") + ", ".join(f"`{d}`" for d in proxy) + \
-            " by the broker (`proxy`)"
-    return out + (". A fallback connection may downgrade everything to `proxy`; "
-                  "`enforced_where` reports it per call.")
-
-
-_FORM_TEXT = {
-    "list": "a list of {kind} ids",
-    "subtree": "{kind} ids, each covering everything below it",
-    "pattern": "exact-match patterns",
-    "range": "an integer upper bound",
-    "flag": "true or false",
-}
-
-
-def _dimension(name: str, form: str, kind: str | None, values: list[str] | None) -> str:
-    if form == "level":
-        return f"`{name}`: one of " + " < ".join(values or [])
-    return f"`{name}`: " + _FORM_TEXT[form].format(kind=kind or name)
-
-
-def _resources(m: Manifest) -> str:
-    lines = []
-    for kind, res in m.resources.items():
-        bits = [f"`{kind}` ({res.display.lower()})"]
-        if res.id_format:
-            bits.append(f"id: {res.id_format}")
-        if res.resolve:
-            bits.append(f"look ids up with `GET /v1/targets/{m.id}/resolve?kind={kind}&q=...`")
-        lines.append("- Resource " + "; ".join(bits) + ".")
-    dims = [_dimension(n.dimension, n.form, n.resource, n.values)
-            for n in m.narrowings if not n.derived_from]
-    dims += [_dimension(c.name, c.form, None, c.values) for c in m.constraints]
-    if dims:
-        lines.append("- Capability `selector` / `constraints` for this target: "
-                     + "; ".join(dims) + ".")
-    return "\n".join(lines)
-
-
-def plugin(m: Manifest, base: str, reachable: set[str] | None) -> str:
-    """One target's section. `reachable` None = all actions (the full doc);
-    otherwise only those actions appear, and examples for others are
-    dropped."""
-    actions = [a for a in m.actions if reachable is None or a.name in reachable]
-    head = f"### {m.display_name} (`{m.id}`)"
-    parts = [head, m.description.strip(), enforcement_note(m)]
-    if m.skill.addressing.strip():
-        parts.append("Addressing: " + m.skill.addressing.strip())
-    parts.append(_resources(m))
-    rows = ["| REST | MCP | Effect | Params | Modes | Schedulable |",
-            "|---|---|---|---|---|---|"]
-    for act in actions:
-        rows.append(f"| `POST {action_path(m.id, act.name)}` | `{m.id}_{act.name}` | "
-                    f"{act.side_effect} | {param_signature(act)} | {_modes(act)} | "
-                    f"{'yes' if act.schedulable else 'no'} |")
-    parts.append("\n".join(rows))
-    details = []
-    for act in actions:
-        notes = []
-        if act.long_poll:
-            notes.append(f"Long-poll (REST only): `GET {action_path(m.id, act.name)}"
-                         "?<params>&wait=25` holds until something new arrives.")
-        if act.returns == "binary":
-            notes.append("Returns raw bytes with their content type (MCP: base64).")
-        controls = _controls(act)
-        if controls:
-            notes.append("Controls: " + ", ".join(controls) + ".")
-        line = f"- `{act.name}`: {act.doc.strip() or act.name.replace('_', ' ')}"
-        params = param_inline(act)
-        if params:
-            line += f" Params: {params}."
-        if notes:
-            line += " " + " ".join(notes)
-        details.append(line)
-    parts.append("\n".join(details))
-    if m.skill.rules:
-        parts.append("Rules:\n" + "\n".join(f"- {r.strip()}" for r in m.skill.rules))
-    examples = [ex for ex in m.skill.examples if reachable is None or ex.action in reachable]
-    for ex in examples:
-        parts.append(f"Example: {ex.title}\n"
-                     + code(curl(base, "POST", action_path(m.id, ex.action),
-                                 {"params": ex.params})))
-    return join(parts)
 
 
 def rest_reference(base: str) -> str:

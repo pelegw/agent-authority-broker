@@ -51,7 +51,7 @@ from .config import get_settings
 from .errors import PolicyError
 from .services import agent
 from .skill.generator import base_url_from
-from .skill.sections import PLACEHOLDER
+from .skill.markdown import PLACEHOLDER
 
 log = logging.getLogger(__name__)
 

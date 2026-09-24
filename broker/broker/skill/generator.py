@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ..plugins.manifest import Manifest, load_manifest
-from . import sections
+from . import markdown, plugin_section, sections
 
 # Vendored manifests live next to the registry's copy of the same path
 # (plugins/registry.TARGETS_DIR); repeated here so the CLI can render without
@@ -55,7 +55,7 @@ def render(base_url: str, manifests: Mapping[str, Manifest] | Iterable[Manifest]
     actions. With it: only actions in `key_ctx.reachable`, targets with none
     reduced to a name, plus the key's current capabilities."""
     ms = _sorted(manifests)
-    base = base_url.rstrip("/") or sections.PLACEHOLDER
+    base = base_url.rstrip("/") or markdown.PLACEHOLDER
     filtered = key_ctx is not None
     reach = {pid: set(acts) for pid, acts in (key_ctx.reachable if filtered else {}).items()}
     shown = [m for m in ms if not filtered or reach.get(m.id)]
@@ -69,15 +69,16 @@ def render(base_url: str, manifests: Mapping[str, Manifest] | Iterable[Manifest]
     if filtered:
         parts.append(sections.your_capabilities(key_ctx.access))
     parts.append(sections.targets_intro(base, filtered, unreachable))
-    parts += [sections.plugin(m, base, reach.get(m.id) if filtered else None) for m in shown]
+    parts += [plugin_section.plugin(m, base, reach.get(m.id) if filtered else None)
+              for m in shown]
     parts += [sections.rest_reference(base), sections.errors()]
     if include_mcp:
         parts.append(sections.mcp(base))
-    return sections.join(parts) + "\n"
+    return markdown.join(parts) + "\n"
 
 
 def frontmatter(manifests: Mapping[str, Manifest] | Iterable[Manifest]) -> str:
-    listed = sections.listing([m.display_name for m in _sorted(manifests)]) or \
+    listed = markdown.listing([m.display_name for m in _sorted(manifests)]) or \
         "the owner's systems"
     description = (f"Read and act in the user's {listed} through the Agent Authority "
                    "Broker, which checks every call against what your aab_ agent key may "
@@ -87,7 +88,7 @@ def frontmatter(manifests: Mapping[str, Manifest] | Iterable[Manifest]) -> str:
 
 
 def skill_file(manifests: Mapping[str, Manifest] | Iterable[Manifest],
-               base_url: str = sections.PLACEHOLDER) -> str:
+               base_url: str = markdown.PLACEHOLDER) -> str:
     """The committed SKILL.md: frontmatter + the full doc."""
     return frontmatter(manifests) + render(base_url, manifests)
 
@@ -112,5 +113,5 @@ def base_url_from(headers: Mapping[str, str], scheme: str) -> str:
     if proto not in ("http", "https"):
         proto = "http"
     if not host or not _HOST_RE.match(host):
-        return sections.PLACEHOLDER
+        return markdown.PLACEHOLDER
     return f"{proto}://{host}"
