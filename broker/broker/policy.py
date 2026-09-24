@@ -87,13 +87,40 @@ def selector_dims(manifest: Manifest, action: str) -> dict[str, str]:
             if n.form in SET_FORMS and not n.derived_from and applies(n, action)}
 
 
+# Values of a plugin's reported `enforcement` meaning "the live credential is
+# narrowed at the target": each dimension then gets what the manifest
+# declares for it. "mixed" is plugin-google's word for exactly that (scopes
+# at Google, everything else proxy). Anything else, or nothing, is proxy.
+TARGET_CAPABLE = frozenset({"target", "mixed"})
+
+
+def connection_is_proxy_only(manifest: Manifest, live_health: dict | None) -> bool:
+    """Can the plugin's live connection enforce anything at the target?
+
+    Target enforcement is claimed only when both the manifest allows it AND
+    the plugin's last health record says so (`enforcement` "target" or
+    "mixed"). A record with no (or an unknown) `enforcement` fails closed to
+    proxy, because the manifest alone cannot know whether the live
+    credential is narrowable (a GitHub PAT fallback is not). The one
+    exception is a plugin that has never reported anything (an empty record:
+    a fresh row, the in-process test plugins), which keeps the manifest's
+    claim. A failed refresh keeps the last reported value
+    (plugins/settings.set_health_failure), so an outage never flips proxy to
+    target."""
+    if manifest.connection.enforcement != "target":
+        return True
+    live = live_health if isinstance(live_health, dict) else {}
+    if not live:
+        return False                     # never reported: the manifest's claim stands
+    return live.get("enforcement") not in TARGET_CAPABLE
+
+
 def enforced_where(manifest: Manifest, action: str, live_health: dict) -> dict[str, str]:
     """Per bounding dimension: `target` when the target system itself enforces
     it (inside the credential), `proxy` when only our code does. A plugin
-    whose connection reports proxy mode right now (e.g. a PAT fallback)
-    downgrades every dimension to proxy."""
-    proxy_only = manifest.connection.enforcement == "proxy" or \
-        (live_health or {}).get("enforcement") == "proxy"
+    whose connection reports proxy mode right now (e.g. a PAT fallback), or
+    whose health record does not say, downgrades every dimension to proxy."""
+    proxy_only = connection_is_proxy_only(manifest, live_health)
     out = {}
     for item in [*manifest.narrowings, *manifest.constraints]:
         name = getattr(item, "dimension", None) or item.name

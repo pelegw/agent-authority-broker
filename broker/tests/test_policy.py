@@ -2,6 +2,7 @@
 
 import time
 
+import pytest
 import yaml
 
 from broker import hidden
@@ -186,6 +187,23 @@ def test_enforced_where_from_manifest_and_live_mode():
     assert enforced_where(_variant(room="target"), "post_item", {})["room"] == "proxy"
     # Only dimensions that bound the action are reported.
     assert "folder" not in enforced_where(m, "watch", {})
+
+
+@pytest.mark.parametrize("health,expected", [
+    ({}, "target"),                                        # never reported: manifest stands
+    ({"enforcement": "target", "healthy": True}, "target"),
+    ({"enforcement": "mixed"}, "target"),                  # plugin-google: per the manifest
+    ({"enforcement": "proxy"}, "proxy"),
+    # A record that does not say fails closed: a refresh error, a plugin
+    # that omits the field, an unknown value.
+    ({"healthy": False, "error": "plugin service unreachable", "status": 503}, "proxy"),
+    ({"connected": True, "healthy": True}, "proxy"),
+    ({"enforcement": "banana"}, "proxy"),
+    ({"healthy": False, "error": "down", "status": 503, "enforcement": "target"}, "target"),
+])
+def test_enforced_where_claims_target_only_when_the_plugin_says_so(health, expected):
+    m = _variant(connection="target", room="target")
+    assert enforced_where(m, "post_item", health)["room"] == expected
 
 
 def test_without_authority_hidden_and_nonexistent_look_the_same(echo_local, make_agent):
