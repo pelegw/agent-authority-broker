@@ -136,7 +136,8 @@ keys.
 
 ```
 P(owner)  = one all-"*", direct capability per plugin enabled ∧ connected
-R(role)   = read-only   : reads direct
+R(role)   = the key's ceiling, all-"*" capabilities shaped by side effect:
+            read-only   : reads direct
             read-draft  : reads direct; writes + destructive draft
             read-act    : reads + writes direct; destructive draft
             full        : everything direct
@@ -153,6 +154,29 @@ effective = { meet(meet(c, p), r1, ..., rn) : c ∈ G, p ∈ P,
 
 R is applied for **every** key in the chain, not only the caller's, so
 lowering an ancestor's role bounds its descendants at once.
+
+**The role is a ceiling.** It never grants anything: a key with no grants
+has an empty G, and a meet with R cannot add to it. It only caps every
+capability below it, per side effect: under `read-draft` a direct
+capability's writes run as drafts, under `read-only` they are denied, and
+under `full` (everything direct) nothing changes, so the capabilities
+decide. That is why an owner-created key defaults to `full`
+(`auth.OWNER_KEY_DEFAULT_ROLE`) and a lower ceiling is something the owner
+chooses; a delegated key defaults to its caller's role and never exceeds it.
+Each role's mode per side effect only rises with its rank, so meeting the
+roles of a whole key chain is exactly meeting the lowest one, which
+`get_my_access` reports as the key's `ceiling` (`role_ceiling.key_ceiling`).
+
+`broker/broker/role_ceiling.py` spells out what the ceiling does to each
+action, for the agent (`get_my_access`: `effective_mode` wherever the
+ceiling lowers an action, as `draft` or `denied`), for the owner (the
+pending-grant list's `ceiling_note` and the Telegram card: approving a
+request the ceiling caps does not do what the agent asked) and for the
+console's capability editor (the same rule client-side, from a table a test
+holds equal to `roles.role_caps`). It is built from the pieces the engine
+uses (`roles.role_caps`, the meet's lower mode, `policy.run_mode`), and it
+only describes: `policy.evaluate` decides, and a test holds the description
+to real engine decisions for every ceiling, mode and side effect.
 
 Nothing trusts a stored child grant: a root edited narrower shrinks every
 descendant on the next call, a hand-edited child row cannot exceed its

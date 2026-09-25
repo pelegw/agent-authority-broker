@@ -5,6 +5,42 @@ lives only in `VERSION`.
 
 ## [Unreleased]
 
+### Changed
+- The role is presented as what it always was in `effective = P ∩ G ∩ R`: a
+  **ceiling**. It never grants anything (the capabilities are the only
+  grant); it caps every capability below it. The algebra is unchanged.
+- **Owner-created keys now default to the `full` ceiling** (console, `POST
+  /v1/admin/keys` without `role`, and `aab keys create` without `--role`,
+  which now sends none so the broker's default applies;
+  `auth.OWNER_KEY_DEFAULT_ROLE`). The old default, `read-only`, made direct
+  writes the owner ticked silently come out as drafts or denials. Lower
+  ceilings stay selectable. **Existing keys keep their stored role**: nothing
+  is migrated, so a key created under the old default is still `read-only`
+  until the owner raises it. Delegated keys still default to their caller's
+  role and can never exceed it. Note for API and CLI callers: an
+  owner-authored capability without `mode` is `direct` (unchanged), so a key
+  created with such capabilities and no `role` now writes directly where it
+  used to be refused; pass `"mode": "draft"` (or a lower role) to keep its
+  writes queued. The console editor starts new capabilities at `draft`.
+- Console: the key dialogs label the field "Ceiling (role)" with the help
+  line "Never grants; caps every capability below it. full = capabilities
+  decide.", default it to `full`, and show next to every ticked action what
+  a call will really run at under the chosen ceiling ("draft (capped by
+  ceiling read-draft)"). The keys list and the delegation tree show the
+  ceiling only when it is lower than `full`.
+- Permission requests say when the key's ceiling would cap them, because
+  approving then does not do what the agent asked: `GET /v1/admin/grants`
+  carries `ceiling` and `ceiling_note`, shown on the console's request card
+  next to Approve, and the Telegram card carries the same note.
+- `get_my_access` (`GET /v1/me`) adds `ceiling` (the lowest role along the
+  key chain) and lists capabilities as the grants give them, each with
+  `effective_mode` (`{action: "draft" | "denied"}`) wherever the ceiling
+  lowers an action, so an agent can tell "my capability says direct but my
+  ceiling says draft" without probing. The action lists (`/v1/targets`,
+  the MCP tools, the key's OpenAPI and skill copy) still come from the
+  capped set. The agent guide describes the role as a ceiling in the same
+  terms.
+
 ### Deploy
 - `deploy/push.sh` ships the committed tree with `git archive` over SSH when `rsync` is absent (Git Bash on Windows); the key must be OpenSSH format (`puttygen key.ppk -O private-openssh`). `deploy/DEPLOY.md` gains the Windows notes and a section on reusing the host that runs WA_GW.
 

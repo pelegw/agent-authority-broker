@@ -38,23 +38,26 @@ Answers: `200` with the target's data (raw bytes for downloads), `202` with `{"s
 
 ## Authority model
 
-What you may do is the owner's ceiling, intersected with your grants, intersected with your role, evaluated live on every call. It can change between two calls (a grant approved, revoked or expired; a target disabled), so trust the latest answer over an earlier one.
+What you may do is what your grants (your capabilities) give, on the targets the owner has enabled and connected, capped by your key's ceiling (its role), evaluated live on every call. It can change between two calls (a grant approved, revoked or expired; a target disabled; the ceiling changed), so trust the latest answer over an earlier one.
 
 ### Know your access first: `GET /v1/me`
 `GET {{BASE_URL}}/v1/me` (MCP `get_my_access`). Call it when a session starts and again after a refusal, instead of probing by trial and error. Fields:
-- `name`, `role`, `rate_per_min`.
+- `name`, `role` (your key's own), `ceiling` (the role that caps you: the lowest along your key chain), `rate_per_min`.
 - `key_expires_at`, `credential_expires_at` (unix seconds or null). Your secret stops working at `credential_expires_at` (it includes a rotation grace window); ask the user for a new key before then.
 - `depth`, `delegated`, `parent` (the key that delegated you, or null), `delegations` (live keys you delegated), `can_delegate`.
-- `targets.<id>.capabilities[]`: what you may do on each target: `actions`, `selector` (which resources, e.g. a list of chat ids; absent means any), `constraints`, `mode` (`direct` acts now, `draft` queues for approval), `expires_at`, `budget` with `remaining` calls per grant, and `grant_chain` (grant ids, root first).
+- `targets.<id>.capabilities[]`: what you may do on each target: `actions`, `selector` (which resources, e.g. a list of chat ids; absent means any), `constraints`, `mode` (what the capability gives: `direct` acts now, `draft` queues for approval), `effective_mode` (only where your ceiling lowers it: `{action: "draft" | "denied"}`, what a call really does), `expires_at`, `budget` with `remaining` calls per grant, and `grant_chain` (grant ids, root first).
 - `targets.<id>.enforced_where`: for each limit, `target` (the target system itself refuses anything outside it, because the broker hands it a credential cut down to your grant) or `proxy` (the broker filters for you).
 
-It lists what you CAN do. It never lists what is hidden from you.
+It lists what your capabilities give you, with `effective_mode` wherever your ceiling lowers it. It never lists what is hidden from you.
 
-### Roles
-- `read-only`: reads only.
-- `read-draft`: reads; every write or destructive action is drafted for approval.
-- `read-act`: reads and writes act directly; destructive actions are drafted.
-- `full`: everything acts directly (still only within your grants).
+### Your ceiling (role)
+Your key's role is a ceiling. It never grants anything; only capabilities grant. It caps every capability below it:
+- `full`: caps nothing; your capabilities decide.
+- `read-act`: reads and writes as your capabilities say; destructive actions always queue for approval.
+- `read-draft`: reads as your capabilities say; every write or destructive action queues for approval, even where a capability says `direct`.
+- `read-only`: reads only; writes and destructive actions are refused, whatever your capabilities say.
+
+`GET /v1/me` reports it as `ceiling` (the lowest role along your key chain: a key that delegated you caps you too) and marks each action it lowers with `effective_mode`. When a capability says `direct` but `effective_mode` says `draft` or `denied`, `request_permission` will not help: only the owner can raise the ceiling, so tell the user.
 
 ### Normal answers that are not errors
 - `202 {"status": "pending_approval", "action_id"}`: a human will review it. That is success awaiting a human: do not retry it or route around it. Follow it with `GET {{BASE_URL}}/v1/actions/{action_id}`.
@@ -88,7 +91,7 @@ curl -s -X POST {{BASE_URL}}/v1/delegations \
 `201 {"key_id", "name", "key", "expires_at", "capabilities"}` mints a child key for a sub-agent, carved out of your own authority:
 
 - Its capabilities must fit inside yours (same format as `request_permission`, and the same default: omit `mode` and its writes are draft); anything more is `400 clipped` and nothing is created.
-- Its `role`, `rate_per_min` and lifetime are at most yours (`400 exceeds_parent`); they default to yours. Your denies always carry over; `denies` (`{"<target>": {"<kind>": ["<id>"]}}`) adds more.
+- Its `role` (its ceiling), `rate_per_min` and lifetime are at most yours (`400 exceeds_parent`); they default to yours, and your ceiling caps it whatever its own role says. Your denies always carry over; `denies` (`{"<target>": {"<kind>": ["<id>"]}}`) adds more.
 - It is named `<your name>/<name>`. Chains are depth-limited: `can_delegate: false` in `GET /v1/me` means `400 depth_exceeded`. Each attempt spends one call of your rate, and a key holds a limited number of live delegations (`409 too_many_delegations`: revoke one first).
 - `key` is shown once. Hand it to the sub-agent; never log it or store it anywhere else.
 - No human approves a delegation, but the owner sees every delegated key and can revoke it. When your own authority shrinks or ends, every key below you shrinks or stops at the same moment.
@@ -404,7 +407,7 @@ All paths are relative to `{{BASE_URL}}`.
 
 | Method | Path | What |
 |---|---|---|
-| GET | `/v1/me` | Your access: capabilities per target, enforcement, budgets, expiry. |
+| GET | `/v1/me` | Your access: capabilities per target, your ceiling, enforcement, budgets, expiry. |
 | GET | `/v1/me/skill` | This guide, filtered to what your key can do now. |
 | GET | `/v1/me/openapi.json` | OpenAPI with exactly the routes your key can reach. |
 | GET | `/v1/targets` | Enabled targets and the actions you can reach on each. |

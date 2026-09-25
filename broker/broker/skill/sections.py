@@ -42,7 +42,8 @@ GENERIC_TOOLS = (
 
 # The agent REST surface. tests/test_skill.py asserts every path exists.
 REST_ROUTES = (
-    ("GET", "/v1/me", "Your access: capabilities per target, enforcement, budgets, expiry."),
+    ("GET", "/v1/me", "Your access: capabilities per target, your ceiling, enforcement, "
+     "budgets, expiry."),
     ("GET", "/v1/me/skill", "This guide, filtered to what your key can do now."),
     ("GET", "/v1/me/openapi.json", "OpenAPI with exactly the routes your key can reach."),
     ("GET", "/v1/targets", "Enabled targets and the actions you can reach on each."),
@@ -172,16 +173,27 @@ def _example_params(act: Action) -> dict:
 def authority_model(base: str, manifests: list[Manifest], reach: Reach = None) -> str:
     return join([
         "## Authority model",
-        "What you may do is the owner's ceiling, intersected with your grants, intersected "
-        "with your role, evaluated live on every call. It can change between two calls (a "
-        "grant approved, revoked or expired; a target disabled), so trust the latest "
-        "answer over an earlier one.",
+        "What you may do is what your grants (your capabilities) give, on the targets the "
+        "owner has enabled and connected, capped by your key's ceiling (its role), evaluated "
+        "live on every call. It can change between two calls (a grant approved, revoked or "
+        "expired; a target disabled; the ceiling changed), so trust the latest answer over "
+        "an earlier one.",
         _access_fields(base),
-        "### Roles\n"
-        "- `read-only`: reads only.\n"
-        "- `read-draft`: reads; every write or destructive action is drafted for approval.\n"
-        "- `read-act`: reads and writes act directly; destructive actions are drafted.\n"
-        "- `full`: everything acts directly (still only within your grants).",
+        "### Your ceiling (role)\n"
+        "Your key's role is a ceiling. It never grants anything; only capabilities grant. "
+        "It caps every capability below it:\n"
+        "- `full`: caps nothing; your capabilities decide.\n"
+        "- `read-act`: reads and writes as your capabilities say; destructive actions "
+        "always queue for approval.\n"
+        "- `read-draft`: reads as your capabilities say; every write or destructive action "
+        "queues for approval, even where a capability says `direct`.\n"
+        "- `read-only`: reads only; writes and destructive actions are refused, whatever "
+        "your capabilities say.\n\n"
+        "`GET /v1/me` reports it as `ceiling` (the lowest role along your key chain: a key "
+        "that delegated you caps you too) and marks each action it lowers with "
+        "`effective_mode`. When a capability says `direct` but `effective_mode` says "
+        "`draft` or `denied`, `request_permission` will not help: only the owner can raise "
+        "the ceiling, so tell the user.",
         "### Normal answers that are not errors\n"
         '- `202 {"status": "pending_approval", "action_id"}`: a human will review it. That '
         "is success awaiting a human: do not retry it or route around it. Follow it with "
@@ -202,7 +214,8 @@ def _access_fields(base: str) -> str:
         "### Know your access first: `GET /v1/me`\n"
         f"`GET {base}/v1/me` (MCP `get_my_access`). Call it when a session starts and again "
         "after a refusal, instead of probing by trial and error. Fields:\n"
-        "- `name`, `role`, `rate_per_min`.\n"
+        "- `name`, `role` (your key's own), `ceiling` (the role that caps you: the lowest "
+        "along your key chain), `rate_per_min`.\n"
         "- `key_expires_at`, `credential_expires_at` (unix seconds or null). Your secret "
         "stops working at `credential_expires_at` (it includes a rotation grace window); "
         "ask the user for a new key before then.\n"
@@ -210,13 +223,16 @@ def _access_fields(base: str) -> str:
         "`delegations` (live keys you delegated), `can_delegate`.\n"
         "- `targets.<id>.capabilities[]`: what you may do on each target: `actions`, "
         "`selector` (which resources, e.g. a list of chat ids; absent means any), "
-        "`constraints`, `mode` (`direct` acts now, `draft` queues for approval), "
-        "`expires_at`, `budget` with `remaining` calls per grant, and `grant_chain` (grant "
-        "ids, root first).\n"
+        "`constraints`, `mode` (what the capability gives: `direct` acts now, `draft` "
+        "queues for approval), `effective_mode` (only where your ceiling lowers it: "
+        "`{action: \"draft\" | \"denied\"}`, what a call really does), `expires_at`, "
+        "`budget` with `remaining` calls per grant, and `grant_chain` (grant ids, root "
+        "first).\n"
         "- `targets.<id>.enforced_where`: for each limit, `target` (the target system "
         "itself refuses anything outside it, because the broker hands it a credential cut "
         "down to your grant) or `proxy` (the broker filters for you).\n\n"
-        "It lists what you CAN do. It never lists what is hidden from you.")
+        "It lists what your capabilities give you, with `effective_mode` wherever your "
+        "ceiling lowers it. It never lists what is hidden from you.")
 
 
 def _capability_example(manifests: list[Manifest], reach: Reach) -> dict:
@@ -280,8 +296,9 @@ def _delegate(base: str, manifests: list[Manifest], reach: Reach) -> str:
         "- Its capabilities must fit inside yours (same format as `request_permission`, "
         "and the same default: omit `mode` and its writes are draft); anything more is "
         "`400 clipped` and nothing is created.\n"
-        "- Its `role`, `rate_per_min` and lifetime are at most yours (`400 exceeds_parent`); "
-        "they default to yours. Your denies always carry over; `denies` "
+        "- Its `role` (its ceiling), `rate_per_min` and lifetime are at most yours "
+        "(`400 exceeds_parent`); they default to yours, and your ceiling caps it whatever "
+        "its own role says. Your denies always carry over; `denies` "
         '(`{"<target>": {"<kind>": ["<id>"]}}`) adds more.\n'
         "- It is named `<your name>/<name>`. Chains are depth-limited: `can_delegate: false` "
         "in `GET /v1/me` means `400 depth_exceeded`. Each attempt spends one call of your "
@@ -321,12 +338,15 @@ def your_capabilities(access: Mapping[str, Any]) -> str:
     """The key's current access, from get_my_access (which never includes a
     hidden resource or a deny list)."""
     parent = access.get("parent")
+    role = access.get("role")
+    ceiling = access.get("ceiling", role)
+    above = f" (your own role is `{role}`; a key above you caps it)" if ceiling != role else ""
     lines = [
         "## Your current capabilities",
         "",
         "As of when this copy was fetched; `GET /v1/me` is always current.",
         "",
-        f"- Key `{access.get('name')}`: role `{access.get('role')}`, "
+        f"- Key `{access.get('name')}`: ceiling `{ceiling}`{above}, "
         f"{access.get('rate_per_min')} calls/min, expires {when(access.get('key_expires_at'))}"
         f" (this secret: {when(access.get('credential_expires_at'))}).",
         f"- Delegation depth {access.get('depth')}"
@@ -352,6 +372,10 @@ def _cap_line(cap: Mapping[str, Any]) -> str:
     for name, value in (cap.get("constraints") or {}).items():
         parts.append(f"{name} = `{json.dumps(value)}`")
     parts.append(cap.get("mode", "direct"))
+    capped = cap.get("effective_mode") or {}
+    if capped:
+        parts.append("capped by your ceiling: " + ", ".join(
+            f"`{a}` {m}" for a, m in capped.items()))
     if cap.get("expires_at") is not None:
         parts.append(f"until {when(cap['expires_at'])}")
     budget = cap.get("budget") or {}

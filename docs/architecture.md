@@ -64,7 +64,7 @@ effective(key, t) = P(owner, t)  ∩  G(grant chain, t)  ∩  R(role)   − deni
 |---|---|
 | **P(owner, t)**, the ceiling | Everything the owner can reach *right now*: for every plugin that is **enabled and connected**, all actions, every selector `"*"`, mode `direct`, no expiry or budget. It is virtual (computed, never stored), so disabling or disconnecting a plugin removes it from every agent in the same instant. |
 | **G(grant chain, t)** | The union over the key's active, unexpired grants of the *chain meet*: the grant met with its parent, grandparent, up to the root. If any link in a chain is not active and unexpired, that chain contributes nothing. The stored child row is never trusted on its own; the chain is re-walked on every call. |
-| **R(role)** | A coarse cap per key: `read-only`, `read-draft` (writes and destructive actions only as drafts), `read-act` (destructive actions only as drafts), `full`. |
+| **R(role)** | The key's ceiling. It never grants; it caps every capability below it: `read-only` (writes and destructive actions denied), `read-draft` (writes and destructive actions only as drafts), `read-act` (destructive actions only as drafts), `full` (caps nothing: the capabilities decide; the default for owner-created keys). |
 | **denies** | Outside the lattice, subtracted last: owner-level `hidden_resources` and the key's own `api_keys.denies` (for a delegated key: its parent's denies plus its own). A hidden or denied resource answers **404**, exactly like a missing one. |
 
 In the brief the first term is `P(principal)`. v0.2.0 has a single principal
@@ -775,7 +775,7 @@ follows the same rule.
 | **Narrowing form** | The shared vocabulary for how a dimension narrows: `list`, `subtree`, `pattern`, `range`, `flag`, `level`. Each defines `cap_le` (is child ≤ parent) and `meet`. |
 | **`narrow()`** | The only way to produce a child grant: the meet of each requested capability with each parent capability on the same target, wrapped in `NarrowedCapabilities`. |
 | **Ceiling (P)** | The owner's live authority: every action of every enabled and connected plugin, unrestricted. Virtual, never stored. |
-| **Role (R)** | Coarse per-key cap: `read-only`, `read-draft`, `read-act`, `full`. |
+| **Role (R)** | The key's ceiling (console: "Ceiling (role)"): never grants, caps every capability below it. `read-only`, `read-draft`, `read-act`, `full` (the owner default: the capabilities decide). |
 | **Effective** | `P ∩ G ∩ R` minus denies, computed on every call by re-walking every grant chain. |
 | **Delegation** | An agent minting a child key whose grants are `narrow()` of its own, with role, rate and expiry no wider and denies no smaller; depth ≤ 3; no human needed. Revoking a key kills its whole subtree. |
 | **Scope expansion** | `request_permission`: an agent asks for more; clipped to what its parent (or the ceiling) could give; a human approves. |

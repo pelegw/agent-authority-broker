@@ -18,8 +18,9 @@ Examples:
   aab password                                # prompts for current and new
   aab skill build --all-plugins --base-url "{{BASE_URL}}" --out SKILL.md   # offline
 
-  aab keys create --name bot --role read-draft --capabilities '<JSON list>'
-      (capabilities e.g. [{"target": "whatsapp", "actions": ["list_chats"]}])
+  aab keys create --name bot --capabilities '<JSON list>' [--role read-draft]
+      (capabilities e.g. [{"target": "whatsapp", "actions": ["list_chats"]}];
+       --role is a ceiling that only caps them, default full)
   aab keys list | rotate <id> | disable <id>
   aab grants list [--status pending] | approve|reject|revoke <grant-id>
   aab actions list [--status pending] | approve|reject|cancel <action-id>
@@ -133,7 +134,10 @@ def _engine_commands(sub) -> None:
     ky = sub.add_parser("keys", help="manage agent keys").add_subparsers(dest="sub", required=True)
     kc = ky.add_parser("create")
     kc.add_argument("--name", required=True)
-    kc.add_argument("--role", default="read-only")
+    kc.add_argument("--role", default=None,
+                    help="the key's ceiling: read-only | read-draft | read-act | full. It "
+                         "never grants, only caps the capabilities; omitted, the broker's "
+                         "default (full) applies and the capabilities decide")
     kc.add_argument("--rate", type=int, default=6)
     kc.add_argument("--expires-at", type=int, default=None)
     kc.add_argument("--capabilities", type=_json_arg, default=[],
@@ -209,10 +213,14 @@ def _engine_request(c: httpx.Client, args) -> httpx.Response | None:
     cmd, sub = args.cmd, getattr(args, "sub", None)
     if cmd == "keys":
         if sub == "create":
-            return c.post("/v1/admin/keys", json={
-                "name": args.name, "role": args.role, "rate_per_min": args.rate,
-                "expires_at": args.expires_at, "capabilities": args.capabilities,
-                "denies": args.denies})
+            body = {"name": args.name, "rate_per_min": args.rate,
+                    "expires_at": args.expires_at, "capabilities": args.capabilities,
+                    "denies": args.denies}
+            # No --role: send none, so the broker's owner default is the one
+            # source of truth rather than a second copy here.
+            if args.role is not None:
+                body["role"] = args.role
+            return c.post("/v1/admin/keys", json=body)
         if sub == "list":
             return c.get("/v1/admin/keys")
         if sub == "rotate":

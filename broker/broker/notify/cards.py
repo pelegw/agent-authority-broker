@@ -5,7 +5,9 @@ Pure rendering, no network. A card for a queued action is built from what
 `display_name`, the key) plus every parameter the summary does not show, so
 the human sees everything the Approve button covers. A permission request's
 card lists each capability with its real breadth ("any" for an unrestricted
-dimension) and duration.
+dimension) and duration, and says so when the key's ceiling (its role) would
+cap what the request asks for: approving then does not do what the agent
+asked (writes still queue, or stay denied).
 
 The oversized rule (ported from WA_GW): a card whose text exceeds Telegram's
 limit is never truncated beside an Approve button. It is replaced by a
@@ -26,9 +28,10 @@ import string
 import time
 from dataclasses import dataclass
 
+from .. import role_ceiling
 from ..actions.queue import render_summary
 from ..auth import key_chain
-from ..authority.capability import to_json
+from ..authority.capability import from_json, to_json
 from ..plugins.registry import get_registry
 
 # Telegram's hard limit is 4096 characters after entity parsing; this bound
@@ -228,7 +231,26 @@ def grant_text(grant: dict) -> str:
     lines.append(f"Duration: {_duration(grant)}")
     if grant.get("reason"):
         lines.append(f"Reason: {esc(grant['reason'])}")
+    ceiling = _ceiling_note(grant, caps)
+    if ceiling:
+        lines += ["", f"⚠️ {esc(ceiling)}"]
     return "\n".join(lines)
+
+
+def _ceiling_note(grant: dict, caps: list) -> str | None:
+    """role_ceiling.note for the requesting key's chain, or None. A broken
+    key chain (that key cannot authenticate) or a capability that does not
+    parse claims nothing either way."""
+    try:
+        chain = key_chain(int(grant.get("key_id")))
+        parsed = [from_json(c) for c in caps]
+    except (TypeError, ValueError):
+        return None
+    ceiling = role_ceiling.key_ceiling(row["role"] for row in chain)
+    if ceiling is None:
+        return None
+    return role_ceiling.note(
+        ceiling, role_ceiling.grant_lowered(get_registry().manifests(), parsed, ceiling))
 
 
 def grant_card(grant: dict) -> Card:

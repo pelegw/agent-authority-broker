@@ -18,7 +18,7 @@ import logging
 import time
 from collections.abc import Mapping
 
-from .. import db, notify
+from .. import db, notify, role_ceiling
 from ..actions import queue
 from ..audit import audit
 from ..auth import max_delegation_depth
@@ -124,11 +124,32 @@ def _visible_cap(cap: Capability, deny: dict[str, set[str]], dims: dict[str, str
     return out
 
 
+def _uncapped_by_target(auth) -> dict[str, list[tuple[Capability, tuple[str, ...]]]]:
+    """The key's capabilities before its role ceiling (display only; see
+    role_ceiling.uncapped_with_chains), grouped by target."""
+    reg = get_registry()
+    out: dict[str, list] = {}
+    for cap, chain in role_ceiling.uncapped_with_chains(auth, int(time.time()),
+                                                        reg.plugin_states(), reg.lattice()):
+        out.setdefault(cap.target, []).append((cap, chain))
+    return out
+
+
 def get_my_access(auth) -> dict:
     """Self-introspection: what this key can do, where it is enforced, and
-    how much budget is left. Not audited (agents poll it)."""
+    how much budget is left. Not audited (agents poll it).
+
+    Capabilities are listed as the key's grants give them (`mode` is the
+    capability's), with `ceiling` beside them: the lowest role along the key
+    chain. Where that ceiling lowers an action's mode, the capability carries
+    `effective_mode` {action: "draft" | "denied"}, what a call will really
+    run at, so an agent can tell "my capability says direct but my ceiling
+    says draft" (asking for more will not help; only the owner can raise the
+    ceiling) without probing. The tool list (`reachable_actions`) stays on
+    the capped set: it never offers an action the ceiling denies."""
     reg = get_registry()
-    caps = _caps_by_target(auth)
+    caps = _uncapped_by_target(auth)
+    ceiling_role = role_ceiling.auth_ceiling(auth)
     targets = {}
     for pid, m in sorted(reg.enabled_manifests().items()):
         deny = deny_sets(auth, pid)
@@ -139,8 +160,12 @@ def get_my_access(auth) -> dict:
             shown = _visible_cap(cap, deny, dims, reg.ancestors)
             if shown is None:
                 continue
+            capped = role_ceiling.lowered(m, cap, ceiling_role)
+            if capped:
+                shown["effective_mode"] = capped
             for action in cap.actions:
-                where.update(enforced_where(m, action, health))
+                if capped.get(action) != role_ceiling.DENIED:
+                    where.update(enforced_where(m, action, health))
             budget = remaining(chain, pid, sorted(cap.actions)[0])
             if budget:
                 shown["remaining"] = budget
@@ -149,7 +174,8 @@ def get_my_access(auth) -> dict:
         targets[pid] = {"capabilities": entries, "enforced_where": dict(sorted(where.items()))}
     parent, children = _lineage(auth)
     return {
-        "name": auth.name, "role": auth.role, "rate_per_min": auth.rate_per_min,
+        "name": auth.name, "role": auth.role, "ceiling": ceiling_role,
+        "rate_per_min": auth.rate_per_min,
         "key_expires_at": auth.expires_at, "credential_expires_at": auth.credential_expires_at,
         "depth": auth.depth, "delegated": auth.parent_key_id is not None,
         "parent": parent, "delegations": children,

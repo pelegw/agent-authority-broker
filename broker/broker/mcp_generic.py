@@ -115,8 +115,9 @@ def _schema(model: type[BaseModel]) -> dict:
 
 GENERIC: tuple[Generic, ...] = (
     Generic("get_my_access",
-            "What this key can do right now: capabilities per target, where each "
-            "limit is enforced, remaining budgets, role, expiries, delegation depth.",
+            "What this key can do right now: capabilities per target, its ceiling "
+            "(role) and the actions it lowers (effective_mode), where each limit is "
+            "enforced, remaining budgets, expiries, delegation depth.",
             _NoArgs, lambda auth, a: agent.get_my_access(auth)),
     Generic("list_targets",
             "Enabled targets and the actions this key can reach on each.",
