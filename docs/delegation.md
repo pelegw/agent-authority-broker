@@ -32,6 +32,17 @@ and answers `201 {"key_id", "name", "key", "expires_at", "role",
 and `capabilities` are required; `role`, `rate_per_min` and the lifetime
 default to the caller's own.
 
+**`role` is the child's ceiling.** It never grants anything (the child's
+capabilities are the only grant); it caps every capability below it, per
+side effect (`read-only`: writes and destructive actions denied;
+`read-draft`: they run as drafts even where a capability says direct;
+`read-act`: destructive actions run as drafts; `full`: caps nothing). A
+delegated key's ceiling defaults to its caller's role, never to the owner
+default (`full` for keys the owner creates), and can never exceed it. The
+caller's own ceiling, and every ancestor's, caps the child as well:
+`get_my_access` reports the lowest role along the chain as `ceiling`, with
+`effective_mode` on each action it lowers.
+
 **A capability without `mode` asks for draft.** Every agent-originated
 capability (`delegate` and `request_permission` alike, over REST or MCP)
 that omits `mode` is read as `"mode": "draft"`: its writes and destructive
@@ -99,9 +110,10 @@ set is recomputed (`authority/effective.py`):
 - its grants' chains are walked to the root and met link by link, so a root
   grant edited narrower, or any revoked or expired link, shrinks or empties
   the child on the next call;
-- the role of every key in its key chain bounds it, so lowering a parent's
-  role bounds the whole subtree at once, whatever the child's own row says;
-- the ceiling drops disabled or disconnected plugins;
+- the ceiling (role) of every key in its key chain caps it, so lowering a
+  parent's ceiling caps the whole subtree at once, whatever the child's own
+  row says;
+- the owner ceiling drops disabled or disconnected plugins;
 - the merged denies are subtracted.
 
 Two hypothesis properties check this through the agent surfaces
@@ -145,7 +157,7 @@ Every delegation and revocation is in the audit log under the acting key's
 name (`delegation.create`, `delegation.revoke`), with the child's name, role,
 rate, expiry and grant ids. The plaintext key is never logged. No human
 approves a delegation, so the owner's control is after the fact: disable or
-edit any key in the tree, revoke any grant, or lower any role.
+edit any key in the tree, revoke any grant, or lower any key's ceiling (role).
 
 ## Revocation propagation
 
@@ -158,7 +170,7 @@ chain walk, with no cascade writes:
 | The owner disables any key | The same: that key and its whole subtree get 401. |
 | The owner revokes, or a grant expires | Every grant chained below it evaluates to nothing (`chain_meet` needs every link live): 403 `out_of_grant`, while the keys still authenticate. |
 | The owner narrows a root grant | Every descendant shrinks to the new bound on its next call. |
-| The owner lowers a key's role | Every descendant is bounded by it on its next call. |
+| The owner lowers a key's ceiling (role) | Every descendant is capped by it on its next call; its `get_my_access` shows the lower `ceiling`. |
 | A plugin is disabled or disconnected | No key keeps any capability for it. |
 
 `revoke_delegation` reaches descendants only: a key may revoke its children,

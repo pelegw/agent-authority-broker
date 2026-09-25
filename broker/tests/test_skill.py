@@ -70,7 +70,7 @@ def test_key_copy_omits_unreachable_actions(client, echo_local, make_agent):
     # Not in the table, not as an example call, not in the capability examples.
     assert "post_item" not in text and "delete_item" not in text
     assert "## Your current capabilities" in text
-    assert "- Key `reader`: role `full`" in text
+    assert "- Key `reader`: ceiling `full`," in text
     assert "`list_items` · room: `r1` · direct" in text
     assert "filtered to key `reader`" in text
 

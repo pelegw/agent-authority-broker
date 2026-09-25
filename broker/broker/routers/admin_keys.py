@@ -10,6 +10,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..auth import OWNER_KEY_DEFAULT_ROLE
 from ..deps import AdminContext, require_admin
 from ..services import admin
 
@@ -19,7 +20,8 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 class KeyCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=64)
-    role: str = "read-only"
+    # The key's ceiling. It never grants; `full` lets the capabilities decide.
+    role: str = OWNER_KEY_DEFAULT_ROLE
     rate_per_min: int = Field(default=6, ge=1, le=10000)
     expires_at: int | None = None
     capabilities: list[dict] = Field(default_factory=list, max_length=100)

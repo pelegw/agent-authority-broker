@@ -17,7 +17,8 @@ effective = P(owner) ∩ G(grant chain) ∩ R(role)   minus hidden and denied re
 ```
 
 `P` is what the owner has connected, `G` is the key's grants walked up to
-the root, and `R` is the key's role. The broker then allows the call, turns
+the root, and `R` is the key's role, a ceiling that never grants anything
+and only caps the grants below it. The broker then allows the call, turns
 it into a draft that you approve (in the console or on Telegram), or refuses
 it. Every decision is written to a hash-chained, HMAC-signed record, with
 the full authority chain that allowed it, before anything happens.
@@ -120,11 +121,12 @@ curl http://127.0.0.1:8080/v1/health  # {"status":"ok","version":"0.2.0"}
    Settings > Linked devices > Link a device, and scan. The plugin's health
    goes from "waiting for QR pairing" to connected. The device shows up as
    `AAB` (`DEVICE_NAME` in `.env`, applied at pairing).
-3. **Create an agent key.** Agent keys > Create. Pick a role (for a first
-   try, `read-draft`: reads act, writes become drafts) and use the
-   capability editor to allow WhatsApp actions, optionally only on chosen
-   chats, with a mode, a budget and an expiry. The `aab_...` key is shown
-   once.
+3. **Create an agent key.** Agent keys > Create. Use the capability editor
+   to allow WhatsApp actions, optionally only on chosen chats, with a mode
+   (for a first try, `draft`: reads act, writes become drafts you approve),
+   a budget and an expiry. Leave the ceiling at `full` so the capabilities
+   decide; next to each ticked action the editor shows what it will really
+   do. The `aab_...` key is shown once.
 4. **Point an agent at it.** REST is the primary surface:
 
    ```bash
@@ -225,9 +227,11 @@ second and third plugins touched no engine file
 
 ## Authority model
 
-- **Roles** cap a key coarsely: `read-only`, `read-draft` (writes and
-  destructive actions only as drafts), `read-act` (destructive actions only
-  as drafts), `full`.
+- **The role is a ceiling.** It never grants anything; it caps every
+  capability below it: `read-only` (writes and destructive actions denied),
+  `read-draft` (writes and destructive actions only as drafts), `read-act`
+  (destructive actions only as drafts), `full` (caps nothing: the
+  capabilities decide; the default for keys the owner creates).
 - **Capabilities** are allow statements (target, actions, selector,
   constraints, mode `draft < direct`, expiry, budget). A grant is a list of
   them, and nothing else carries authority.
@@ -254,7 +258,8 @@ Delegation: [docs/delegation.md](docs/delegation.md). The simulation:
 - **REST (primary).** Every action is
   `POST /v1/targets/{target}/actions/{action}` with `{"params": {...}}`,
   plus optional call controls (`as_draft`, `run_at` or `delay_seconds`,
-  `note`). `GET /v1/me` is the key's access: capabilities per target,
+  `note`). `GET /v1/me` is the key's access: capabilities per target, its
+  `ceiling` (with `effective_mode` wherever the ceiling lowers an action),
   `enforced_where`, remaining budgets, expiry, never what is hidden.
   Answers: `200` with the result, `202` `pending_approval` or `scheduled`,
   `403 out_of_grant`, `404` (missing or hidden), `429`, `503` (not

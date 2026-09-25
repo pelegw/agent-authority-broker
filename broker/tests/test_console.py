@@ -6,17 +6,22 @@ per-request script nonce, no external resources, no HTML-string sinks or
 inline handlers (agent-written text must never become markup), every API
 path it calls exists, every vocabulary word it must render (config field
 types, narrowing forms, connection kinds, roles, setting types) is covered,
-and the Telegram bot token field is write-only. Plus the manifest projection
-the console's editors are generated from.
+the key dialogs present the role as a ceiling (label, help line, default
+`full`, and an effective-mode table equal to roles.role_caps), and the
+Telegram bot token field is write-only. Plus the manifest projection the
+console's editors are generated from.
 """
 
+import json
 import re
+import shutil
+import subprocess
 import typing
 from pathlib import Path
 
 import pytest
 
-from broker import deps, runtime_settings
+from broker import auth, deps, runtime_settings
 from broker.authority import roles
 from broker.plugins import manifest as manifest_mod
 from broker.plugins.manifest import ConfigField, Connection, load_manifest
@@ -118,7 +123,6 @@ def test_every_admin_path_serves_the_same_page(client):
 def test_page_needs_no_owner_credential_and_carries_no_data(client):
     """Fetching the page is allowed before setup and without a session, and
     it is byte-for-byte the same page afterwards: it holds no data at all."""
-    from broker import auth
     from broker.identity import principals
 
     def page():
@@ -212,6 +216,114 @@ def test_csrf_header_matches_deps(html):
 
 def test_roles_match_the_role_ladder(html):
     assert _js_list(html, "ROLES") == list(roles.ROLES)
+
+
+# ---- the role as a ceiling -------------------------------------------------------
+
+def _ceiling_table(html: str) -> dict[str, dict[str, str]]:
+    m = re.search(r"const CEILING_MODES = \{(.*?)\n\};", _script(html), re.S)
+    assert m, "the effective-mode table CEILING_MODES is missing"
+    return {role: dict(re.findall(r'(\w+): "([a-z]*)"', body))
+            for role, body in re.findall(r'"([a-z-]+)": \{([^}]*)\}', m.group(1))}
+
+
+def test_effective_mode_table_matches_the_role_caps(html):
+    """CEILING_MODES is what the capability editor's per-action badges are
+    computed from: per ceiling and side effect, the highest mode a call can
+    run at ("" = never). It must be exactly roles.role_caps, or the badge
+    would say "direct" where the broker drafts."""
+    echo = load_manifest(ECHO_DIR / "manifest.yaml")
+    one_of = {eff: next(a.name for a in echo.actions if a.side_effect == eff)
+              for eff in manifest_mod.SIDE_EFFECTS}
+    expected = {}
+    for role in roles.ROLES:
+        caps = roles.role_caps(echo, role)
+        expected[role] = {eff: next((c.mode for c in caps if name in c.actions), "")
+                          for eff, name in one_of.items()}
+    assert _ceiling_table(html) == expected
+
+
+def test_effective_mode_follows_the_brokers_rule(html):
+    """The JS mirror of role_ceiling.mode_under: the ceiling's bound from the
+    table (unknown role or side effect: nothing), the lower of the two modes,
+    then run_mode (an action that cannot run direct drafts; a mode it does
+    not support means it cannot run)."""
+    fn = re.search(r"function effectiveMode\(role, act, chosen\) \{(.*?)\n\}", _script(html),
+                   re.S)
+    assert fn, "effectiveMode is missing"
+    body = fn.group(1)
+    assert "hasOwn(CEILING_MODES, role)" in body and "hasOwn(row, act.side_effect)" in body
+    assert 'act.side_effect === "read" ? "direct" : chosen' in body
+    assert 'if (!modes.includes("direct")) mode = "draft";' in body
+    assert 'return modes.includes(mode) ? mode : "";' in body
+    script = _script(html)
+    # Every ticked action gets a badge, and the ceiling is named when it is the reason.
+    assert "(capped by ceiling ${role})" in script
+    assert "effectiveBadge(role, a, modeSel.value)" in script
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run the page's JS")
+def test_effective_mode_js_agrees_with_the_broker(html, tmp_path):
+    """Where node exists, run the page's own effectiveMode (with its table)
+    for every action of every vendored manifest, every ceiling (plus an
+    unknown one) and both modes, and require role_ceiling.mode_under's
+    answer each time. The structural test above holds when node does not."""
+    from broker import role_ceiling
+    script = _script(html)
+    parts = [re.search(pat, script, re.S).group(0) for pat in (
+        r"const hasOwn = [^\n]*\n", r"const ROLES = \[.*?\];",
+        r"const CEILING_MODES = \{.*?\n\};",
+        r"function effectiveMode\(role, act, chosen\) \{.*?\n\}")]
+    targets = Path(__file__).resolve().parents[1] / "broker" / "targets"
+    manifests = [load_manifest(ECHO_DIR / "manifest.yaml"),
+                 *(load_manifest(p) for p in sorted(targets.glob("*/manifest.yaml")))]
+    cases, expected = [], []
+    for m in manifests:
+        for a in m.actions:
+            for role in (*roles.ROLES, "no-such-role"):
+                for mode in ("direct", "draft"):
+                    cases.append({"role": role, "mode": mode, "act": {
+                        "name": a.name, "side_effect": a.side_effect,
+                        "modes": list(a.effective_modes)}})
+                    expected.append(role_ceiling.mode_under(m, a.name, mode, role) or "")
+    js = tmp_path / "effective.js"
+    js.write_text("\n".join(parts) + f"\nconst cases = {json.dumps(cases)};\n"
+                  "console.log(JSON.stringify(cases.map((c) => "
+                  "effectiveMode(c.role, c.act, c.mode))));\n", encoding="utf-8")
+    out = subprocess.run(["node", str(js)], capture_output=True, text=True, check=True,
+                         timeout=60).stdout
+    assert json.loads(out) == expected
+
+
+def test_ceiling_field_label_help_and_default(html):
+    script = _script(html)
+    # Both key dialogs call the field "Ceiling (role)"; the old "Role" label is gone.
+    assert script.count('h("label", null, "Ceiling (role)", role.sel)') == 2
+    assert 'h("label", null, "Role"' not in script
+    help_line = re.search(r'const CEILING_LINE = "([^"]+)";', script).group(1)
+    assert help_line == ("Never grants; caps every capability below it. "
+                         "full = capabilities decide.")
+    # A new key's ceiling defaults to full, the broker's owner default.
+    default = re.search(r'const DEFAULT_CEILING = "([^"]+)";', script).group(1)
+    assert default == auth.OWNER_KEY_DEFAULT_ROLE == "full"
+    assert "roleSelect(DEFAULT_CEILING, " in script
+    assert 'roleSelect("read-only")' not in script
+    # An unknown stored role shows as the lowest ceiling, never a raise.
+    assert "if (sel.value !== value) sel.value = ROLES[0];" in script
+
+
+def test_keys_list_shows_the_ceiling_only_below_full(html):
+    script = _script(html)
+    assert '<th>Ceiling</th>' in html and "<th>Role</th>" not in html
+    assert 'ceil !== "full" ? [badge(ceil, "warn")' in script
+    assert 'n.role !== "full" ? badge("ceiling " + n.role, "warn") : null' in script
+
+
+def test_grant_card_shows_the_brokers_ceiling_note(html):
+    script = _script(html)
+    note = ('if (g.ceiling_note) card.append('
+            'h("div", { class: "warnbox ceilingnote" }, g.ceiling_note));')
+    assert note in script
 
 
 def test_narrowing_forms_match_the_manifest_vocabulary(html):

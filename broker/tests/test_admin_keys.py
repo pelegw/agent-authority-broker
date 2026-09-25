@@ -72,6 +72,38 @@ def test_key_without_capabilities_has_no_grant(client, admin_headers, echo_local
     assert agent_post(client, body["key"]).status_code == 403
 
 
+def test_owner_key_defaults_to_the_full_ceiling(client, admin_headers, echo_local):
+    """No role named: the ceiling is full, so the capabilities the owner
+    ticked are exactly what the key gets (a direct write acts directly)."""
+    body = {"name": "defaulted", "capabilities": [
+        cap(["post_item"], selector={"room": ["r1"]}, mode="direct")]}
+    r = client.post("/v1/admin/keys", json=body, headers=admin_headers).json()
+    assert r["role"] == auth.OWNER_KEY_DEFAULT_ROLE == "full"
+    assert client.get(f"/v1/admin/keys/{r['id']}", headers=admin_headers).json()["role"] == "full"
+    assert agent_post(client, r["key"]).status_code == 200
+    # The ceiling alone grants nothing: without capabilities, full does nothing.
+    bare = client.post("/v1/admin/keys", json={"name": "bare"}, headers=admin_headers).json()
+    assert bare["role"] == "full" and bare["grant_id"] is None
+    assert agent_post(client, bare["key"]).status_code == 403
+
+
+def test_a_lower_ceiling_is_still_selectable_and_caps(client, admin_headers, echo_local):
+    r = create(client, admin_headers, role="read-draft", capabilities=[
+        cap(["post_item"], selector={"room": ["r1"]}, mode="direct")]).json()
+    assert r["role"] == "read-draft"
+    assert agent_post(client, r["key"]).status_code == 202       # capped to a draft
+
+
+def test_existing_keys_keep_their_stored_role(client, admin_headers, echo_local, owner):
+    """The default changed for new owner keys only; a stored role is data."""
+    old = auth.create_key(owner.id, "legacy", "read-only", 6, None)
+    listed = {k["name"]: k["role"] for k in
+              client.get("/v1/admin/keys", headers=admin_headers).json()}
+    assert listed["legacy"] == "read-only"
+    assert client.get(f"/v1/admin/keys/{old.key_id}",
+                      headers=admin_headers).json()["role"] == "read-only"
+
+
 def test_denies_are_normalized_through_the_plugin(client, admin_headers, echo_local):
     body = create(client, admin_headers, capabilities=[cap(["post_item"])],
                   denies={"echo": {"room": [" R2 "]}}).json()

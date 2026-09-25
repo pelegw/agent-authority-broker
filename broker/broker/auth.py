@@ -24,12 +24,20 @@ from dataclasses import dataclass, field
 
 from . import db
 from .authority.denies import Denies, merged_denies, parse_denies
-from .authority.roles import ROLE_RANK, ROLES, check_role
+from .authority.roles import ROLE_FULL, ROLE_RANK, ROLES, check_role
 from .runtime_settings import runtime_settings
 
 KEY_PREFIX = "aab_"
 ADMIN_TOKEN_PREFIX = "aab_admin_"   # owner tokens; never valid as agent keys
 CREATED_BY = ("owner", "delegation")
+# The ceiling (role) an OWNER-created key gets when the owner names none. A
+# role never grants anything (a key without capabilities can do nothing), so
+# the capabilities the owner picks are the only grant and the role only
+# restricts when the owner chooses a lower one. A lower default made ticked
+# direct writes silently come out as drafts or denials. Delegated keys do not
+# use this: they default to their parent's role (services/delegation.py) and
+# can never exceed it.
+OWNER_KEY_DEFAULT_ROLE = ROLE_FULL
 # Hard stop for chain walks, independent of max_delegation_depth, so a
 # corrupted parent_key_id loop can never spin.
 _WALK_LIMIT = 64

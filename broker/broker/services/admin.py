@@ -13,7 +13,7 @@ import json
 import logging
 import time
 
-from .. import auth, db, hidden
+from .. import auth, db, hidden, role_ceiling
 from ..actions import deliver, queue
 from ..audit import audit
 from ..authority import store
@@ -79,9 +79,12 @@ def _grant_view(g) -> dict:
             "expires_at": g.expires_at, "requested_by_key_id": g.requested_by_key_id}
 
 
-def create_key(ctx, name: str, role: str, rate_per_min: int, expires_at: int | None,
+def create_key(ctx, name: str, role: str | None, rate_per_min: int, expires_at: int | None,
                capabilities: list, denies: dict | None = None) -> dict:
-    """Create a key and its active root grant in one flow; plaintext once."""
+    """Create a key and its active root grant in one flow; plaintext once.
+    `role` None is the owner default ceiling, `full` (auth.OWNER_KEY_DEFAULT_ROLE):
+    the capabilities are the grant, the role only caps them when chosen."""
+    role = auth.OWNER_KEY_DEFAULT_ROLE if role is None else role
     caps = normalize_caps(capabilities or [])
     clean_denies = normalize_denies(denies)
     try:
@@ -268,11 +271,27 @@ def list_grants(status: str | None = None, key_id: int | None = None,
     with db.connect() as conn:
         ids = [r["id"] for r in conn.execute(sql, args).fetchall()]
     out = []
+    ceilings: dict[int, str | None] = {}
     for gid in ids:
         g = store.get(gid)
         if g is not None:
-            out.append(_grant_view(g))
+            out.append({**_grant_view(g), **_ceiling_view(g, ceilings)})
     return out
+
+
+def _ceiling_view(g, cache: dict[int, str | None]) -> dict:
+    """`ceiling`: the lowest role along the grant's key chain (None when the
+    chain is broken: that key cannot authenticate at all). `ceiling_note`:
+    one sentence when that ceiling lowers what the grant asks for, because
+    approving such a request does not do what the agent asked (it is None
+    when the ceiling changes nothing). The console's requests view shows
+    both; the Telegram card carries the same note (notify/cards.py)."""
+    if g.key_id not in cache:
+        cache[g.key_id] = role_ceiling.key_ceiling(row["role"] for row in auth.key_chain(g.key_id))
+    ceiling = cache[g.key_id]
+    capped = role_ceiling.grant_lowered(get_registry().manifests(), g.capabilities,
+                                        ceiling) if ceiling else {}
+    return {"ceiling": ceiling, "ceiling_note": role_ceiling.note(ceiling, capped)}
 
 
 def decide_grant(ctx, grant_id: str, status: str) -> dict:

@@ -1,8 +1,9 @@
 """Agent self-introspection: `/v1/me` and the key-filtered OpenAPI document.
 
 `/v1/me` is `get_my_access`: capabilities per target with `enforced_where`,
-remaining budgets, role, expiries and delegation depth. It never lists
-hidden resources or deny sets.
+remaining budgets, the key's ceiling (role) with `effective_mode` wherever it
+lowers an action, expiries and delegation depth. It never lists hidden
+resources or deny sets.
 """
 
 from fastapi import APIRouter, Depends, Request

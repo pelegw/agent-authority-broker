@@ -33,11 +33,11 @@ like `/auth/*`.
 | View (`data-view`) | What it does | API |
 |---|---|---|
 | `overview` | Counts of pending actions, permission requests, scheduled actions and active keys; a status card per plugin; the decision-chain verification. | `/v1/admin/actions`, `/v1/admin/grants`, `/v1/admin/plugins`, `/v1/admin/keys`, `/v1/admin/decisions/verify` |
-| `requests` | Actions awaiting approval (summary rendered from the manifest's `summary_template`, key chain when delegated, resource label and id, agent note, run time, all params) and permission requests (each capability spelled out: actions by side effect, selectors, constraints, mode, expiry, and the budget it **adds**). Approve / reject. | `/v1/admin/actions?status=pending`, `/v1/admin/actions/{id}/approve\|reject`, `/v1/admin/grants?status=pending`, `/v1/admin/grants/{id}/approve\|reject` |
+| `requests` | Actions awaiting approval (summary rendered from the manifest's `summary_template`, key chain when delegated, resource label and id, agent note, run time, all params) and permission requests (each capability spelled out: actions by side effect, selectors, constraints, mode, expiry, and the budget it **adds**), with a warning when the key's ceiling would cap the request (see "The ceiling (role)"). Approve / reject. | `/v1/admin/actions?status=pending`, `/v1/admin/actions/{id}/approve\|reject`, `/v1/admin/grants?status=pending`, `/v1/admin/grants/{id}/approve\|reject` |
 | `scheduled` | Actions waiting for their `run_at`, with cancel. | `/v1/admin/actions?status=scheduled`, `/v1/admin/actions/{id}/cancel` |
 | `decisions` | The decision record filtered by key, plugin, decision and time; key chain root to leaf, grant chain, `enforced_where` per dimension, outcome rows; "Verify chain". | `/v1/admin/decisions`, `/v1/admin/decisions/verify` |
 | `plugins` | Per plugin: enable / disable, the config form generated from `config_schema`, health, and a connection panel by `connection.kind`. Plugins that share a connection slot get one shared card above their own (see below). | `/v1/admin/plugins[/{id}]`, `.../enable`, `.../disable`, `.../health`, `.../connect/start`, `.../connect/finish`, `.../connect/qr.png`, `.../disconnect` |
-| `keys` | Key list; create (with the capability editor and denies, plaintext shown once); edit role, rate, expiry, disabled, denies and the root grant's capabilities; revoke other grants; rotate (new plaintext once); disable; a "Tree" link for keys in a delegation chain. | `/v1/admin/keys[/{id}]`, `/v1/admin/keys/{id}/rotate`, `/v1/admin/grants/{id}/revoke` |
+| `keys` | Key list (the ceiling shown only below `full`); create (with the capability editor, the ceiling defaulting to `full`, and denies, plaintext shown once); edit the ceiling (role), rate, expiry, disabled, denies and the root grant's capabilities; revoke other grants; rotate (new plaintext once); disable; a "Tree" link for keys in a delegation chain. | `/v1/admin/keys[/{id}]`, `/v1/admin/keys/{id}/rotate`, `/v1/admin/grants/{id}/revoke` |
 | `delegations` | The key forest: each key under the key it came from, with status, live, depth and orphan badges, why a key is not live, a grants summary and its capabilities; expand / collapse; edit, disable / enable, revoke. `#/delegations/<key id>` opens the tree on that key. | `/v1/admin/keys/tree`, `/v1/admin/keys/{id}` (PATCH), `/v1/admin/grants/{id}/revoke` |
 | `hidden` | Hide a resource by picking it by name (the label is captured at hide time); list; unhide. | `/v1/admin/hidden`, `/v1/admin/resolve` |
 | `channels` | Telegram: token state, bot name, set / replace / clear the bot token (write-only), link your chat (one-time code, waits until linked), enable / disable, test message, unlink, poll-loop health. | `/v1/admin/telegram`, `.../token` (POST, DELETE), `.../link/start`, `.../enable`, `.../disable`, `.../test`, `.../unlink` |
@@ -80,6 +80,47 @@ budget (writes only; reads are never charged); and an expiry. New capabilities
 start from the manifest's constraint defaults. The broker normalizes whatever
 is sent (it may split reads and writes into two capabilities), so the edit
 view can show a grant as more blocks than were entered.
+
+### The ceiling (role)
+
+A key's role is its **ceiling**. It never grants anything; the capabilities
+are the only grant. It caps every capability below it, per side effect
+(`read-only`: writes and destructive actions denied; `read-draft`: they run
+as drafts even where a capability says direct; `read-act`: destructive
+actions run as drafts; `full`: caps nothing, the capabilities decide). The
+console presents it that way:
+
+- **Create and edit dialogs.** The field is labelled "Ceiling (role)", with
+  the help line "Never grants; caps every capability below it. full =
+  capabilities decide." and a line for the chosen ceiling. A new key's
+  ceiling defaults to `full` (`DEFAULT_CEILING`, equal to the broker's
+  `auth.OWNER_KEY_DEFAULT_ROLE` by test); the lower ceilings stay selectable.
+  A stored role the page does not know shows as the lowest ceiling, so a save
+  can never raise it unasked.
+- **Effective mode per ticked action.** Next to every ticked action the
+  capability editor shows what a call will really run at under the ceiling
+  chosen in the same dialog, and says when the ceiling is the reason:
+  `draft (capped by ceiling read-draft)`, `denied (capped by ceiling
+  read-only)`, or `cannot run: it cannot be drafted, choose direct` for a
+  write the manifest cannot draft under a draft capability. It repaints when
+  the actions, the mode or the ceiling change. `effectiveMode()` computes it
+  with the broker's rule (`role_ceiling.mode_under`: the lower of the
+  capability's and the ceiling's mode, then `policy.run_mode`) from
+  `CEILING_MODES`, the effective-mode table, which a test holds equal to
+  `roles.role_caps`.
+- **Keys list and delegation tree.** The ceiling is shown only when it is
+  lower than `full`. The keys list shows the lowest role along the key's
+  chain (what really caps it, since every ancestor's role is met too), marked
+  "from a key above" when that is not the key's own.
+- **Requests view.** `GET /v1/admin/grants` carries, per grant, `ceiling`
+  (the lowest role along the requesting key's chain) and `ceiling_note`: one
+  sentence when that ceiling would cap what the request asks for (for a
+  `read-draft` key asking for a direct write: "This key's ceiling is
+  read-draft: post_item will still queue for your approval, whatever this
+  grant says."), else null. The permission-request card shows a `ceiling`
+  badge below `full` and the note next to the Approve button, because
+  approving such a request does not do what the agent asked. The Telegram
+  card carries the same note.
 
 `resourcePicker(target, kind)` searches `/v1/admin/resolve` by name when the
 resource kind can resolve, and always offers the typed text as an id. What is
@@ -203,7 +244,8 @@ a hijacked session must not be able to weaken them.
 
 The Delegations view reads `GET /v1/admin/keys/tree`: root keys with their
 delegated children nested. Each node shows its name, `status` (active,
-disabled, expired), `live`, `depth`, role, `orphan` when its chain is broken,
+disabled, expired), `live`, `depth`, its ceiling (role) when lower than
+`full`, `orphan` when its chain is broken,
 when it was created and last used, a grants summary (counts by status, and
 which plugins and how many actions the active grants reach), and its active
 and pending grants' capabilities in the same readable form as permission
@@ -279,7 +321,11 @@ a key above it is, its chain is broken, or it is deeper than
 every `/admin` path, no owner credential needed (and no data in the page),
 Cloudflare Access applies, no external URLs, no HTML sinks, no inline
 handlers, no hidden bidi controls in the source, CSRF constant, role list,
-form vocabulary, a config renderer per manifest field type, a connection
+the ceiling presentation (the "Ceiling (role)" label in both key dialogs, the
+help line, the `full` default, the effective-mode table equal to
+`roles.role_caps`, `effectiveMode()` following the broker's rule, the keys
+list and tree showing the ceiling only below `full`, the grant card's
+ceiling note), form vocabulary, a config renderer per manifest field type, a connection
 panel per connection kind, a settings input per setting type, one loader per
 view and no placeholder left, the Telegram token field write-only (markup, no
 write-back, cleared before sending, status only compared), the shared-slot

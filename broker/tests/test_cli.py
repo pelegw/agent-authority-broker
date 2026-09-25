@@ -40,6 +40,29 @@ def test_keys_create_list_rotate_disable(run, echo_local):
     assert disabled["disabled"] is True
 
 
+def test_keys_create_without_role_gets_the_brokers_default(run, echo_local, monkeypatch):
+    """No --role: the CLI sends none, so the broker's owner default (full)
+    applies; --role still sets a lower ceiling."""
+    sent = []
+    make_client = aab.httpx.Client          # the fixture's TestClient factory
+
+    def spy(base_url, headers, timeout):
+        c = make_client(base_url=base_url, headers=headers, timeout=timeout)
+        original = c.post
+
+        def post(url, **kw):
+            sent.append(kw.get("json"))
+            return original(url, **kw)
+        c.post = post
+        return c
+    monkeypatch.setattr(aab.httpx, "Client", spy)
+    code, created, _ = run("keys", "create", "--name", "plain")
+    assert code == 0 and created["role"] == "full"
+    assert "role" not in sent[-1]
+    code, capped, _ = run("keys", "create", "--name", "capped", "--role", "read-draft")
+    assert code == 0 and capped["role"] == "read-draft" and sent[-1]["role"] == "read-draft"
+
+
 def test_bad_json_argument_is_a_usage_error(run, echo_local):
     with pytest.raises(SystemExit):
         run("keys", "create", "--name", "x", "--capabilities", "not json")

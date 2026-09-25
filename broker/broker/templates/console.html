@@ -217,6 +217,9 @@
   .capblock .section > .lbl { font-size: .74rem; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: .05em; margin-bottom: .3rem; }
   .actgroup { display: flex; flex-wrap: wrap; gap: .35rem .9rem; align-items: center; margin: .25rem 0; }
   .actgroup > .badge { min-width: 5.6rem; text-align: center; }
+  .actpick { display: inline-flex; align-items: center; gap: .3rem; flex-wrap: wrap; }
+  .effslot:empty { display: none; }
+  .badge.effmode { font-weight: 500; }
   .shortcuts { font-size: .8rem; color: var(--muted); }
   .dimrow { display: grid; grid-template-columns: minmax(9rem, 14rem) 1fr; gap: .5rem .8rem; align-items: start; margin: .45rem 0; }
   .dimrow .dimname { font-size: .86rem; }
@@ -499,11 +502,11 @@
     <!-- ================= Agent keys ================= -->
     <section class="view" data-view="keys" hidden>
       <h2>Agent keys</h2>
-      <p class="viewsub">One key per agent. A key's authority is its grants, capped by its role and by what the enabled, connected plugins can do. Delegated keys show the chain they came from.</p>
+      <p class="viewsub">One key per agent. A key's authority is its capabilities (its grants), limited to the enabled, connected plugins. Its ceiling (role) never grants anything: it only caps the capabilities, and is shown here only when it is lower than full. Delegated keys show the chain they came from.</p>
       <div class="toolbar"><button class="primary" type="button" id="newKeyBtn">Create a key</button></div>
       <div class="card table-wrap">
         <table>
-          <thead><tr><th>Name</th><th>Role</th><th>Rate/min</th><th>Delegated from</th><th>Last used</th><th>Expires</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Ceiling</th><th>Rate/min</th><th>Delegated from</th><th>Last used</th><th>Expires</th><th></th></tr></thead>
           <tbody id="keyRows"></tbody>
         </table>
       </div>
@@ -643,11 +646,25 @@ const CSRF_HEADER = "X-Requested-With";
 const CSRF_VALUE = "aab-console";
 // Must equal authority/roles.ROLES, lowest first (tested).
 const ROLES = ["read-only", "read-draft", "read-act", "full"];
+// A key's role is a ceiling: it never grants anything, it caps every
+// capability below it. Owner-created keys default to full (must equal
+// auth.OWNER_KEY_DEFAULT_ROLE; tested), so the capabilities decide unless
+// the owner picks a lower ceiling.
+const DEFAULT_CEILING = "full";
+const CEILING_LINE = "Never grants; caps every capability below it. full = capabilities decide.";
 const ROLE_HELP = {
-  "read-only": "Reads only. Nothing it holds can ever write.",
-  "read-draft": "Reads directly; every write or destructive action becomes a draft you approve.",
-  "read-act": "Reads and writes directly, as far as its grants allow; destructive actions are drafts.",
-  "full": "Everything its grants allow, directly.",
+  "read-only": "Reads only: writes and destructive actions are denied, whatever the capabilities say.",
+  "read-draft": "Reads as the capabilities say; every write or destructive action becomes a draft you approve, even where a capability says direct.",
+  "read-act": "Reads and writes as the capabilities say; destructive actions always become drafts.",
+  "full": "Caps nothing: the capabilities decide.",
+};
+// The effective-mode table: per ceiling and side effect, the highest mode a
+// call can run at ("" = never). Must equal authority/roles.role_caps (tested).
+const CEILING_MODES = {
+  "read-only": { read: "direct", write: "", destructive: "" },
+  "read-draft": { read: "direct", write: "draft", destructive: "draft" },
+  "read-act": { read: "direct", write: "direct", destructive: "draft" },
+  "full": { read: "direct", write: "direct", destructive: "direct" },
 };
 const EFFECTS = ["read", "write", "destructive"];
 // Narrowing forms, split the way a capability stores them (must equal
@@ -1343,9 +1360,11 @@ function capView(cap) {
 }
 function grantCard(g) {
   const card = h("div", { class: "card req" });
-  const k = state.keysById.get(g.key_id);
+  // `ceiling` and `ceiling_note` come from the broker (services/admin.py),
+  // computed over the requesting key's whole chain with the engine's rule.
   const meta = h("div", { class: "meta" }, keyCrumbs(g.key_id), h("span", null, "asks for more authority"),
-    badge(g.kind, "accent"), k ? badge("role " + k.role, "") : null, h("span", null, relTime(g.created_at)));
+    badge(g.kind, "accent"), g.ceiling && g.ceiling !== "full" ? badge("ceiling " + g.ceiling, "warn") : null,
+    h("span", null, relTime(g.created_at)));
   if (g.requested_by_key_id && g.requested_by_key_id !== g.key_id) {
     meta.append(h("span", null, "requested by"), keyCrumbs(g.requested_by_key_id));
   }
@@ -1354,6 +1373,9 @@ function grantCard(g) {
   card.append(h("div", { class: "facts" }, ...fact("Grant expires",
     g.expires_at ? `${fmtWhen(g.expires_at)} (${relTime(g.expires_at)})` : "never (until revoked)")));
   for (const c of g.capabilities || []) card.append(capView(c));
+  // Next to the buttons on purpose: approving a request its ceiling caps
+  // does not do what the agent asked.
+  if (g.ceiling_note) card.append(h("div", { class: "warnbox ceilingnote" }, g.ceiling_note));
   const actions = h("div", { class: "actions" });
   const approve = h("button", { type: "button", class: "green" }, "Approve");
   const reject = h("button", { type: "button", class: "red" }, "Reject");
@@ -1631,7 +1653,40 @@ const SCALAR_INPUTS = {
 };
 /* scalar-inputs:end */
 function appliesText(list) { return list.includes("*") ? "all actions" : list.join(", "); }
-function capBlock(cap, fresh, onRemove) {
+// The mode a call to `act` runs at under a capability of mode `chosen`,
+// capped by the ceiling `role`: "direct", "draft", or "" (it cannot run).
+// The broker's rule (role_ceiling.mode_under): the lower of the capability's
+// mode and the ceiling's (a meet with roles.role_caps), then policy.run_mode:
+// an action that cannot run direct runs as a draft, and a mode the action
+// does not support means it cannot run at all. Reads are always direct in a
+// capability. An unknown ceiling or side effect caps everything.
+function effectiveMode(role, act, chosen) {
+  const row = hasOwn(CEILING_MODES, role) ? CEILING_MODES[role] : null;
+  const bound = row && hasOwn(row, act.side_effect) ? row[act.side_effect] : "";
+  if (!bound) return "";
+  const want = act.side_effect === "read" ? "direct" : chosen;
+  let mode = want === "direct" && bound === "direct" ? "direct" : "draft";
+  const modes = act.modes || [];
+  if (!modes.includes("direct")) mode = "draft";
+  return modes.includes(mode) ? mode : "";
+}
+// What a ticked action will really do, and whether the ceiling (not the
+// capability) is the reason: "draft (capped by ceiling read-draft)".
+function effectiveBadge(role, act, chosen) {
+  const eff = effectiveMode(role, act, chosen);
+  const alone = effectiveMode(ROLES[ROLES.length - 1], act, chosen);
+  let text, kind;
+  if (!alone) { text = "cannot run: it cannot be drafted, choose direct"; kind = "bad"; }
+  else if (!eff) { text = `denied (capped by ceiling ${role})`; kind = "bad"; }
+  else {
+    text = eff + (eff !== alone ? ` (capped by ceiling ${role})` : "");
+    kind = eff === "direct" ? "warn" : "ok";
+  }
+  const b = badge(text, "effmode " + kind);
+  b.title = `${act.name}: ${text}`;
+  return b;
+}
+function capBlock(cap, fresh, onRemove, ceilingOf) {
   const m = manifestOf(cap.target);
   const el = h("div", { class: "capblock" });
   const remove = h("button", { type: "button", class: "ghost" }, "Remove");
@@ -1641,12 +1696,13 @@ function capBlock(cap, fresh, onRemove) {
   if (!m) {
     // Kept exactly as stored: the editor never rewrites what it cannot read.
     el.append(h("div", { class: "hint" }, "This plugin is not registered right now; the capability is kept unchanged."), capView(cap));
-    return { el, get: () => cap, dismiss: () => false };
+    return { el, get: () => cap, dismiss: () => false, repaint: () => {} };
   }
   const changed = () => el.dispatchEvent(new Event("change", { bubbles: true }));
 
   // ---- actions, grouped by side effect
   const boxes = new Map();
+  const slots = [];      // { cb, a, slot }: where each action's effective mode shows
   const chosen = new Set(cap.actions || []);
   const actSec = h("div", { class: "section" }, h("div", { class: "lbl" }, "Actions"));
   const shortcuts = h("div", { class: "shortcuts" }, "Select: ");
@@ -1677,7 +1733,11 @@ function capBlock(cap, fresh, onRemove) {
       cb.checked = chosen.has(a.name);
       cb.onchange = syncMode;
       boxes.set(a.name, cb);
-      row.append(h("label", { class: "chk", title: a.doc || a.name }, cb, a.name));
+      // Filled by paintEffective() while the action is ticked.
+      const slot = h("span", { class: "effslot" });
+      slots.push({ cb, a, slot });
+      row.append(h("span", { class: "actpick" },
+        h("label", { class: "chk", title: a.doc || a.name }, cb, a.name), slot));
     }
     actSec.append(row);
   }
@@ -1688,10 +1748,21 @@ function capBlock(cap, fresh, onRemove) {
     h("option", { value: "draft" }, "draft: every write waits for your approval"),
     h("option", { value: "direct" }, "direct: writes act without asking"));
   modeSel.value = fresh ? "draft" : (cap.mode === "direct" ? "direct" : "draft");
+  modeSel.addEventListener("change", () => paintEffective());
   const modeSec = h("div", { class: "section" }, h("div", { class: "lbl" }, "Mode"), modeSel);
   el.append(modeSec);
   const anyWrite = () => [...boxes].some(([n, cb]) => cb.checked && effectOf(cap.target, n) !== "read");
-  function syncMode() { modeSec.hidden = !anyWrite(); }
+  function syncMode() { modeSec.hidden = !anyWrite(); paintEffective(); }
+  // The effective mode of every ticked action under the key's ceiling (the
+  // role select in the same dialog), so a direct write the ceiling caps is
+  // visible before the key is saved rather than discovered in production.
+  function paintEffective() {
+    const role = ceilingOf ? ceilingOf() : null;
+    for (const { cb, a, slot } of slots) {
+      if (cb.checked && role) slot.replaceChildren(effectiveBadge(role, a, modeSel.value));
+      else slot.replaceChildren();
+    }
+  }
   syncMode();
 
   // ---- selectors: one per set-form dimension
@@ -1754,6 +1825,7 @@ function capBlock(cap, fresh, onRemove) {
   return {
     el,
     dismiss: () => selInputs.map((x) => x.picker.dismiss()).some(Boolean),
+    repaint: paintEffective,
     // Throws an Error naming the problem; never returns a half-valid capability.
     get() {
       const label = pluginName(cap.target);
@@ -1789,7 +1861,9 @@ function capBlock(cap, fresh, onRemove) {
     },
   };
 }
-function capabilityEditor(caps) {
+// `ceilingOf()` returns the ceiling (role) chosen in the same dialog, so each
+// ticked action can show what it will really do; call repaint() when it changes.
+function capabilityEditor(caps, ceilingOf) {
   const root = h("div", { class: "capeditor" });
   const list = h("div");
   const none = empty("No capabilities: this key can do nothing until you add one, or it asks and you approve.");
@@ -1804,7 +1878,7 @@ function capabilityEditor(caps) {
       b.el.remove();
       dirty = true;
       paintEmpty();
-    });
+    }, ceilingOf);
     blocks.push(b);
     list.append(b.el);
     paintEmpty();
@@ -1827,6 +1901,7 @@ function capabilityEditor(caps) {
     get: () => blocks.map((b) => b.get()),
     isDirty: () => dirty,
     dismiss: () => blocks.map((b) => b.dismiss()).some(Boolean),
+    repaint: () => blocks.forEach((b) => b.repaint()),
   };
 }
 
@@ -1915,7 +1990,12 @@ async function refreshKeys() {
     const name = h("td", null, h("div", null, h("b", null, k.name)));
     if (k.rotating) name.append(h("div", { class: "sub" }, "rotating: the old secret still works"));
     if (k.created_by === "delegation") name.append(h("div", { class: "sub" }, "created by delegation"));
-    const role = h("td", null, k.disabled ? badge("disabled", "bad") : badge(k.role, k.role === "full" ? "warn" : ""));
+    // The ceiling only when it caps something (not full): at full the
+    // capabilities decide, and a badge there would read like a grant.
+    const ceil = chainCeiling(k);
+    const role = h("td", null, k.disabled ? badge("disabled", "bad")
+      : ceil !== "full" ? [badge(ceil, "warn"), ceil !== k.role ? h("div", { class: "sub" }, "from a key above") : null]
+        : null);
     const parent = h("td", null, k.parent_key_id !== null && k.parent_key_id !== undefined
       ? keyCrumbs(k.parent_key_id) : h("span", { class: "sub" }, "root key"));
     const used = h("td", null, h("div", null, k.last_used_at ? relTime(k.last_used_at) : "never"));
@@ -1936,24 +2016,44 @@ async function refreshKeys() {
       h("td", null, h("div", { class: "row-actions" }, edit, rotate, toggle, tree))));
   }
 }
-function roleSelect(value) {
+// The lowest role along a key's chain: what really caps it (the broker meets
+// every ancestor's role too). A missing parent stops the walk; an unknown
+// role ranks lowest.
+function chainCeiling(k) {
+  let low = k.role;
+  const seen = new Set();
+  for (let cur = k; cur && cur.parent_key_id !== null && cur.parent_key_id !== undefined && !seen.has(cur.id);) {
+    seen.add(cur.id);
+    cur = state.keysById.get(cur.parent_key_id);
+    if (cur && ROLES.indexOf(cur.role) < ROLES.indexOf(low)) low = cur.role;
+  }
+  return low;
+}
+// The "Ceiling (role)" select. `onChange` runs after the owner picks another
+// ceiling (never while building, when the dialog's editor may not exist yet).
+function roleSelect(value, onChange) {
   const sel = h("select", { name: "role" }, ROLES.map((r) => h("option", { value: r }, r)));
-  sel.value = value || "read-only";
+  sel.value = value;
+  // A stored value this page does not know shows as the lowest ceiling, so a
+  // save can never raise it without the owner choosing to.
+  if (sel.value !== value) sel.value = ROLES[0];
   const help = h("div", { class: "formhelp" });
-  const paint = () => { help.textContent = ROLE_HELP[sel.value] || ""; };
-  sel.addEventListener("change", paint);
+  const paint = () => {
+    help.replaceChildren(h("div", { class: "ceilingline" }, CEILING_LINE), h("div", null, ROLE_HELP[sel.value] || ""));
+  };
+  sel.addEventListener("change", () => { paint(); if (onChange) onChange(); });
   paint();
   return { sel, help };
 }
 function openCreateKey() {
   const name = h("input", { name: "name", required: true, maxlength: "64", placeholder: "e.g. claude-desktop" });
-  const role = roleSelect("read-only");
+  const role = roleSelect(DEFAULT_CEILING, () => capEd.repaint());
   const rate = h("input", { type: "number", min: "1", max: "10000", step: "1", value: "6" });
   const exp = h("input", { type: "datetime-local" });
-  const capEd = capabilityEditor([]);
+  const capEd = capabilityEditor([], () => role.sel.value);
   const denEd = deniesEditor({});
   const form = h("form", { class: "grid", autocomplete: "off" },
-    h("label", null, "Name", name), h("label", null, "Role", role.sel),
+    h("label", null, "Name", name), h("label", null, "Ceiling (role)", role.sel),
     h("label", null, "Calls per minute", rate), h("label", null, "Key expires (empty = never)", exp),
     role.help,
     h("div", { class: "formsection" }, h("h4", null, "Capabilities (the key's root grant)"), capEd.el),
@@ -1997,7 +2097,7 @@ async function openEditKey(id) {
   let k;
   try { k = await api(`/v1/admin/keys/${enc(id)}`); } catch (e) { showErr(e); return; }
   const delegated = k.parent_key_id !== null && k.parent_key_id !== undefined;
-  const role = roleSelect(k.role);
+  const role = roleSelect(k.role, () => { if (capEd) capEd.repaint(); });
   const rate = h("input", { type: "number", min: "1", max: "10000", step: "1", value: String(k.rate_per_min) });
   const exp = h("input", { type: "datetime-local" });
   exp.value = toLocalInput(k.expires_at);
@@ -2005,7 +2105,8 @@ async function openEditKey(id) {
   disabled.checked = !!k.disabled;
   const denEd = deniesEditor(k.denies || {});
   const root = rootGrantOf(k);
-  const capEd = delegated ? null : capabilityEditor(root ? root.capabilities : []);
+  // A root key has no ancestors, so its own role is its whole ceiling.
+  const capEd = delegated ? null : capabilityEditor(root ? root.capabilities : [], () => role.sel.value);
   const others = (k.grants || []).filter((g) => g !== root);
   const grantsSec = h("div", { class: "formsection" }, h("h4", null, "Other grants"));
   if (!others.length) grantsSec.append(h("div", { class: "hint" }, "None."));
@@ -2022,14 +2123,14 @@ async function openEditKey(id) {
     grantsSec.append(line);
   }
   const form = h("form", { class: "grid", autocomplete: "off" },
-    h("label", null, "Role", role.sel), h("label", null, "Calls per minute", rate),
+    h("label", null, "Ceiling (role)", role.sel), h("label", null, "Calls per minute", rate),
     h("label", null, "Key expires (empty = never)", exp),
     h("label", { class: "chk" }, disabled, "disabled"),
     role.help,
     delegated
       ? h("div", { class: "formsection" }, h("h4", null, "Authority"),
           h("p", { class: "hint" }, "Delegated from ", keyCrumbs(k.parent_key_id),
-            ". Its authority comes from its parent's grants; narrow those, or disable or revoke this key."))
+            ". Its authority comes from its parent's grants; narrow those, or disable or revoke this key. Every key above it caps it with its own ceiling too."))
       : h("div", { class: "formsection" }, h("h4", null, "Capabilities (root grant)"),
           h("p", { class: "hint" }, "Narrowing takes effect at once for this key and every key delegated from it."), capEd.el),
     h("div", { class: "formsection" }, h("h4", null, "Denies"), denEd.el),
@@ -2832,7 +2933,8 @@ function treeNode(n, ancestors) {
     n.live ? badge("live", "ok") : badge("not live", "bad"),
     n.orphan ? badge("orphan", "bad") : null,
     badge(`depth ${n.depth}`, ""),
-    badge(n.role, n.role === "full" ? "warn" : ""),
+    // Its own ceiling, only when it caps something (every key above caps it too).
+    n.role !== "full" ? badge("ceiling " + n.role, "warn") : null,
     kids.length ? h("span", { class: "sub" }, `${kids.length} below`) : null));
   li.append(h("div", { class: "tmeta" },
     `${delegatedKey ? "delegated" : "created by you"} ${relTime(n.created_at)} · expires ${n.expires_at ? relTime(n.expires_at) : "never"}` +
