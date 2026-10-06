@@ -125,3 +125,18 @@ def test_ci_builds_the_base_image_without_pushing_and_checks_its_contract():
     assert 'test "$(id -u):$(id -g)" = "10001:10001"' in runs
     assert 'test "$(stat -c %u:%a /secrets)" = "10001:700"' in runs
     assert "import aab_plugin_runtime, uvicorn" in runs
+
+
+def test_the_dockerfile_template_in_the_packaging_doc_builds_on_this_base():
+    """docs/plugin-packaging.md's template is what plugin authors copy: it
+    must start FROM the published base image, end as aab, and serve one
+    worker on :8090 with uvicorn's access log off (docs/logging.md)."""
+    doc = _read("docs/plugin-packaging.md")
+    [block] = re.findall(r"```dockerfile\n(.*?)```", doc, re.S)
+    lines = [line for line in block.splitlines() if line and not line.startswith("#")]
+    assert re.fullmatch(rf"FROM {re.escape(IMAGE)}:\d+\.\d+\.\d+", lines[0])
+    assert [line for line in lines if line.startswith("USER ")][-1] == "USER aab"
+    [cmd] = [line for line in lines if line.startswith("CMD ")]
+    for part in ('"uvicorn"', '"--factory"', '"--port", "8090"', '"--workers", "1"',
+                 '"--no-access-log"'):
+        assert part in cmd, part

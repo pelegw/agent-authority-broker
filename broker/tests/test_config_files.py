@@ -251,3 +251,21 @@ def test_every_uvicorn_cmd_turns_off_uvicorns_access_log(dockerfile):
     the services write their own access line without it."""
     [cmd] = [line for line in _read(dockerfile).splitlines() if line.startswith("CMD ")]
     assert '"uvicorn"' in cmd and '"--no-access-log"' in cmd
+
+
+def test_push_never_touches_installed_plugins_and_uses_the_compose_file_set():
+    """deploy/push.sh: rsync --delete must exclude plugins.d/ (the installer's)
+    or every installed plugin is wiped; the git-archive path never ships it
+    because it is git-ignored. The remote compose command comes from
+    scripts/compose-files.sh, never a hand-listed pair, and an older .env
+    gains INSTALLER_TOKEN (generated) and AAB_HOME."""
+    text = _read("deploy/push.sh")
+    rsync = re.search(r"^\s*rsync .*?\"\$\{HOST\}:\$\{REMOTE_DIR\}/\"$", text, re.S | re.M).group(0)
+    assert "--delete" in rsync and "--exclude '/plugins.d/'" in rsync
+    assert "--delete-excluded" not in rsync
+    assert "plugins.d/" in _read(".gitignore").splitlines()
+    assert r'C="docker compose \$(sh scripts/compose-files.sh)"' in text
+    assert "docker compose -f" not in text
+    loop = re.search(r"for name in (.*?); do", text, re.S).group(1)
+    assert "INSTALLER_TOKEN" in loop.replace("\\", " ").split()
+    assert "'AAB_HOME=${REMOTE_DIR}' >> .env" in text

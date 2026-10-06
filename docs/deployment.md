@@ -15,17 +15,26 @@ every console setting with its bounds, is `docs/configuration.md`.
 > read-only `wa_data` mount were verified under Docker after the 0.2.0 tag;
 > [Verify after `docker compose up`](#verify-after-docker-compose-up) has the
 > recorded outputs. Pairing a real phone was not part of that run.
+>
+> External plugins (unreleased, 0.3.0): the opt-in plugin installer, the
+> computed compose file set and the plugin base image are described in
+> [External plugins: the installer](#external-plugins-the-installer). They are
+> tested without Docker (a fake Docker, local git repositories, compose files
+> parsed as YAML); the images, the socket-driven install and the acceptance
+> test below have not been run under Docker yet.
 
 ## Containers, networks, volumes
 
 | Service | Image / build | Networks | Published port | Volumes |
 |---|---|---|---|---|
 | `edge` (public overlay only) | `caddy:2-alpine` | `edge_net` | `443` | `caddy_data`, `edge/Caddyfile` (ro), `edge/certs` (ro) |
-| `broker` | `./broker` | `edge_net`, `net_whatsapp`, `net_github`, `net_google` | `127.0.0.1:${BROKER_PORT:-8080}` in the base file only; none in public mode | `broker_data` |
+| `broker` | `./broker` | `edge_net`, `net_whatsapp`, `net_github`, `net_google`; `net_installer` with the installer; `net_<service>` per installed plugin | `127.0.0.1:${BROKER_PORT:-8080}` in the base file only; none in public mode | `broker_data` |
 | `plugin-whatsapp` | `./plugins/whatsapp` | `net_whatsapp`, `wa_internal` | none | `wa_data` (ro), `whatsapp_secrets` |
 | `whatsapp-sidecar` | `./sidecars/whatsapp` | `wa_internal` | none | `wa_data` (rw), `wa_session` (rw, this service only) |
 | `plugin-github` | `./plugins/github` | `net_github` | none | `github_secrets`, `${GITHUB_APP_KEY_DIR}` bind at `/run/secrets/github` (ro) |
 | `plugin-google` | `./plugins/google` | `net_google` | none | `google_secrets` |
+| `aab-installer` (installer overlay only) | `./installer` | `net_installer` | none | `/var/run/docker.sock`, the checkout `${AAB_HOME}` at the same path |
+| `plugin-<service>` (each installed external plugin) | `./plugins.d/<service>/src` (the plugin's own Dockerfile) | `net_<service>` | none | `<service>_secrets`, the `<service>_*` volumes its descriptor declares |
 
 - `edge_net` carries edge ↔ broker only, so a compromised edge cannot reach any
   plugin's `/perform`.
@@ -36,6 +45,12 @@ every console setting with its bounds, is `docs/configuration.md`.
   resolve `plugin-google`, let alone open a connection to it.
 - `wa_internal` carries plugin-whatsapp ↔ sidecar only. The broker is not on
   it and cannot reach the sidecar or its archive.
+- `net_installer` (installer overlay only) carries broker ↔ `aab-installer`
+  only: no plugin, in-tree or installed, and not the edge, can reach the
+  installer, which is root on the host.
+- Each installed external plugin gets `net_<service>`, shared with the broker
+  only, exactly like the in-tree ones; its overlay is rendered by the
+  installer, never supplied by its repository.
 - No network is `internal: true`: the broker (Telegram, Cloudflare JWKS), the
   plugins (GitHub, Google) and the sidecar (WhatsApp) all need egress.
 - Every image runs as the non-root user `aab` (uid 10001).
@@ -79,6 +94,26 @@ and adds the Caddy `edge` on `edge_net` publishing `443`. Cloudflare must sit
 in front with a Transform Rule injecting `X-AAB-Origin`, Authenticated Origin
 Pulls, and an Access application on `/admin*`, `/auth*`, `/v1/admin*` and
 `/oauth*`. Full procedure: `deploy/DEPLOY.md`.
+
+## The compose file set
+
+Which compose files make up a deployment is computed, never hand-listed:
+
+```bash
+scripts/compose-files.sh            # prints e.g. -f docker-compose.yml -f docker-compose.public.yml
+C="docker compose $(scripts/compose-files.sh)"
+$C up -d --build
+$C ps
+```
+
+It prints, in order: `docker-compose.yml`; `docker-compose.public.yml` when
+`SITE_DOMAIN` is set in `.env` (the public deploy); `docker-compose.installer.yml`
+when `INSTALLER_ENABLED=true`; then `plugins.d/<service>/compose.yml` for
+every installed external plugin (only directories whose name is a valid
+service name). `deploy/push.sh`, the installer and these docs all use it, so
+the host, a deploy and an install always agree on what the stack is. On a
+local run with nothing set it prints just `-f docker-compose.yml`, and plain
+`docker compose ...` is the same thing.
 
 OAuth redirect URIs to register at the providers:
 `https://<SITE_DOMAIN>/oauth/callback/google` (Google OAuth client) and
@@ -261,11 +296,13 @@ one token and one key.
 
 | Container | Receives | Must never receive |
 |---|---|---|
-| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `SITE_DOMAIN` (public overlay only: builds the OAuth redirect URI `https://<SITE_DOMAIN>/oauth/callback/<service>`), `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE`, `BROKER_DB`, `TZ`, `LOG_LEVEL`, `LOG_FORMAT` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, the `wa_data` and `wa_session` volumes |
+| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `SITE_DOMAIN` (public overlay only: builds the OAuth redirect URI `https://<SITE_DOMAIN>/oauth/callback/<service>`), `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE` and each installed external plugin (from its rendered overlay), `INSTALLER_URL` and `INSTALLER_TOKEN` (installer overlay only), `BROKER_DB`, `TZ`, `LOG_LEVEL`, `LOG_FORMAT` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, `INSTALLER_ALLOWED_SOURCES`, `INSTALLER_GIT_TOKEN`, the Docker socket, the `wa_data` and `wa_session` volumes |
 | `plugin-whatsapp` | `PLUGIN_TOKEN_WHATSAPP`, `PLUGIN_SECRETS_KEY_WHATSAPP`, `SIDECAR_URL` (`http://whatsapp-sidecar:8081`), `SIDECAR_TOKEN`, `MESSAGES_DB` (`/data/messages.db`), `LOG_LEVEL`, `LOG_FORMAT`, `wa_data` (ro) | Other services' tokens/keys, broker secrets (`DECISION_SIGNING_KEY`, `BROKER_SECRETS_KEY`, `SETUP_TOKEN`, `ORIGIN_SECRET`), the `wa_session` volume |
 | `whatsapp-sidecar` | `SIDECAR_TOKEN`, `DEVICE_NAME`, `TZ`, `LOG_LEVEL`, `SESSION_DIR` (`/session`), `wa_data` (rw), `wa_session` (rw; the only container that mounts it) | Everything else |
 | `plugin-github` | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_GITHUB` / `PLUGIN_SECRETS_KEY_GITHUB`), `LOG_LEVEL`, `LOG_FORMAT`; the App id, slug and private key are console config, not env (+ the optional read-only `/run/secrets/github` bind holding the PEM, a file alternative to pasting it) | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN` |
 | `plugin-google` | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_GOOGLE` / `PLUGIN_SECRETS_KEY_GOOGLE`), `LOG_LEVEL`, `LOG_FORMAT`; nothing Google-specific: the OAuth client id and secret are console config, and the broker passes the redirect URI with each connect | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN`, `SITE_DOMAIN` |
+| `plugin-<service>` (each installed external plugin) | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_<SERVICE>` / `PLUGIN_SECRETS_KEY_<SERVICE>`), the literal `environment` of its descriptor, its allowlisted `env_passthrough` (`TZ`, `LOG_LEVEL`, `LOG_FORMAT`), `<service>_secrets` at `/secrets` and the `<service>_*` volumes it declares | Other services' tokens/keys, broker and installer secrets, `SIDECAR_TOKEN`, any bind mount, any other volume or network (the installer renders its overlay; the repository supplies none) |
+| `aab-installer` (installer overlay only) | `INSTALLER_TOKEN`, `INSTALLER_ALLOWED_SOURCES`, `INSTALLER_GIT_TOKEN` (optional; given to git only through `GIT_ASKPASS`), `AAB_HOME`, `LOG_LEVEL`, `LOG_FORMAT`; the Docker socket and the checkout at `AAB_HOME` (same path inside), so it can read `.env`: it is root on the host | Any other variable in its environment, a published port, any network but `net_installer` |
 | `edge` | `SITE_DOMAIN`, `ORIGIN_SECRET`, origin certificate + key, Cloudflare origin-pull CA | Every other secret |
 
 The table names the `.env` entries each container is fed from. Inside a
@@ -314,6 +351,8 @@ Two ways, pick one:
 | `whatsapp_secrets` | plugin-whatsapp (`/secrets`) | Nothing today: the WhatsApp manifest has no config, and the store exists because the runtime provides one | `PLUGIN_SECRETS_KEY_WHATSAPP` |
 | `github_secrets` | plugin-github (`/secrets`) | The GitHub plugin's console config (App id and slug, the private key if pasted, the PAT fallback if used), the installation id, connect `state` nonces | `PLUGIN_SECRETS_KEY_GITHUB` |
 | `google_secrets` | plugin-google (`/secrets`) | OAuth client id and secret, refresh token, granted scopes, connect `state` nonces with their redirect URI | `PLUGIN_SECRETS_KEY_GOOGLE` |
+| `<service>_secrets` (each installed plugin) | `plugin-<service>` (`/secrets`) | That plugin's own secret store (what its console config marks secret) | `PLUGIN_SECRETS_KEY_<SERVICE>` |
+| `<service>_*` (declared by an installed plugin, e.g. `finance_data`) | `plugin-<service>`, at the path its descriptor names | That plugin's data (the finance database) | whatever the plugin does (`finance_data`: nothing, plain SQLite) |
 | `caddy_data` | edge | Caddy's runtime state | n/a |
 
 Compose prefixes names with the project (`aab_broker_data`, ...). Back up all
@@ -350,11 +389,13 @@ the new environment (`docker compose up -d <services>`; add
 | `ORIGIN_SECRET` | broker, edge, Cloudflare Transform Rule | Update the Transform Rule's `X-AAB-Origin` value first, then `up -d broker edge` (public overlay). Requests in between get 403. |
 | `BROKER_SECRETS_KEY` | broker | `up -d broker`. Secrets entered in the console no longer decrypt: Channels > Telegram shows "re-enter required" (Telegram stays off until then); paste the bot token again. |
 | `DECISION_SIGNING_KEY` | broker | `up -d broker`. Existing decision rows no longer verify under the new key (`verify` reports the first old row as bad). Rotate only on suspected compromise. |
-| `PLUGIN_TOKEN_WHATSAPP` / `_GITHUB` / `_GOOGLE` | broker and that plugin service | `up -d broker plugin-<service>`: both ends must restart together, calls fail with 503 in between. |
+| `PLUGIN_TOKEN_WHATSAPP` / `_GITHUB` / `_GOOGLE`, and `PLUGIN_TOKEN_<SERVICE>` of an installed plugin | broker and that plugin service | `up -d broker plugin-<service>`: both ends must restart together, calls fail with 503 in between. |
 | `PLUGIN_SECRETS_KEY_WHATSAPP` | plugin-whatsapp | `up -d plugin-whatsapp`. Its store holds nothing today, so nothing needs re-entering. The WhatsApp session (in `wa_session`) is unaffected. |
 | `PLUGIN_SECRETS_KEY_GITHUB` | plugin-github | `up -d plugin-github`, then clear the old store (below), re-enter the GitHub plugin's config in the console and connect again. |
 | `PLUGIN_SECRETS_KEY_GOOGLE` | plugin-google | `up -d plugin-google`, then clear the old store (below), re-enter the Google client id and secret in the console and connect again. |
 | `SIDECAR_TOKEN` | plugin-whatsapp, whatsapp-sidecar | `up -d plugin-whatsapp whatsapp-sidecar`. No re-pairing needed. |
+| `PLUGIN_SECRETS_KEY_<SERVICE>` of an installed plugin | that plugin | `up -d plugin-<service>`, then clear its old store (below) and re-enter its secret settings. |
+| `INSTALLER_TOKEN` | broker, aab-installer | `$C up -d broker aab-installer` (with `C` from [The compose file set](#the-compose-file-set)). A job in flight is lost: the installer marks it failed on restart. |
 
 Third-party values are rotated at their source, then re-entered where they
 live (the console for credentials, `.env` for Cloudflare Access):
@@ -366,6 +407,7 @@ live (the console for credentials, `.env` for Cloudflare Access):
 | Google OAuth client secret | Google Cloud Console > Credentials > reset secret | Re-enter it in the Google plugin form. |
 | `CF_ACCESS_AUD` / team domain | Cloudflare Zero Trust | `up -d broker`. |
 | Origin certificate / AOP CA | Cloudflare SSL/TLS > Origin Server | Replace files in `edge/certs`, `up -d edge`. |
+| `INSTALLER_GIT_TOKEN` | GitHub > Settings > Developer settings > tokens: regenerate, or create a new one and delete the old | Put it in `.env`, then `$C up -d aab-installer`. |
 
 **Clearing a plugin's old store.** After its `PLUGIN_SECRETS_KEY_<SERVICE>`
 changes, a plugin service reports "reconnect required" and fails closed: its
@@ -385,3 +427,120 @@ again. Nothing outside that service's volume is touched.
 Losing (not rotating) a `PLUGIN_SECRETS_KEY_<SERVICE>` has the same effect as
 rotating it: that plugin shows "reconnect required", its old store must be
 cleared as above, and nothing else is lost.
+
+## External plugins: the installer
+
+`aab-installer` (`installer/`, `docker-compose.installer.yml`) installs
+plugins that live in their own repositories (`docs/plugin-packaging.md`).
+It is opt-in, and it holds the Docker socket, so it is **root on the host**
+by implication. What bounds it is structural: only the broker reaches it
+(`net_installer`), only with `INSTALLER_TOKEN` (constant-time, an empty
+token refuses to boot), only for sources in `INSTALLER_ALLOWED_SOURCES`
+(env-only, empty refuses everything), at a release tag or a full commit,
+and only at the commit the owner reviewed; it renders each plugin's overlay
+from the plugin's descriptor through a fixed template and never runs
+anything from a plugin repository on the host (the plugin's Dockerfile runs
+inside `docker build`, like any image).
+
+### Enabling it
+
+1. In `.env`: `INSTALLER_ENABLED=true`,
+   `INSTALLER_ALLOWED_SOURCES=github.com/<you>/*` (comma-separated; `*` is
+   one path segment), `AAB_HOME` = the checkout's absolute path as the
+   Docker daemon sees it (default `/opt/aab`; the installer mounts it at the
+   same path, so compose resolves every relative path exactly as on the
+   host), and for private plugin repositories `INSTALLER_GIT_TOKEN` (a
+   read-only GitHub token: fine-grained with Contents: read-only on the
+   plugin repositories, or classic with `repo`). `INSTALLER_TOKEN` is
+   generated by `scripts/init_secrets.py` (`--rotate INSTALLER_TOKEN` appends
+   it to an older `.env`; `deploy/push.sh` does that, and appends `AAB_HOME`).
+2. The plugin base image: `docker login ghcr.io` with a `read:packages`
+   token, then `docker pull ghcr.io/pelegw/aab-plugin-base:<version>` for
+   each base version your plugins name. The installer drives the host's
+   daemon but holds no registry credentials of its own, so its builds use
+   the image from the daemon's store.
+3. `docker compose $(scripts/compose-files.sh) up -d --build` (or
+   `deploy/push.sh`): `aab-installer` starts, and the broker is recreated on
+   `net_installer` with `INSTALLER_URL` and `INSTALLER_TOKEN`. The console's
+   + Add plugin now inspects instead of explaining how to turn it on.
+
+Turning it off again (`INSTALLER_ENABLED=false`, then `up -d`) stops
+installing, upgrading and removing; installed plugins keep running, because
+their overlays stay in the file set.
+
+### Where installed plugins live
+
+```
+plugins.d/<service>/src/          the plugin repository at the reviewed commit
+plugins.d/<service>/compose.yml   the overlay rendered from its descriptor
+plugins.d/<service>/install.json  source, ref, commit, plugins, volumes, when
+plugins.d/_installer/             job state and log lines; temporary clones
+```
+
+`plugins.d/` belongs to the installer: it is git-ignored, `deploy/push.sh`
+never syncs or deletes it (rsync excludes it; the git archive never contains
+it), and nothing else writes there. Each installed service adds
+`PLUGIN_TOKEN_<SERVICE>` and `PLUGIN_SECRETS_KEY_<SERVICE>` to `.env`
+(generated by `scripts/init_secrets.py`, like every other secret). The
+owner's approval of each installed manifest is the pin in `broker.db`
+(`plugin_pins`).
+
+### Removal and purge
+
+Remove (the plugin card's Remove) stops and deletes `plugin-<service>`,
+deletes `plugins.d/<service>/`, recreates the broker without the service,
+removes its network, and unpins every plugin it hosted (agents get 404 at
+once; the plugin rows stay, disabled). Without purge, the service's volumes
+are kept and its two `.env` secrets are commented out
+(`#aab-retired# PLUGIN_TOKEN_<SERVICE>=...`); installing the same service
+again restores those secrets, so the kept volumes still decrypt. With purge,
+the `<service>_*` volumes (`docker volume rm aab_<service>_...`) and both
+secrets are deleted for good: back them up first. Plugin rows and decision
+rows naming its plugins stay in `broker.db` either way.
+
+### Backups
+
+Add every installed plugin's volumes (`aab_<service>_secrets`, needing its
+`PLUGIN_SECRETS_KEY_<SERVICE>`, and the volumes its descriptor declares) and
+`plugins.d/` (without `_installer/`) to the backup: `deploy/DEPLOY.md` >
+Operations > Backups backs up every `aab_` volume. Restore volumes,
+`plugins.d/` and `.env` together with the `broker_data` they were taken with
+(it holds the pins).
+
+### Acceptance test
+
+The end-to-end check that the installer works on a host (run it locally
+under Docker, then on the server from the branch's deploy). The echo plugin
+packaged as an external repository is the fixture (the shape
+`installer/tests/conftest.py` builds: `aab-plugin.yaml` with service `echo`,
+plugin `echo`, the manifest, a Dockerfile `FROM` the base image), pushed to a
+repository under `INSTALLER_ALLOWED_SOURCES` and tagged `v0.1.0`.
+
+1. Build the images: `docker build --build-context runtime=plugin-runtime
+   -t ghcr.io/pelegw/aab-plugin-base:<version> plugins/base` (or pull the
+   published one), and `$C build aab-installer` with the installer enabled.
+2. `docker compose -f docker-compose.yml -f docker-compose.installer.yml config -q`
+   with a throwaway `.env` (`INSTALLER_ENABLED=true`) answers nothing.
+3. `$C up -d`; `$C ps` shows `aab-installer` healthy with no published port;
+   `docker compose exec broker python -c "import urllib.request;
+   print(urllib.request.urlopen('http://aab-installer:8070/health').read())"`
+   answers `{"ok":true}`, while the same from a plugin container fails to
+   resolve `aab-installer`.
+4. Console: Plugins, + Add plugin, the repository and `v0.1.0`, Inspect: the
+   review lists echo's actions with their side effects and modes, its secret
+   setting `api_secret`, the volumes `echo_secrets` and the declared ones.
+   Install: the job panel shows the clone, the `.env` entries added, the
+   rendered overlay, the build, `up -d broker`, the "being recreated" line,
+   then `done`.
+5. The echo card appears disabled, "installed from <source>@v0.1.0"; enable
+   it. `plugins.d/echo/compose.yml` has one network, no ports, no binds and
+   the two volumes; `.env` has `PLUGIN_TOKEN_ECHO` and
+   `PLUGIN_SECRETS_KEY_ECHO`; the audit log has `plugin.pin` then
+   `plugin.install` under the owner.
+6. Create an agent key with an echo capability: `GET /v1/me/skill` with it
+   lists Echo, and a read action answers 200.
+7. Remove (no purge): the job completes, the card is gone, the agent's call
+   answers 404, the `aab_echo_*` volumes remain, `.env` holds the retired
+   lines, `$C config --services` no longer lists `plugin-echo`. Install again
+   (same secrets restored), then Remove with purge: volumes and secrets gone.
+   The console is back to its previous state.

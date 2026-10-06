@@ -2796,7 +2796,7 @@ function openInstallerOff(st) {
       h("p", { class: "hint" }, "Installing a plugin from its repository needs aab-installer, an opt-in container that holds the Docker socket (it is root on the host). So it is turned on in the host's files, never from this console."),
       h("p", null, "1. In the .env next to docker-compose.yml on the host, set:"),
       h("pre", { class: "cmdbox" }, lines.join("\n")),
-      h("p", null, "2. Once per host, log Docker in to the registry that serves the plugin base image: docker login ghcr.io (a token with read:packages)."),
+      h("p", null, "2. Once per host, log Docker in to the registry that serves the plugin base image and pull it, because the installer has no registry credentials of its own: docker login ghcr.io (a token with read:packages), then docker pull ghcr.io/pelegw/aab-plugin-base:<version>."),
       h("p", null, "3. Load the installer's compose overlay and recreate the broker, from the checkout:"),
       h("pre", { class: "cmdbox" }, cmd),
       h("p", { class: "hint" }, "Then come back here and choose + Add plugin. The steps, and how to install a plugin by hand without the installer, are in docs/deployment.md and docs/plugin-packaging.md."),

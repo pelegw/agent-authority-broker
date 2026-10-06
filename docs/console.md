@@ -36,7 +36,7 @@ like `/auth/*`.
 | `requests` | Actions awaiting approval (summary rendered from the manifest's `summary_template`, key chain when delegated, resource label and id, agent note, run time, all params) and permission requests (each capability spelled out: actions by side effect, selectors, constraints, mode, expiry, and the budget it **adds**), with a warning when the key's ceiling would cap the request (see "The ceiling (role)"). Approve / reject. | `/v1/admin/actions?status=pending`, `/v1/admin/actions/{id}/approve\|reject`, `/v1/admin/grants?status=pending`, `/v1/admin/grants/{id}/approve\|reject` |
 | `scheduled` | Actions waiting for their `run_at`, with cancel. | `/v1/admin/actions?status=scheduled`, `/v1/admin/actions/{id}/cancel` |
 | `decisions` | The decision record filtered by key, plugin, decision and time; key chain root to leaf, grant chain, `enforced_where` per dimension, outcome rows; "Verify chain". | `/v1/admin/decisions`, `/v1/admin/decisions/verify` |
-| `plugins` | Per plugin: enable / disable, the config form generated from `config_schema`, health, and a connection panel by `connection.kind`. Plugins that share a connection slot get one shared card above their own (see below). | `/v1/admin/plugins[/{id}]`, `.../enable`, `.../disable`, `.../health`, `.../connect/start`, `.../connect/finish`, `.../connect/qr.png`, `.../disconnect` |
+| `plugins` | Per plugin: enable / disable, the config form generated from `config_schema`, health, and a connection panel by `connection.kind`. Plugins that share a connection slot get one shared card above their own (see below). **+ Add plugin** installs an external plugin from its repository; installed plugins show where they came from with Upgrade and Remove; offered manifests wait for review (see "Adding a plugin from its repository"). | `/v1/admin/plugins[/{id}]`, `.../enable`, `.../disable`, `.../health`, `.../connect/start`, `.../connect/finish`, `.../connect/qr.png`, `.../disconnect`; `/v1/admin/plugins/install/status`, `.../install/inspect`, `.../install`, `.../install/jobs/{id}`, `/v1/admin/plugins/installed`, `/v1/admin/plugins/{service}/upgrade`, `.../{service}/remove`, `/v1/admin/plugins/offered`, `/v1/admin/plugins/{id}/pin` |
 | `keys` | Key list (the ceiling shown only below `full`); create (with the capability editor, the ceiling defaulting to `full`, and denies, plaintext shown once); edit the ceiling (role), rate, expiry, disabled, denies and the root grant's capabilities; revoke other grants; rotate (new plaintext once); disable; a "Tree" link for keys in a delegation chain. | `/v1/admin/keys[/{id}]`, `/v1/admin/keys/{id}/rotate`, `/v1/admin/grants/{id}/revoke` |
 | `delegations` | The key forest: each key under the key it came from, with status, live, depth and orphan badges, why a key is not live, a grants summary and its capabilities; expand / collapse; edit, disable / enable, revoke. `#/delegations/<key id>` opens the tree on that key. | `/v1/admin/keys/tree`, `/v1/admin/keys/{id}` (PATCH), `/v1/admin/grants/{id}/revoke` |
 | `hidden` | Hide a resource by picking it by name (the label is captured at hide time); list; unhide. | `/v1/admin/hidden`, `/v1/admin/resolve` |
@@ -189,6 +189,73 @@ top level). Plugin lanes should report these where they apply:
 `connect/start` must answer an `https:` `url` for `github_app` and
 `google_oauth`; anything else is refused with a message, never opened.
 
+### Adding a plugin from its repository
+
+External plugins (`docs/plugin-packaging.md`) are installed by the opt-in
+`aab-installer`; the console drives it through the broker
+(`services/plugin_install.py`), and the broker does the authority part.
+
+- **+ Add plugin** (the Plugins view's header) first asks
+  `GET /v1/admin/plugins/install/status`. When the installer is **off** (no
+  `INSTALLER_URL` on the broker), the dialog does not offer Inspect: it lists
+  the `.env` lines that turn it on (`INSTALLER_ENABLED=true`,
+  `INSTALLER_ALLOWED_SOURCES=github.com/<you>/*`, and the optional
+  `INSTALLER_GIT_TOKEN` for private repositories), the one-time
+  `docker login ghcr.io`, and the command that loads the overlay
+  (`docker compose $(scripts/compose-files.sh) up -d`). Nothing in the
+  console can turn the installer on: it is root on the host.
+- Otherwise the dialog takes a **repository** (`github.com/you/aab-plugin-x`;
+  an https URL is accepted too) and a **release tag** (`v1.2.3`) or a full
+  40-character commit, with the allowlist hint under them. **Inspect**
+  (`POST .../install/inspect`) has the installer clone and read the package
+  and shows the **review card**: the repository, the resolved commit, the
+  service (`plugin-<service>`, alone on `net_<service>` with the broker),
+  new install or upgrade from which ref; per plugin its display name and
+  version, every action with its side effect and modes, the resources,
+  narrowings and constraints, the settings it will ask for (secret ones
+  marked; they are entered later in the plugin's card and never kept by the
+  broker), and on an upgrade **what changes** against the current pin
+  (actions, narrowings, constraints and settings added, removed or changed,
+  new secrets, a changed connection); then **what the container gets**: its
+  secret store and declared volumes, its literal environment, the host
+  `.env` keys it may read, its Dockerfile and runtime line. Everything on the
+  card was written by the plugin's author and is shown as text.
+- A manifest that does not validate, an id the broker tree owns or another
+  service serves, or a service that is already installed (use Upgrade)
+  leaves the card without an Install button and says why.
+- **Install** (`POST /v1/admin/plugins/install`, or
+  `POST /v1/admin/plugins/{service}/upgrade`) sends only the repository, the
+  ref and the reviewed commit. The broker inspects again, refuses if the ref
+  moved, **pins every manifest** (audited `plugin.pin`), then asks the
+  installer for the job (`plugin.install` / `plugin.upgrade`).
+- The **job panel** above the plugin cards polls
+  `GET .../install/jobs/{id}` every 2 s and shows the job's state and log
+  lines (the steps, the compose commands, their exit codes and a short
+  redacted tail of their output). Install and upgrade **recreate the
+  broker**, so while it does not answer (no connection, or 502 / 503 / 504
+  from the edge) the panel keeps polling and says the broker is being
+  recreated; after five minutes without an answer it stops and says the job
+  runs on in the installer. It stops on `done` or `failed` and reloads the
+  view. The new plugin appears **disabled** (the broker finds a just-started
+  service within 30 seconds); enable it like any other.
+- An installed plugin's card shows **installed from `<source>@<ref>`** and
+  the commit, with **Upgrade** (the same dialog, the repository fixed) and
+  **Remove**: a confirmation that names what the service hosts, with a purge
+  checkbox. Without purge the service's volumes and its two `.env` secrets
+  are kept, so installing it again finds its data; with purge they are
+  deleted for good. The broker unpins what the service hosted once the
+  installer accepted the removal, so agents get 404 for it at once. A package
+  none of whose plugins is registered (still starting, or awaiting review)
+  is listed under **Installed, not serving** with the same buttons.
+- **Offered, awaiting review** (`GET /v1/admin/plugins/offered`) replaces the
+  old "Refused plugins" card: every service that answered with a manifest
+  the broker has no approved copy of, or a different one. Where a pin would
+  fix it, **Review and pin** opens the same review card for that manifest
+  and pins it (`POST /v1/admin/plugins/{id}/pin`); otherwise the reason is
+  shown (an in-tree id, an id another service serves, an invalid manifest).
+  This is also how the owner restores a plugin after a failed upgrade: the
+  old version comes back offered, and pinning it registers it again.
+
 ## Channels: Telegram
 
 The Channels view reads `GET /v1/admin/telegram`: `token` (`unset` | `set` |
@@ -296,9 +363,14 @@ a key above it is, its chain is broken, or it is deeper than
 - **The Telegram bot token** is write-only end to end (see Channels), and the
   one-time link code is never kept.
 - **Confirmation** precedes every destructive or disruptive step (disable a
-  plugin, disconnect, disable, rotate or revoke a key, revoke a grant, token or
-  session, unhide, cancel a scheduled action, clear a secret or the bot token,
-  unlink Telegram). Dialogs focus
+  plugin, disconnect, remove an installed plugin, disable, rotate or revoke a
+  key, revoke a grant, token or session, unhide, cancel a scheduled action,
+  clear a secret or the bot token, unlink Telegram). Installing or pinning is
+  always a review card first.
+- **Plugin-written text.** An external plugin's manifest and descriptor
+  (names, descriptions, action docs, paths, environment values) come from
+  its repository; the review card renders all of it as text through `h()`,
+  like agent text. Dialogs focus
   their safe button, and dialogs holding a form close only through their
   buttons.
 
@@ -329,4 +401,11 @@ ceiling note), form vocabulary, a config renderer per manifest field type, a con
 panel per connection kind, a settings input per setting type, one loader per
 view and no placeholder left, the Telegram token field write-only (markup, no
 write-back, cleared before sending, status only compared), the shared-slot
-markers, every API path exists, and the manifest projection.
+markers, every API path exists, and the manifest projection. For + Add
+plugin: the header button and panels, the offered card, provenance and
+remove, the installer-off dialog (its fallbacks equal the broker's), inspect
+before install with only the reviewed commit sent, and the job panel's
+interval, restart statuses and stop states. Where node is installed, the
+whole script must parse (`node --check`), and the page's own review
+functions are run under node on the broker's real review data and must show
+every fact the owner approves.

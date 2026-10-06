@@ -44,6 +44,30 @@ App key). And `LOG_LEVEL` / `LOG_FORMAT` (`docs/logging.md`): process-level,
 read once at start by every service, including the plugin containers, which
 have no console.
 
+**3. The plugin installer (opt-in).** `aab-installer` installs external
+plugins from their own repositories (`docs/plugin-packaging.md`). It holds
+the Docker socket, so it is root on the host. Everything that bounds it is
+file-only: the console can ask it to inspect, install, upgrade or remove,
+but never to widen what it may do, because a hijacked console session would
+otherwise be one click from root on the host.
+
+| Key | Read by | Why it lives in a file |
+|---|---|---|
+| `INSTALLER_ENABLED` | `scripts/compose-files.sh` | Loads `docker-compose.installer.yml` at all. Off (`false`) by default: without it there is no installer container, no `net_installer`, and the console's + Add plugin only explains how to turn it on. |
+| `INSTALLER_ALLOWED_SOURCES` | the installer | Comma-separated repositories it may clone, e.g. `github.com/you/*` (`*` is exactly one path segment). Empty refuses every inspect and install (fail closed). The one thing that decides whose code can be built on this host. |
+| `INSTALLER_TOKEN` | the broker and the installer | Generated (`--rotate INSTALLER_TOKEN`); the `X-Installer-Token` the broker presents on `net_installer`, compared in constant time. An empty token refuses to boot. |
+| `INSTALLER_GIT_TOKEN` | the installer only | Optional read-only GitHub token for private plugin repositories (fine-grained with Contents: read-only on those repositories, or classic with `repo`). The one third-party credential in `.env`: the installer must clone before any plugin exists, and has no console of its own. Handed to git through `GIT_ASKPASS` for `github.com` only, never in a URL, never logged, never seen by the broker. |
+| `AAB_HOME` | compose and the installer | The checkout's absolute path on the host (`deploy/push.sh`'s `REMOTE_DIR`, default `/opt/aab`). The installer mounts it at the same path, so every relative path compose resolves inside it is the host's. |
+| `INSTALLER_URL` | the broker | Set by the installer overlay (`http://aab-installer:8070`), never by hand. Empty means the installer is off: the install routes answer 503 saying so. |
+
+The broker reads only `INSTALLER_URL` and `INSTALLER_TOKEN` (`Settings`;
+the boot line names the token as set or unset). What is installed lives in
+`plugins.d/` (owned by the installer, never synced by `deploy/push.sh`), the
+owner's approval of each installed manifest in the `plugin_pins` table, and
+each installed service's `PLUGIN_TOKEN_<SERVICE>` /
+`PLUGIN_SECRETS_KEY_<SERVICE>` in `.env`, added by the installer through
+`scripts/init_secrets.py` like every other generated secret.
+
 The console's Settings view lists every env-only key with its reason
 (`GET /v1/admin/settings` → `env_only`); secrets are shown as set/unset,
 never as values. A test fails if a new `Settings` field is neither
@@ -58,6 +82,7 @@ console-editable nor listed there.
 | GitHub App id and private key | Plugins > GitHub | Relayed once to `plugin-github`'s `/configure`, encrypted in its own volume. Never stored by the broker. |
 | Google OAuth client id and secret | Plugins > Google | Relayed once to `plugin-google`'s `/configure`, encrypted in its own volume. Never stored by the broker. |
 | Plugin enable/disable, non-secret plugin config | Plugins | `plugins` table |
+| Install, upgrade, remove an external plugin; approve (pin) an offered manifest | Plugins > + Add plugin, a card's Upgrade / Remove, Offered, awaiting review | The pin in `plugin_pins` (audited `plugin.pin`); the install itself in `plugins.d/` and `.env`, done by the installer within the bounds above |
 | Operator settings (below) | Settings | `app_config` as `setting:<name>` (JSON) |
 
 ### The Telegram token at runtime

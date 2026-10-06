@@ -13,8 +13,9 @@ decision rows that request produced carry the same id in `request_id`.
 
 | Service | Logger names | Lines |
 |---|---|---|
-| `broker` | `broker.*` | One access line per HTTP request (`broker.access`); one line per decision and per outcome (`broker.engine`); the owner's actions (login, tokens, keys, grants, approvals, plugin configuration, settings); agent refusals; action lifecycle (created, approved, delivered, deferred, failed, held); delegations; plugin discovery and health changes; Telegram; the scheduler; boot. |
+| `broker` | `broker.*` | One access line per HTTP request (`broker.access`); one line per decision and per outcome (`broker.engine`); the owner's actions (login, tokens, keys, grants, approvals, plugin configuration, settings); agent refusals; action lifecycle (created, approved, delivered, deferred, failed, held); delegations; plugin discovery and health changes; plugin pins and installs (package inspected, install / upgrade / remove requested or refused, installer unreachable or refusing, with source, ref, commit, service, plugin ids and job id); Telegram; the scheduler; boot. |
 | `plugin-whatsapp`, `plugin-github`, `plugin-google` | `aab_plugin_runtime.*`, `aab_plugin_<name>.*` | One access line per plugin API call (`aab_plugin_runtime.access`); one line per `/perform` (action, status, duration); configure (field names), connect, disconnect, the pairing QR served; secret-store writes (slot and field names); per plugin: each sidecar call (WhatsApp), each minted credential by scope (GitHub installation tokens, Google access tokens: cached or fresh), the target API's refusals by status class. |
+| `aab-installer` (installer overlay) | `aab_installer.*` | One access line per API call from the broker (`aab_installer.access`, actor `broker`); refused calls (bad or missing `X-Installer-Token`, with the path and whether the header was present); each package inspected (source, ref, commit, service, plugin ids); each job queued, done or failed (job id, kind, service, source, ref, duration, the exception class); the ready line (version, `AAB_HOME`, the allowed sources, `git_auth=askpass` or `anonymous`). The job's own log, shown in the console, is separate: see [The installer's job logs](#the-installers-job-logs). |
 | `whatsapp-sidecar` | Go `log` | One request line per API call (method, path, status, duration, request id); send results (message id only); QR events; connection state changes; whatsmeow's own lines. |
 | `edge` (public overlay) | Caddy | Caddy's own log, unchanged. |
 | `uvicorn` | `uvicorn`, `uvicorn.error` | Server start and stop, through the same handler and format. uvicorn's own access log is off: see [The access line](#the-access-line). |
@@ -34,7 +35,7 @@ Text (the default, `LOG_FORMAT=text`):
 ```
 
 `<UTC timestamp, ms>Z <LEVEL> <logger> [<service> <request id>] <message>`.
-The service is `broker` or `plugin-<service>`; the request id is `-` for
+The service is `broker`, `plugin-<service>` or `installer`; the request id is `-` for
 lines outside any request (boot, the scheduler's idle ticks).
 
 The message is a fixed text followed by `key=value` pairs (logfmt): a value is
@@ -125,7 +126,7 @@ notes, resource labels (ids are logged, names are not), cookie values,
 `Authorization` headers, passwords, the setup token, agent keys, admin
 tokens, plugin tokens, the sidecar token, the Telegram bot token or a link
 code, OAuth codes, client secrets, refresh or access tokens, installation
-tokens, private keys, Fernet keys. Where a value's name is useful it is
+tokens, private keys, Fernet keys, `INSTALLER_TOKEN`, `INSTALLER_GIT_TOKEN`. Where a value's name is useful it is
 logged by name (`secret_fields=client_secret`, `secrets_set=setup_token`),
 never with the value. Exception text is logged as the exception's class
 where it could quote input.
@@ -142,18 +143,43 @@ table `SECRET_PATTERNS` in `logging_setup.py`): anything shaped like an agent
 key (`aab_` + 48 hex), an admin token (`aab_admin_` + 48 hex), a
 `Bearer <token>`, a Telegram bot token, a Google access or refresh token or
 client secret, a GitHub token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`,
-`github_pat_`), a Fernet key, a PEM block, a session cookie, or the value
+`github_pat_`), a Fernet key, a PEM block, a session cookie, credentials
+inside a URL (`https://user:token@host`, `https://token@host`), or the value
 after a secret-bearing field name (`password=`, `client_secret=`,
-`X-Plugin-Token:`, ...) becomes `<redacted>`, in the message, the traceback
+`X-Plugin-Token:`, `X-Installer-Token:`, `installer_git_token=`,
+`installer_token=`, ...) becomes `<redacted>`, in the message, the traceback
 and the stack. It edits a copy of the record, so a test's capture still sees
 what the code logged. It is a backstop, not the mechanism: the 64-hex-digit
 secrets (plugin tokens, the sidecar token, the signing key) cannot be told
 apart from a SHA-256 by shape, so they are kept out by never being logged.
 
+The setup and the backstop are one module, `logging_setup.py` (with
+`request_log.py` for the access line), kept in **three byte-identical
+copies**: `broker/broker/`, `plugin-runtime/aab_plugin_runtime/` and
+`installer/aab_installer/`. The three packages must not depend on each
+other, and `broker/tests/test_logging_setup.py` fails if the copies differ,
+so a pattern added to one is added to all.
+
 Third-party loggers that would log request URLs with their query strings
 (`httpx`: a Gmail search, the bot token in the Telegram API path), protocol
 payloads (`mcp`: tool arguments) or form fields are held at WARNING whatever
 `LOG_LEVEL` says.
+
+## The installer's job logs
+
+An install, upgrade or remove is a job, and its log is for the owner: the
+console's job panel shows it, and it is kept in
+`plugins.d/_installer/jobs/<id>.json` (root-owned, 0700 directory) across
+restarts of the installer and the broker. It holds the steps, the commands
+run (their arguments carry no secret: the compose file list and service
+names), their exit codes and the last 15 non-empty lines of each command's
+output. Every line passes the same redaction backstop, then every run of 64
+hex digits (the shape of every plugin token, at the cost of image digests)
+becomes `<hex64>`, and every configured secret value (`INSTALLER_TOKEN`,
+`INSTALLER_GIT_TOKEN`, whatever its shape) becomes `<redacted>`. Lines are
+capped at 500 characters and a job at 300 lines (the first 20 and the last
+280 are kept). git's own output never reaches it: a failed clone reports
+the step and git's exit code only.
 
 ## Levels
 
