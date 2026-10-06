@@ -3,6 +3,7 @@ name = "agent-authority-broker"
 dynamic = ["version"]   # single source: ../VERSION, read by broker/__init__.py
 description = "Credential-holding authority broker for AI agents (REST + MCP)"
 requires-python = ">=3.12"
+classifiers = ["License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)"]
 dependencies = [
     "fastapi>=0.115,<1",
     "uvicorn>=0.30,<1",

@@ -429,3 +429,20 @@ Version 0.3.0, single owner.
   budget to a key.
 - A console change to the extra MCP hosts takes effect at the next broker
   start.
+
+## License
+
+Copyright (C) 2026 Peleg Wasserman.
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version. See [LICENSE](LICENSE) for the full text. The
+AGPL's network clause applies: if you run a modified version of the broker
+as a service, you must offer its source to the users of that service.
+
+The plugin runtime (`plugin-runtime/`) and the plugin base image are part of
+this program. A plugin that imports `aab_plugin_runtime` is a work based on
+it, so it must be distributed under the AGPL as well, unless you hold a
+different license from the author. A commercial license for uses the AGPL
+does not fit is available from the author.

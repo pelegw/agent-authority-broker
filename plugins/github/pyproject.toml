@@ -3,6 +3,7 @@ name = "aab-plugin-github"
 version = "0.2.0"
 description = "GitHub plugin service for the Agent Authority Broker (plugin-github container)"
 requires-python = ">=3.12"
+classifiers = ["License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)"]
 # aab-plugin-runtime is the repo's own package at ../../plugin-runtime; it is
 # not on PyPI. Install both in one command so pip resolves it from the path:
 #   pip install -e plugin-runtime -e "plugins/github[dev]"   (repo root)

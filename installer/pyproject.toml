@@ -3,6 +3,7 @@ name = "aab-installer"
 dynamic = ["version"]   # single source: ../VERSION, read by aab_installer/__init__.py
 description = "Installs external Agent Authority Broker plugins from their own repositories"
 requires-python = ">=3.12"
+classifiers = ["License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)"]
 dependencies = [
     "fastapi>=0.115,<1",
     "uvicorn>=0.30,<1",

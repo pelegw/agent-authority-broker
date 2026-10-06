@@ -5,7 +5,11 @@ lives only in `VERSION`.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+- `LICENSE`: the program is released under the GNU Affero General Public
+  License, version 3 or later (`AGPL-3.0-or-later`), with the license
+  classifier on every Python package and a License section in the README
+  that says how the license reaches plugins built on the runtime.
 
 ## [0.3.0] - 2026-10-06
 
