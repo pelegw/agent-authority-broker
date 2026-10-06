@@ -1,7 +1,7 @@
 """logging_setup: one stdout handler, the line format, LOG_LEVEL / LOG_FORMAT,
 uvicorn's loggers folded into the one handler, the context and redaction
-filters, and kv(). The two copies (broker and plugin runtime) must be
-byte-identical, and so must the two request_log.py copies."""
+filters, and kv(). The three copies (broker, plugin runtime, installer) must
+be byte-identical, and so must the three request_log.py copies."""
 
 import io
 import json
@@ -20,10 +20,12 @@ LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z) (\w+) (\S+) \
 
 
 @pytest.mark.parametrize("name", ["logging_setup.py", "request_log.py"])
-def test_the_broker_and_runtime_copies_are_identical(name):
+@pytest.mark.parametrize("copy", ["plugin-runtime/aab_plugin_runtime",
+                                  "installer/aab_installer"])
+def test_every_copy_is_identical_to_the_brokers(name, copy):
     broker = (REPO / "broker" / "broker" / name).read_bytes()
-    runtime = (REPO / "plugin-runtime" / "aab_plugin_runtime" / name).read_bytes()
-    assert broker == runtime, f"{name} differs: copy one over the other"
+    other = (REPO / copy / name).read_bytes()
+    assert broker == other, f"{copy}/{name} differs: copy the broker's over it"
 
 
 def test_both_copies_share_one_context_and_one_setup_per_process():

@@ -55,12 +55,20 @@ def has_value(env: Path, name: str) -> bool:
 
 
 def _write_private(path: Path, data: bytes) -> None:
-    """Atomic replace with mode 0600, like scripts/init_secrets.py."""
+    """Atomic replace with mode 0600, keeping the file's owner, like
+    scripts/init_secrets.py: the installer is root, and the host's .env must
+    stay readable by the user who deploys."""
+    st = os.stat(path)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".env.tmp-")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         os.chmod(tmp, 0o600)
+        if hasattr(os, "chown"):
+            try:
+                os.chown(tmp, st.st_uid, st.st_gid)
+            except PermissionError:
+                pass            # an unprivileged writer can only own the file itself
         os.replace(tmp, path)
     except BaseException:
         if os.path.exists(tmp):

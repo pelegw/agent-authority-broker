@@ -252,6 +252,26 @@ def test_rotate_appends_a_key_missing_from_an_older_file(out):
     assert parse(out)["DECISION_SIGNING_KEY"]
 
 
+def test_a_rewrite_keeps_the_files_owner(out, monkeypatch):
+    """aab-installer runs --rotate as root on the host's .env: the file must
+    stay its owner's, or the user who deploys can no longer read it."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("init_secrets_under_test", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, mod)     # dataclasses look the module up
+    spec.loader.exec_module(mod)
+    run("--out", out)
+    st = os.stat(out)
+    calls = []
+    monkeypatch.setattr(os, "chown", lambda path, uid, gid: calls.append((uid, gid)),
+                        raising=False)
+    mod._write_private(out, out.read_bytes())
+    assert calls == [(st.st_uid, st.st_gid)]
+    calls.clear()
+    mod._write_private(out.with_name("new.env"), b"X=1\n")      # a new file: nobody to keep
+    assert calls == []
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 def test_file_mode_is_0600(out):
     run("--out", out)

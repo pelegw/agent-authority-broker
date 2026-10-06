@@ -141,6 +141,20 @@ def test_purge_deletes_active_and_retired_lines_and_their_comments(project):
     assert envfile.purge(env, "finance") == []
 
 
+def test_rewrites_keep_the_files_owner(project, monkeypatch):
+    """The installer is root; the host's .env must stay the deploying user's."""
+    env = project / ".env"
+    envfile.ensure(project, "finance")
+    st = os.stat(env)
+    calls = []
+    monkeypatch.setattr(os, "chown", lambda path, uid, gid: calls.append((uid, gid)),
+                        raising=False)
+    envfile.retire(env, "finance")                       # one rewrite
+    envfile.ensure(project, "finance", runner=no_runner)  # one per restored name
+    envfile.purge(env, "finance")                        # one rewrite
+    assert calls == [(st.st_uid, st.st_gid)] * 4
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 def test_rewrites_keep_mode_0600(project):
     env = project / ".env"

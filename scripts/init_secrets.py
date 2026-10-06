@@ -287,14 +287,26 @@ def _write_private(path: Path, data: bytes) -> None:
     """Atomically write `data` with mode 0600 (best effort on Windows).
 
     The temp file is created 0600 by mkstemp, so the secret is never briefly
-    world-readable; os.replace then swaps it in over any existing file.
+    world-readable; os.replace then swaps it in over any existing file. An
+    existing file keeps its owner: aab-installer runs this as root on the
+    host's .env, which must stay readable by the user who deploys.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        st = os.stat(path)
+        owner = (st.st_uid, st.st_gid)
+    except FileNotFoundError:
+        owner = None
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".env.tmp-")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         os.chmod(tmp, 0o600)
+        if owner is not None and hasattr(os, "chown"):
+            try:
+                os.chown(tmp, *owner)
+            except PermissionError:
+                pass            # an unprivileged writer can only own the file itself
         os.replace(tmp, path)
     except BaseException:
         if os.path.exists(tmp):

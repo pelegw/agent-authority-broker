@@ -63,6 +63,14 @@ def test_named_fields_keep_their_names():
                    f"password: {REDACTED}")
 
 
+def test_every_service_token_header_is_a_secret_field():
+    # The broker presents X-Plugin-Token to plugins and X-Installer-Token to
+    # the installer; the sidecar takes X-Internal-Token.
+    for header in ("X-Plugin-Token", "X-Installer-Token", "X-Internal-Token"):
+        out = redact(f"{header}: s3cretvalue-1234")
+        assert out == f"{header}: {REDACTED}", out
+
+
 def test_bearer_keeps_the_scheme():
     assert redact("Bearer abcdefghijkl") == f"Bearer {REDACTED}"
 

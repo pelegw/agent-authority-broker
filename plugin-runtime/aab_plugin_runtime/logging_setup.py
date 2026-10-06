@@ -1,9 +1,10 @@
 """One logging setup for every Python service in the stack.
 
-Two byte-identical copies exist, `broker/broker/logging_setup.py` and
-`plugin-runtime/aab_plugin_runtime/logging_setup.py`: the broker and the
-plugin runtime are separate packages that must not depend on each other, and
-a test keeps the two files identical so their log lines can never drift.
+Three byte-identical copies exist, `broker/broker/logging_setup.py`,
+`plugin-runtime/aab_plugin_runtime/logging_setup.py` and
+`installer/aab_installer/logging_setup.py`: the broker, the plugin runtime
+and the installer are separate packages that must not depend on each other,
+and a test keeps the files identical so their log lines can never drift.
 
 Logs are the OPERATIONAL trail. The accountability trail stays where it was:
 the hash-chained decision record and the audit table. The two meet on the
@@ -194,8 +195,8 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern, str], ...] = (
     ("session_cookie", re.compile(r"(aab_session=)[^;\s]+"), r"\1" + REDACTED),
     # A header or field dump: the value after a secret-bearing name.
     ("secret_field", re.compile(
-        r"(?i)\b((?:x-plugin-token|x-internal-token|x-aab-origin|password|passwd|"
-        r"client_secret|refresh_token|access_token|id_token|setup_token|private_key_pem|"
+        r"(?i)\b((?:x-plugin-token|x-installer-token|x-internal-token|x-aab-origin|password|"
+        r"passwd|client_secret|refresh_token|access_token|id_token|setup_token|private_key_pem|"
         r"private_key|api_key|secret|pat)['\"]?\s*[:=]\s*['\"]?)[^\s'\",;}&]+"),
      r"\1" + REDACTED),
 )

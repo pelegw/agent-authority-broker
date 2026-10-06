@@ -1,0 +1,63 @@
+# Plugin installer overlay (opt-in). Loaded ON TOP of the other files when
+# .env says INSTALLER_ENABLED=true (scripts/compose-files.sh adds it then):
+#
+#   docker compose $(scripts/compose-files.sh) up -d
+#
+# aab-installer installs external plugins from their own git repositories
+# (installer/, docs/plugin-packaging.md). It holds the Docker socket, so it is
+# ROOT ON THIS HOST by implication; this file is the only place the socket is
+# mounted (a test enforces it). What bounds it:
+#   * net_installer holds the broker and the installer only: no plugin, no
+#     edge, nothing else can reach its API;
+#   * every call needs INSTALLER_TOKEN (X-Installer-Token, constant-time);
+#   * INSTALLER_ALLOWED_SOURCES is read from .env only (empty refuses every
+#     install), so a hijacked console session cannot widen it;
+#   * it renders each plugin's overlay from the plugin's descriptor through a
+#     fixed template and never loads compose YAML or scripts from a plugin
+#     repository; the reviewed commit is pinned.
+#
+# The checkout is mounted at the SAME path inside (AAB_HOME, default
+# /opt/aab), so compose run in here resolves every relative path in every
+# file to the host path the daemon mounts or builds from.
+
+# Every service logs to stdout; Docker keeps it in json-file logs, rotated so
+# they cannot fill the disk: at most 5 files of 10 MB per container
+# (docs/logging.md, including shipping to a collector with another driver).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  aab-installer:
+    build:
+      context: ./installer
+      # VERSION lives at the repo root (single source).
+      additional_contexts:
+        repo: .
+    restart: unless-stopped
+    logging: *logging
+    networks: [net_installer]      # the broker only; never a plugin, never the edge
+    # No ports: only the broker calls it.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${AAB_HOME:-/opt/aab}:${AAB_HOME:-/opt/aab}
+    environment:
+      INSTALLER_TOKEN: ${INSTALLER_TOKEN:?run 'python scripts/init_secrets.py --rotate INSTALLER_TOKEN'}
+      INSTALLER_ALLOWED_SOURCES: ${INSTALLER_ALLOWED_SOURCES:-}
+      AAB_HOME: ${AAB_HOME:-/opt/aab}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-text}
+
+  broker:
+    logging: *logging
+    networks: [net_installer]
+    environment:
+      INSTALLER_URL: http://aab-installer:8070
+      INSTALLER_TOKEN: ${INSTALLER_TOKEN:?run 'python scripts/init_secrets.py --rotate INSTALLER_TOKEN'}
+
+# Not internal: the installer clones allowlisted repositories over https.
+# (Image pulls and builds are the host daemon's, outside this network.)
+networks:
+  net_installer: {}
