@@ -7,9 +7,12 @@ inline handlers (agent-written text must never become markup), every API
 path it calls exists, every vocabulary word it must render (config field
 types, narrowing forms, connection kinds, roles, setting types) is covered,
 the key dialogs present the role as a ceiling (label, help line, default
-`full`, and an effective-mode table equal to roles.role_caps), and the
-Telegram bot token field is write-only. Plus the manifest projection the
-console's editors are generated from.
+`full`, and an effective-mode table equal to roles.role_caps), the
+Telegram bot token field is write-only, and the Plugins view's + Add plugin
+flow (installer off or on, the review card rendered from the broker's real
+review, a job panel that polls through the broker's restart, the offered
+card). Where node exists, the whole script must parse. Plus the manifest
+projection the console's editors are generated from.
 """
 
 import json
@@ -444,7 +447,13 @@ def test_every_api_path_in_the_page_exists(env, html):
                  "/v1/admin/telegram/enable", "/v1/admin/telegram/disable",
                  "/v1/admin/telegram/test", "/v1/admin/telegram/unlink",
                  "/v1/admin/settings", "/v1/admin/keys/tree",
-                 "/v1/admin/plugins/{x}/connect/finish", "/v1/admin/grants/{x}/revoke"):
+                 "/v1/admin/plugins/{x}/connect/finish", "/v1/admin/grants/{x}/revoke",
+                 # + Add plugin, the job panel, installed provenance, the offered card
+                 "/v1/admin/plugins/install/status", "/v1/admin/plugins/install/inspect",
+                 "/v1/admin/plugins/install", "/v1/admin/plugins/install/jobs/{x}",
+                 "/v1/admin/plugins/installed", "/v1/admin/plugins/{x}/upgrade",
+                 "/v1/admin/plugins/{x}/remove", "/v1/admin/plugins/offered",
+                 "/v1/admin/plugins/{x}/pin"):
         assert must in used, must
     missing = sorted(p for p in used if not any(_segments_match(p, s) for s in served))
     assert not missing, missing
@@ -514,3 +523,147 @@ def test_console_groups_plugins_by_shared_slot(html):
     script = _script(html)
     assert "function slotOf(p) { return (p && p.connection && p.connection.shared) || null; }" in script
     assert "schema.filter((f) => f.shared)" in script and "schema.filter((f) => !f.shared)" in script
+
+
+# ---- external plugins: + Add plugin, the job panel, the offered card -----------------
+
+def _section(html: str, view: str) -> str:
+    return re.search(rf'<section class="view" data-view="{view}".*?</section>', html, re.S).group(0)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to parse the page's JS")
+def test_the_script_parses(html, tmp_path):
+    js = tmp_path / "console.js"
+    js.write_text(_script(html), encoding="utf-8")
+    r = subprocess.run(["node", "--check", str(js)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+
+
+def test_plugins_view_has_add_plugin_in_its_header_and_the_new_panels(html):
+    sec = _section(html, "plugins")
+    assert ('<div class="viewhead"><h2>Plugins</h2><button class="primary" type="button" '
+            'id="addPluginBtn">+ Add plugin</button></div>') in sec
+    for panel in ("pluginJob", "pluginList", "pluginInstalled", "pluginOffered"):
+        assert f'<div id="{panel}"></div>' in sec, panel
+    script = _script(html)
+    assert '$("addPluginBtn").onclick = () => openAddPlugin({});' in script
+
+
+def test_the_refused_card_became_offered_awaiting_review(html):
+    script = _script(html)
+    assert "Refused plugins" not in html and "pluginRefused" not in html
+    assert 'h("h3", null, "Offered, awaiting review")' in script
+    # A pin button only where a pin would fix it; the reason otherwise.
+    assert 'if (it.pinnable) {' in script and '"Review and pin"' in script
+    assert "const why = it.pinnable ? it.reason : (it.blocked || it.error || it.reason);" in script
+
+
+def test_installed_plugins_show_where_they_came_from_with_upgrade_and_remove(html):
+    script = _script(html)
+    assert 'h("div", { class: "installedfrom" }, "installed from ",' in script
+    assert 'h("span", { class: "mono" }, `${r.source}@${r.ref}`)' in script
+    assert ('up.onclick = () => openAddPlugin({ service: r.service, source: r.source, '
+            'ref: r.ref });') in script
+    assert "rm.onclick = () => openRemovePlugin(r);" in script
+    # Remove asks, and keeps the data unless the owner ticks purge.
+    assert "body: { purge: purge.checked }" in script
+
+
+def test_installer_off_explains_the_env_lines_and_the_command(html):
+    """When the installer is off, the dialog shows the .env lines and the
+    command instead of Inspect; its fallbacks match the broker's."""
+    from broker.services import plugin_install
+    script = _script(html)
+    assert "if (!st || !st.configured) { openInstallerOff(st); return; }" in script
+    assert f'"{plugin_install.MANUAL_COMMAND}"' in script
+    assert '"INSTALLER_ENABLED=true"' in script and plugin_install.ENABLE_LINES[0] == (
+        "INSTALLER_ENABLED=true")
+    assert "docker login ghcr.io" in script
+
+
+def test_install_goes_through_inspect_and_sends_only_the_reviewed_commit(html):
+    script = _script(html)
+    assert 'api("/v1/admin/plugins/install/inspect", { method: "POST", body: { source, ref } })' \
+        in script
+    assert "const body = { source: r.source, ref: r.ref, commit: r.commit };" in script
+    # Problems (invalid or blocked manifests) leave no Install button.
+    assert "m.setButtons(problems.length ? [back] : [back, go]);" in script
+
+
+def test_the_job_panel_polls_every_two_seconds_through_the_brokers_restart(html):
+    script = _script(html)
+    assert "const JOB_POLL_MS = 2000;" in script
+    # No connection, or the edge saying nothing answers: keep polling.
+    assert "const RESTART_STATUSES = [0, 502, 503, 504];" in script
+    assert "if (!RESTART_STATUSES.includes(e.status)) {" in script
+    assert "run.restarting = true;" in script and "The broker is being recreated" in script
+    assert 'if (st === "done" || st === "failed") run.stopped = true;' in script
+    assert "const log = listOf(j.log);" in script and 'h("pre", { class: "joblog" }' in script
+    assert script.count("setTimeout(() => pollJob(run), JOB_POLL_MS)") == 3
+    # Signing out stops it.
+    show_gate = re.search(r"function showGate\(which, msg\) \{(.*?)\n\}", script, re.S).group(1)
+    assert "stopJob();" in show_gate
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run the page's JS")
+def test_the_review_card_renders_the_brokers_review(html, tmp_path):
+    """Run the page's own review functions under node, with a minimal DOM,
+    on what the broker really returns (pins.summary / pins.diff of the echo
+    manifest and an upgrade of it): no exception, and the facts an owner
+    approves are all on the card."""
+    import yaml
+
+    from broker.plugins import pins
+    from broker.plugins.manifest import load_manifest_text
+
+    old = load_manifest(ECHO_DIR / "manifest.yaml")
+    data = yaml.safe_load((ECHO_DIR / "manifest.yaml").read_text(encoding="utf-8"))
+    data["version"] = "0.2.0"
+    data["actions"].append({"name": "purge_room", "side_effect": "destructive"})
+    data["config_schema"].append({"name": "webhook_key", "type": "string", "secret": True})
+    new = load_manifest_text(yaml.safe_dump(data, sort_keys=False))
+    desc = {"service": "echo", "plugins": ["echo"], "runtime": "0.3",
+            "build": {"dockerfile": "Dockerfile"}, "volumes": {"echo_data": "/data"},
+            "environment": {"ECHO_DB": "/data/echo.db"}, "env_passthrough": ["TZ"]}
+    review = {"source": "github.com/acme/aab-plugin-echo", "ref": "v0.2.0", "commit": "b" * 40,
+              "service": "echo", "descriptor": desc, "upgrade": True,
+              "installed": {"ref": "v0.1.0", "commit": "a" * 40},
+              "plugins": [{"id": "echo", "version": "0.2.0", "valid": True, "error": None,
+                           "summary": pins.summary(new), "diff": pins.diff(old, new),
+                           "pinned": {"version": "0.1.0"}, "blocked": None},
+                          {"id": "evil", "version": "1.0.0", "valid": False,
+                           "error": "actions: too short", "summary": None, "diff": None,
+                           "pinned": None, "blocked": None}],
+              "problems": ["evil: actions: too short"]}
+    script = _script(html)
+    names = ("showControls", "isSafeUrl", "badge", "fact", "idChips", "listOf", "shortCommit",
+             "objectOr", "objectsOf", "chipsOr", "reviewPlugin", "changeList", "diffView",
+             "packageReview", "inspectReview", "h")
+    parts = [re.search(r"const BIDI_CONTROLS = [^\n]*\n", script).group(0),
+             re.search(r"const hasOwn = [^\n]*\n", script).group(0)]
+    parts += [re.search(rf"^function {n}\(.*?^\}}\n", script, re.S | re.M).group(0)
+              for n in names]
+    dom = """
+class Node { constructor() { this.children = []; } append(...k) { this.children.push(...k); }
+  get childElementCount() { return this.children.filter((c) => c instanceof El).length; } }
+class Text extends Node { constructor(t) { super(); this.text = t; } }
+class El extends Node { constructor(tag) { super(); this.tag = tag; this.attrs = {}; }
+  setAttribute(k, v) { this.attrs[k] = v; } set textContent(t) { this.children = [new Text(t)]; } }
+const document = { createElement: (t) => new El(t), createTextNode: (t) => new Text(t) };
+const location = { href: "http://console.invalid/", origin: "http://console.invalid" };
+const text = (n) => (n instanceof Text ? n.text : n.children.map(text).join(" "));
+"""
+    js = tmp_path / "review.js"
+    js.write_text(dom + "\n".join(parts) + f"\nconst r = {json.dumps(review)};\n"
+                  "console.log(text(inspectReview(r, r.problems)));\n", encoding="utf-8")
+    out = subprocess.run(["node", str(js)], capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    card = " ".join(out.stdout.split())
+    for want in ("github.com/acme/aab-plugin-echo@v0.2.0", "b" * 40, "plugin-echo", "net_echo",
+                 "an upgrade of echo from v0.1.0", "Cannot go ahead: evil: actions: too short",
+                 "post_item write modes: direct, draft", "delete_item destructive",
+                 "api_secret secret", "What changes from the pinned v0.1.0 to v0.2.0",
+                 "added purge_room", "New secrets webhook_key", "echo_secrets at /secrets",
+                 "echo_data at /data", "ECHO_DB=/data/echo.db", "From the host's .env TZ",
+                 "invalid actions: too short"):
+        assert want in card, want
