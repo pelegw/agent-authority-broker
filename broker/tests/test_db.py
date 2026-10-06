@@ -14,7 +14,7 @@ from broker.config import get_settings
 EXPECTED_TABLES = {
     "principals", "sessions", "admin_tokens", "api_keys", "grants", "plugins",
     "plugin_secrets", "hidden_resources", "actions", "decisions",
-    "capacity_ledger", "ledger_grants", "audit_log", "app_config",
+    "capacity_ledger", "ledger_grants", "audit_log", "app_config", "plugin_pins",
 }
 
 

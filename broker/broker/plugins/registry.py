@@ -2,12 +2,18 @@
 
 Discovery: every plugin service configured in env (PLUGIN_URL_<SERVICE> +
 PLUGIN_TOKEN_<SERVICE>, see config.plugin_services) is asked for
-`GET /manifests`. Each returned manifest is **pinned** against the vendored
-copy at `broker/broker/targets/<id>/manifest.yaml`: id and version must
-match, and the vendored copy (not the plugin's) is what the broker uses from
-then on, so a plugin cannot widen its declared lattice at runtime. A plugin
-that fails the pin is refused and audited. Tests register the in-process
-`echo` plugin through `register_in_process`, which applies the same pin.
+`GET /manifests`. Each returned manifest is **pinned** against an
+owner-approved copy: the vendored file at `broker/broker/targets/<id>/
+manifest.yaml` for an in-tree plugin, else the owner's pin in the
+`plugin_pins` table (plugins/pins.py) for an external one. In-tree always
+wins, so no database row can shadow a plugin shipped with the broker. Id and
+version must match, and the approved copy (not the plugin's) is what the
+broker uses from then on, so a plugin cannot widen its declared lattice at
+runtime. A plugin that fails the pin is refused and audited, and its offer is
+kept in `offered` so the console can show it for review; pinning it (an owner
+action, services/plugins_admin.py) then calls `repin()`, which registers it
+without waiting for a rediscovery. Tests register the in-process `echo`
+plugin through `register_in_process`, which applies the same pin.
 
 State: enabled/config/connected live in the `plugins` table (a row is
 created, disabled, on first sight). The registry holds only the process-local
@@ -28,7 +34,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .. import db
 from ..audit import audit
@@ -36,6 +42,7 @@ from ..authority.grant import Lattice
 from ..config import plugin_services
 from ..logging_setup import kv
 from ..runtime_settings import runtime_settings
+from . import pins
 from .adapter import Adapter, AdapterError, ClientFactory, InProcessAdapter, RemoteAdapter, request
 from .manifest import ID_RE, Manifest, ManifestError, load_manifest
 
@@ -63,6 +70,15 @@ class Registry:
         self._vendored_dirs = tuple(Path(d) for d in vendored_dirs)
         self._entries: dict[str, Entry] = {}
         self.refused: dict[str, str] = {}
+        # Every refused offer, for the owner to review: {plugin id: {"manifest":
+        # what the service offered (raw, unvalidated), "service", "reason"}}.
+        self.offered: dict[str, dict] = {}
+        # How to build an adapter for a refused offer once it is pinned
+        # (repin). Private: a remote one closes over the service token.
+        self._retry: dict[str, Callable[[Manifest], Adapter]] = {}
+        # The raw manifest each registered plugin offered, so withdraw() can
+        # put it back up for review.
+        self._raw_offers: dict[str, Any] = {}
         self._pending: dict[str, tuple[str, str]] = {}
         self._next_discovery = 0.0
         self._factory: ClientFactory | None = None
@@ -72,14 +88,33 @@ class Registry:
     # ---- registration ------------------------------------------------------
 
     def vendored(self, plugin_id: str) -> Manifest | None:
-        """The pinned manifest for `plugin_id`, or None if none is vendored."""
+        """The approved manifest for `plugin_id`: the in-tree file, else the
+        owner's database pin, else None. Raises ManifestError when the copy
+        found is invalid."""
         if not isinstance(plugin_id, str) or not ID_RE.match(plugin_id):
             return None                       # never build a path from junk
+        in_tree = self.in_tree(plugin_id)
+        if in_tree is not None:
+            return in_tree
+        return pins.get(plugin_id)
+
+    def in_tree(self, plugin_id: str) -> Manifest | None:
+        """The vendored file's manifest, or None. Plugins shipped with the
+        broker are pinned by the tree alone; a database pin never applies."""
+        if not isinstance(plugin_id, str) or not ID_RE.match(plugin_id):
+            return None
         for d in self._vendored_dirs:
             path = d / plugin_id / "manifest.yaml"
             if path.is_file():
                 return load_manifest(path)
         return None
+
+    def _safe_vendored(self, plugin_id: str) -> Manifest | None:
+        try:
+            return self.vendored(plugin_id)
+        except ManifestError as exc:
+            log.error("vendored manifest is invalid %s", kv(plugin=plugin_id, error=str(exc)))
+            return None
 
     def _pin(self, offered: Any, vendored: Manifest | None, service: str) -> Manifest | None:
         """Validate an offered manifest against its vendored copy; audit refusals."""
@@ -97,11 +132,14 @@ class Registry:
             reason = f"plugin id already served by {self._entries[pid].service!r}"
         if reason:
             self.refused[label] = reason
+            self.offered[label] = {"manifest": offered, "service": service, "reason": reason}
             log.warning("plugin refused %s", kv(plugin=label, service=service, reason=reason))
             audit("system", "plugin.refused", label, {"service": service, "reason": reason},
                   result="denied")
             return None
         self.refused.pop(label, None)
+        self.offered.pop(label, None)
+        self._retry.pop(label, None)
         return vendored
 
     def register(self, adapter: Adapter, offered: dict | Manifest,
@@ -116,10 +154,13 @@ class Registry:
                 vendored = self.vendored(pid)
             pinned = self._pin(offered, vendored, adapter.service)
             if pinned is None:
+                if isinstance(pid, str) and ID_RE.match(pid):
+                    self._retry[pid] = lambda _m, a=adapter: a
                 return False
             adapter.manifest = pinned
             known = pinned.id in self._entries
             self._entries[pinned.id] = Entry(pinned, adapter, adapter.service)
+            self._raw_offers[pinned.id] = offered
             ensure_row(pinned.id)
             if not known:
                 log.info("plugin registered %s", kv(plugin=pinned.id, service=adapter.service,
@@ -136,6 +177,46 @@ class Registry:
         with self._lock:
             self._entries.pop(plugin_id, None)
 
+    def offers(self) -> dict[str, dict]:
+        """A snapshot of the refused offers awaiting review."""
+        with self._lock:
+            return {pid: dict(o) for pid, o in self.offered.items()}
+
+    def repin(self, plugin_id: str) -> bool:
+        """Re-run the pin for a refused offer now (after the owner pinned
+        it), instead of waiting for the next discovery. Returns whether the
+        plugin is registered. Uses the manifest the service offered at
+        discovery; whatever it offers, the approved copy is what is used."""
+        with self._lock:
+            offer = self.offered.get(plugin_id)
+            make = self._retry.get(plugin_id)
+            if offer is None or make is None:
+                return False
+            vendored = self._safe_vendored(plugin_id)
+            if vendored is None:
+                self._pin(offer["manifest"], None, offer["service"])    # still refused
+                return False
+            return self.register(make(vendored), offer["manifest"], vendored)
+
+    def withdraw(self, plugin_id: str, reason: str) -> bool:
+        """Stop serving a registered plugin whose approval was removed (an
+        unpin), and put its offer back up for review. Returns whether it was
+        registered. Agents get 404 for it from the next call on."""
+        with self._lock:
+            entry = self._entries.pop(plugin_id, None)
+            if entry is None:
+                return False
+            offered = self._raw_offers.pop(plugin_id, None)
+            if offered is None:
+                offered = entry.manifest.model_dump(mode="json")
+            self.refused[plugin_id] = reason
+            self.offered[plugin_id] = {"manifest": offered, "service": entry.service,
+                                       "reason": reason}
+            self._retry[plugin_id] = lambda _m, a=entry.adapter: a
+            log.warning("plugin withdrawn %s", kv(plugin=plugin_id, service=entry.service,
+                                                  reason=reason))
+            return True
+
     # ---- discovery -------------------------------------------------------------
 
     def discover(self, services: dict[str, tuple[str, str]] | None = None,
@@ -146,6 +227,10 @@ class Registry:
                 self._factory = client_factory
             todo = plugin_services() if services is None else services
             self._pending = {}
+            # Offers are re-recorded below from what each service offers now.
+            for pid in [p for p, o in self.offered.items() if o["service"] in todo]:
+                self.offered.pop(pid, None)
+                self._retry.pop(pid, None)
             for service, (url, token) in todo.items():
                 self._discover_one(service, url, token)
             self._next_discovery = time.monotonic() + _REDISCOVER_SECONDS
@@ -173,13 +258,13 @@ class Registry:
             service=service, plugins=[m.get("id") for m in offered if isinstance(m, dict)]))
         for m in offered:
             pid = m.get("id") if isinstance(m, dict) else None
-            try:
-                vendored = self.vendored(pid) if isinstance(pid, str) else None
-            except ManifestError as exc:
-                log.error("vendored manifest is invalid %s", kv(plugin=pid, error=str(exc)))
-                vendored = None
+            vendored = self._safe_vendored(pid) if isinstance(pid, str) else None
             if vendored is None:
                 self._pin(m, None, service)
+                if isinstance(pid, str) and ID_RE.match(pid):
+                    # Once the owner pins it, repin() builds the adapter here.
+                    self._retry[pid] = lambda pinned, s=service, u=url, t=token: RemoteAdapter(
+                        s, u, t, pinned, live_plugin_timeout, self._factory)
                 continue
             adapter = RemoteAdapter(service, url, token, vendored, live_plugin_timeout,
                                     self._factory)
@@ -274,9 +359,18 @@ class Registry:
             self._anc_cache[key] = (now + ttl, chain)
         return chain
 
-    def clear_cache(self) -> None:
+    def clear_ancestry_cache(self) -> None:
+        """Forget cached parent chains (after the owner hides a resource)."""
         with self._lock:
             self._anc_cache.clear()
+
+    def clear_cache(self) -> None:
+        """Forget everything process-local a discovery rebuilds: the ancestry
+        cache and the refused offers awaiting review."""
+        with self._lock:
+            self._anc_cache.clear()
+            self.offered.clear()
+            self._retry.clear()
 
 
 # ---- the plugins table ----------------------------------------------------------
