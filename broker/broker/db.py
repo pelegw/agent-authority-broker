@@ -18,6 +18,12 @@ it: on a new file the switch needs exclusive access, and when two
 connections attempt it at once SQLite fails one of them immediately
 ("database is locked", skipping the busy wait to avoid a deadlock). A
 per-connect pragma turned any two first connections into that race.
+
+While the broker runs it also holds one idle connection (hold_open()), so
+broker.db-wal and broker.db-shm exist for as long as it runs. A reader on a
+read-only mount (the audit exporter, docs/logging.md) cannot create those
+files, and SQLite deletes them whenever the last connection closes, which with
+per-operation handles happens often, at moments nobody controls.
 """
 
 import contextlib
@@ -336,6 +342,28 @@ def init() -> str:
         conn.executescript(SCHEMA)
         _migrate(conn)
     return mode
+
+
+def hold_open() -> sqlite3.Connection:
+    """An idle connection the broker keeps for its whole lifetime (main.py's
+    lifespan opens it after init() and closes it on shutdown).
+
+    In WAL mode SQLite deletes broker.db-wal and -shm when the LAST connection
+    closes. The audit exporter mounts broker_data read-only, so it can read a
+    WAL database only while those two files exist; it can never create them.
+    One open connection that has read once keeps a shared lock on the file,
+    which stops every other close from deleting them. It holds no transaction:
+    the read below runs to completion, so checkpoints are never blocked and
+    the WAL does not grow because of it.
+    """
+    conn = sqlite3.connect(get_settings().broker_db, timeout=BUSY_TIMEOUT_SECONDS,
+                           check_same_thread=False)
+    try:
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchall()
+    except BaseException:
+        conn.close()
+        raise
+    return conn
 
 
 # ---- runtime key/value config (app_config) --------------------------------

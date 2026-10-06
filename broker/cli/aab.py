@@ -31,6 +31,10 @@ Examples:
   aab hidden rm <target> <kind> <id>
   aab decisions list [--key 3 --target t --decision deny --limit 50] | verify
   aab simulate [--hours 8] [--seed 7] [--json]   # approval-volume simulation, local only
+  aab audit export --state cursor.json [--db broker.db] [--hash-resources] [--loop] [--reset]
+      (local, read-only: prints new decisions and audit_log rows as JSON lines;
+       env AUDIT_EXPORT_STATE, BROKER_DB, AUDIT_EXPORT_HASH_RESOURCES,
+       AUDIT_EXPORT_INTERVAL give the defaults; docs/logging.md)
 
 Passwords and plugin secrets are only ever read with getpass, never from
 arguments (which end up in shell history and process listings).
@@ -116,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("password", help="change the owner password")
     _skill_commands(sub)
     _engine_commands(sub)
+    _audit_commands(sub)
 
     sm = sub.add_parser("simulate", help="approval-volume simulation (local; needs a "
                                          "source checkout)")
@@ -262,22 +267,26 @@ def _engine_request(c: httpx.Client, args) -> httpx.Response | None:
     return None
 
 
-def _log_to_stderr() -> None:
-    """The CLI's stdout is its output (JSON, the skill doc). `simulate` and
-    `skill` run broker code in this process, so logging is set up here
-    first: to stderr, at WARNING unless LOG_LEVEL says otherwise. The app's
-    own configure() at import is then a no-op (one process, one setup)."""
+def _log_to_stderr(service: str = "aab-cli") -> None:
+    """The CLI's stdout is its output (JSON, the skill doc, audit rows).
+    `simulate`, `skill` and `audit` run broker code in this process, so
+    logging is set up here first: to stderr, at WARNING unless LOG_LEVEL says
+    otherwise. The app's own configure() at import is then a no-op (one
+    process, one setup)."""
     from broker import logging_setup
     env = dict(os.environ)
     env.setdefault("LOG_LEVEL", "WARNING")
-    logging_setup.configure("aab-cli", env, stream="stderr")
+    logging_setup.configure(service, env, stream="stderr")
 
 
 def main(argv: list[str] | None = None) -> int:
-    _log_to_stderr()
     args = build_parser().parse_args(argv)
+    # The audit exporter runs as its own service, and its lines say so.
+    _log_to_stderr("audit-exporter" if args.cmd == "audit" else "aab-cli")
     if args.cmd == "skill":
         return _skill(args)
+    if args.cmd == "audit":
+        return _audit(args)
 
     if args.cmd == "setup":
         if not args.setup_token:
@@ -398,6 +407,89 @@ def _skill(args) -> int:
     with out.open("w", encoding="utf-8", newline="\n") as f:
         f.write(text)
     print(f"wrote {out} ({len(text.encode('utf-8'))} bytes)")
+    return 0
+
+
+# ---- aab audit export: the audit record as JSON lines, offline ---------------------
+
+AUDIT_INTERVAL_DEFAULT = 3600
+_TRUE = ("true", "1", "yes", "on")
+_FALSE = ("", "false", "0", "no", "off")
+
+
+def _audit_commands(sub) -> None:
+    au = sub.add_parser("audit", help="the audit record, for a log shipper").add_subparsers(
+        dest="sub", required=True)
+    ex = au.add_parser("export", help="print new decisions and audit_log rows as JSON lines "
+                                      "(reads broker.db read-only; no broker or token needed)")
+    ex.add_argument("--db", default=None, help="broker.db (default: BROKER_DB)")
+    ex.add_argument("--state", default=os.environ.get("AUDIT_EXPORT_STATE"),
+                    help="the cursor file (default: AUDIT_EXPORT_STATE)")
+    ex.add_argument("--hash-resources", action="store_true", default=None,
+                    help="replace resource ids with sha256:<16 hex> (default: "
+                         "AUDIT_EXPORT_HASH_RESOURCES)")
+    ex.add_argument("--loop", action="store_true",
+                    help="run again every --interval seconds until stopped")
+    ex.add_argument("--interval", type=int, default=None,
+                    help="seconds between runs with --loop (default: AUDIT_EXPORT_INTERVAL, "
+                         f"else {AUDIT_INTERVAL_DEFAULT})")
+    ex.add_argument("--reset", action="store_true",
+                    help="ignore the cursor and export everything again (first run only)")
+
+
+def _env_flag(name: str) -> bool | None:
+    """True / False for the usual spellings, None for anything else."""
+    raw = os.environ.get(name, "").strip().lower()
+    if raw in _FALSE:
+        return False
+    if raw in _TRUE:
+        return True
+    return None
+
+
+def _audit(args) -> int:
+    """Read broker.db directly (read-only), never the API: the exporter runs
+    beside the broker with the volume mounted read-only, and needs neither
+    a token nor a network. Rows go to stdout, its own lines to stderr."""
+    import signal
+    import threading
+
+    from broker import audit_export
+    from broker.config import get_settings
+
+    if not args.state:
+        print("set AUDIT_EXPORT_STATE or pass --state (the cursor file)", file=sys.stderr)
+        return 2
+    hash_resources = args.hash_resources
+    if hash_resources is None:
+        hash_resources = _env_flag("AUDIT_EXPORT_HASH_RESOURCES")
+        if hash_resources is None:
+            # A privacy switch with a value nobody can read: refuse to run
+            # rather than guess "off" and ship identifiers in the clear.
+            print("AUDIT_EXPORT_HASH_RESOURCES must be true or false", file=sys.stderr)
+            return 2
+    db_path = args.db or get_settings().broker_db
+
+    def run(first: bool) -> bool:
+        return audit_export.run_once(db_path, args.state, sys.stdout,
+                                     hash_resources=hash_resources,
+                                     reset=args.reset and first)
+
+    if not args.loop:
+        return 0 if run(True) else 1
+    interval = args.interval
+    if interval is None:
+        raw = os.environ.get("AUDIT_EXPORT_INTERVAL", "").strip()
+        interval = int(raw) if raw.isdigit() else AUDIT_INTERVAL_DEFAULT if not raw else None
+    if interval is None or interval < 1:
+        print("the interval must be a whole number of seconds, 1 or more", file=sys.stderr)
+        return 2
+    stop = threading.Event()
+    # docker stop sends SIGTERM to PID 1, which has no default handler: without
+    # this the container would wait out the stop timeout and be killed.
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: stop.set())
+    audit_export.run_loop(run, interval, stop)
     return 0
 
 

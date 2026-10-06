@@ -3,6 +3,8 @@ additive migration mechanism works, and WAL is switched on once, by init(),
 so concurrent first connections never race each other into a lock error."""
 
 import contextlib
+import gc
+import os
 import sqlite3
 import threading
 
@@ -170,3 +172,52 @@ def test_the_wal_switch_does_not_retry_other_errors():
     with pytest.raises(sqlite3.OperationalError):
         db._enable_wal(conn)
     assert conn.calls == 1
+
+
+# ---- the keeper connection (db.hold_open) -------------------------------------------------
+
+def _wal_files() -> tuple[bool, bool]:
+    path = get_settings().broker_db
+    return os.path.exists(path + "-wal"), os.path.exists(path + "-shm")
+
+
+def _write(value: str) -> None:
+    with contextlib.closing(db.connect()) as conn, conn:
+        conn.execute("INSERT INTO app_config (key, value) VALUES ('k', ?) "
+                     "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (value,))
+
+
+def test_without_a_keeper_sqlite_removes_the_wal_files(env):
+    """The problem hold_open() solves: the last close deletes -wal and -shm,
+    and a reader on a read-only mount cannot create them again."""
+    _write("1")
+    assert _wal_files() == (False, False)
+
+
+def test_the_keeper_keeps_the_wal_files_while_it_is_open(env):
+    keeper = db.hold_open()
+    try:
+        _write("1")
+        _write("2")
+        assert _wal_files() == (True, True)
+        # It holds no transaction: other writers commit, readers see them.
+        assert db.get_config("k") == "2"
+    finally:
+        keeper.close()
+    # A `with db.connect()` handle closes when it is collected, not at the end
+    # of its block; collect first, so the keeper is the last one open.
+    gc.collect()
+    assert _wal_files() == (False, False)
+
+
+def test_the_broker_holds_the_keeper_for_its_lifetime(env):
+    from fastapi.testclient import TestClient
+
+    from broker.main import app
+    with TestClient(app) as c:
+        assert c.get("/v1/health").status_code == 200
+        _write("1")
+        gc.collect()                                 # only the keeper is left open
+        assert _wal_files() == (True, True)
+    gc.collect()
+    assert _wal_files() == (False, False)           # closed on shutdown
