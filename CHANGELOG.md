@@ -11,6 +11,13 @@ lives only in `VERSION`.
   classifier on every Python package and a License section in the README
   that says how the license reaches plugins built on the runtime.
 
+### Changed
+- Every document under `docs/` is rewritten in simplified technical English
+  (short active sentences, one instruction each, a fixed vocabulary, lists
+  instead of long enumerations), with every heading, table, code block,
+  recorded output and link kept. The README is rewritten in plain technical
+  prose. `docs/plugins-guide.md` set the voice.
+
 ## [0.3.0] - 2026-10-06
 
 ### Added

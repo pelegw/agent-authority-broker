@@ -30,3 +30,6 @@ sidecars/whatsapp/sidecar
 # Public-exposure secrets: ignore everything under edge/certs except its README.
 edge/certs/*
 !edge/certs/README.md
+
+# Agent worktrees (Claude Code isolation); never part of the repository.
+.claude/worktrees/
