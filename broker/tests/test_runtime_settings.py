@@ -260,3 +260,17 @@ def test_discovered_plugins_read_the_live_timeout(env, echo_impl, tmp_path, vend
     from tests.conftest import register_remote
     register_remote(echo_impl, tmp_path)
     assert registry.get_registry().adapter("echo")._timeout is registry.live_plugin_timeout
+
+
+def test_the_new_relic_keys_are_listed_as_file_only_and_never_shown(env, monkeypatch):
+    """The console names where log shipping is configured (the files) and
+    why, and never shows the license key, even when the process has one."""
+    monkeypatch.setenv("NEW_RELIC_LICENSE_KEY", "fake-license-not-for-display")
+    get_settings.cache_clear()
+    [row] = [e for e in rs.describe()["env_only"] if "NEW_RELIC_LICENSE_KEY" in e["name"]]
+    for name in ("NEWRELIC_ENABLED", "NEW_RELIC_REGION", "AUDIT_EXPORT_INTERVAL",
+                 "AUDIT_EXPORT_HASH_RESOURCES"):
+        assert name in row["name"]
+    assert row["category"] == "ops" and "by exception" in row["why"]
+    assert "value" not in row and "set" not in row
+    assert "fake-license-not-for-display" not in json.dumps(rs.describe())

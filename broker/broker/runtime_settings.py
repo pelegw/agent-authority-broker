@@ -232,6 +232,14 @@ ENV_ONLY: tuple[dict, ...] = (
             "into which checkout), so a hijacked console session must not be able to "
             "widen them. (The GitHub token for private repositories is a console setting "
             "under Plugins, + Add plugin: a credential, not a bound.)"},
+    {"name": "NEWRELIC_ENABLED, NEW_RELIC_REGION, NEW_RELIC_LICENSE_KEY, "
+             "AUDIT_EXPORT_INTERVAL, AUDIT_EXPORT_HASH_RESOURCES",
+     "field": None, "secret": True, "category": "ops",
+     "why": "Read by compose, the log shipper and the audit exporter, not by the broker. "
+            "They decide whether logs and the audit record leave this server and where "
+            "they go, so a hijacked console session must not be able to turn shipping on "
+            "or point it elsewhere. The license key is a third-party credential kept in "
+            "the file by exception: Fluent Bit reads it at start. See docs/logging.md."},
     {"name": "BROKER_PORT, TZ, DEVICE_NAME, GITHUB_APP_KEY_DIR", "field": None,
      "secret": False, "category": "compose",
      "why": "Read by Docker Compose, the edge or other containers, not by the broker."},

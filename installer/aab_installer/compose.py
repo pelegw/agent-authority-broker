@@ -3,8 +3,10 @@
 The compose file set is never hand-listed here: `scripts/compose-files.sh`
 prints it (docker-compose.yml, the public overlay when SITE_DOMAIN is set,
 the installer overlay when INSTALLER_ENABLED=true, then every
-plugins.d/<service>/compose.yml), and deploy/push.sh and the docs use the same
-script, so the host and the installer always agree on what the stack is.
+plugins.d/<service>/compose.yml, and with NEWRELIC_ENABLED=true the New Relic
+overlay and its logging overrides in ops/newrelic/ and
+plugins.d/<service>/newrelic.yml), and deploy/push.sh and the docs use the
+same script, so the host and the installer always agree on what the stack is.
 
 Commands run with `--project-directory <AAB_HOME>`: the installer mounts the
 checkout at the same path as on the host, so every relative path in every
@@ -25,7 +27,9 @@ from pathlib import Path
 
 PROJECT = "aab"                 # docker-compose.yml's `name:`; prefixes volumes and networks
 COMPOSE_FILES_SCRIPT = "scripts/compose-files.sh"
-COMPOSE_FILE_RE = re.compile(r"^(?:docker-compose(?:\.[a-z]+)?\.yml|plugins\.d/[a-z][a-z0-9]{1,31}/compose\.yml)$")
+COMPOSE_FILE_RE = re.compile(r"^(?:docker-compose(?:\.[a-z]+)?\.yml"
+                             r"|ops/newrelic/(?:public|installer)\.yml"
+                             r"|plugins\.d/[a-z][a-z0-9]{1,31}/(?:compose|newrelic)\.yml)$")
 TIMEOUT = 1800                  # an image build can take a while
 
 

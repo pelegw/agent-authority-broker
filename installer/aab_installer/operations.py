@@ -4,6 +4,7 @@ The installer owns `plugins.d/` on the host (deploy/push.sh never syncs it):
 
     plugins.d/<service>/src/            the plugin repository at the reviewed commit
     plugins.d/<service>/compose.yml     the overlay rendered from its descriptor
+    plugins.d/<service>/newrelic.yml    its logging override for the New Relic overlay
     plugins.d/<service>/install.json    source, ref, commit, plugins, volumes, when
     plugins.d/_installer/               jobs and temporary clones (never a service)
 
@@ -40,10 +41,12 @@ from .descriptor import RESERVED_SERVICES, SERVICE_RE, view
 from .fs import rmtree, write_atomic
 from .git import COMMIT_RE, Git, GitError, allowed, normalize_source, ref_kind
 from .jobs import JobContext
-from .overlay import names, render, service_dir
+from .overlay import NEWRELIC_FILE, names, render, render_newrelic, service_dir
 from .package import read_package
 
 INSTALL_RECORD = "install.json"
+# The files _materialize writes; an upgrade restores exactly these.
+RENDERED = ("compose.yml", NEWRELIC_FILE, INSTALL_RECORD)
 RECORD_KEYS = ("service", "source", "ref", "commit", "plugins", "volumes", "installed_at",
                "updated_at")
 
@@ -178,6 +181,8 @@ class Installer:
         ctx.log(".env: added " + ", ".join(added) if added else ".env: secrets already present")
         write_atomic(svc_dir / "compose.yml", render(d, service_dir(d.service)).encode("utf-8"))
         ctx.log(f"rendered {service_dir(d.service)}/compose.yml")
+        # Always written; compose-files.sh decides whether it is loaded.
+        write_atomic(svc_dir / NEWRELIC_FILE, render_newrelic(d).encode("utf-8"))
         now = int(time.time())
         record = {"service": d.service, "source": source, "ref": ref, "commit": commit,
                   "plugins": list(d.plugins),
@@ -234,7 +239,7 @@ class Installer:
                                           f"{pkg.descriptor.service}, not {service}",
                                      "service_changed")
             saved = {name: (svc_dir / name).read_bytes()
-                     for name in ("compose.yml", INSTALL_RECORD) if (svc_dir / name).exists()}
+                     for name in RENDERED if (svc_dir / name).exists()}
             os.replace(svc_dir / "src", tmp / "previous-src")
             os.replace(tmp / "src", svc_dir / "src")
             try:
@@ -244,8 +249,13 @@ class Installer:
                 ctx.log("upgrade failed; restoring the previous version's files")
                 rmtree(svc_dir / "src")
                 os.replace(tmp / "previous-src", svc_dir / "src")
-                for name, data in saved.items():
-                    (svc_dir / name).write_bytes(data)
+                for name in RENDERED:
+                    if name in saved:
+                        (svc_dir / name).write_bytes(saved[name])
+                    else:
+                        # New in this upgrade (newrelic.yml for an install
+                        # made before it existed): gone again, as before.
+                        (svc_dir / name).unlink(missing_ok=True)
                 self._best_effort(ctx, "up", "-d", names(service)["compose_service"], "broker")
                 raise
             ctx.log(f"upgraded {service} to {source}@{ref}")

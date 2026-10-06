@@ -1,0 +1,5 @@
+# Parsers for pipeline.yaml. Defined here, not taken from the image, so the
+# pipeline does not depend on the image's own files.
+parsers:
+  - name: aab_json
+    format: json

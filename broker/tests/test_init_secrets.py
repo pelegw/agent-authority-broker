@@ -28,8 +28,12 @@ HEX_TOKENS = ["SIDECAR_TOKEN", "ORIGIN_SECRET", "DECISION_SIGNING_KEY",
               "PLUGIN_TOKEN_WHATSAPP", "PLUGIN_TOKEN_GITHUB", "PLUGIN_TOKEN_GOOGLE",
               "INSTALLER_TOKEN"]
 GENERATED = ["SETUP_TOKEN", *HEX_TOKENS, *FERNET_KEYS]
-# Public-mode exposure values: the only hand-filled entries left in the file.
+# Public-mode exposure values: hand-filled entries, written empty.
 PLACEHOLDERS = ["CF_ACCESS_TEAM_DOMAIN", "CF_ACCESS_AUD", "SITE_DOMAIN"]
+# The one third-party credential in the file, by exception (docs/configuration.md):
+# Fluent Bit reads it at start. Hand-filled too, never generated.
+NEWRELIC_KEYS = ["NEWRELIC_ENABLED", "NEW_RELIC_REGION", "NEW_RELIC_LICENSE_KEY",
+                 "AUDIT_EXPORT_INTERVAL", "AUDIT_EXPORT_HASH_RESOURCES"]
 # Third-party credentials that moved to the console (docs/configuration.md).
 CONSOLE_ONLY = ["GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GOOGLE_OAUTH_CLIENT_ID",
                 "GOOGLE_OAUTH_CLIENT_SECRET", "TELEGRAM_BOT_TOKEN", "INSTALLER_GIT_TOKEN"]
@@ -39,7 +43,7 @@ EXPECTED_KEYS = ["SETUP_TOKEN", "ORIGIN_SECRET", "BROKER_SECRETS_KEY", "DECISION
                  "PLUGIN_TOKEN_WHATSAPP", "PLUGIN_SECRETS_KEY_WHATSAPP", "SIDECAR_TOKEN",
                  "PLUGIN_TOKEN_GITHUB", "PLUGIN_SECRETS_KEY_GITHUB", "PLUGIN_TOKEN_GOOGLE",
                  "PLUGIN_SECRETS_KEY_GOOGLE", "INSTALLER_ENABLED", "INSTALLER_TOKEN",
-                 "INSTALLER_ALLOWED_SOURCES", "AAB_HOME",
+                 "INSTALLER_ALLOWED_SOURCES", "AAB_HOME", *NEWRELIC_KEYS,
                  *PLACEHOLDERS, "BROKER_PORT", "DEVICE_NAME", "TZ",
                  "LOG_LEVEL", "LOG_FORMAT",
                  "GITHUB_APP_KEY_DIR", "MCP_ALLOWED_HOSTS", "CF_ACCESS_ENABLED",
@@ -368,3 +372,28 @@ def test_env_example_has_the_same_keys_as_a_real_env(out, tmp_path):
     assert list(parse(out)) == list(parse(example))
     for name in GENERATED:
         assert parse(example)[name] == ""   # the template carries no secret
+
+
+def test_the_new_relic_entries_are_off_and_the_key_is_never_generated(out):
+    """Log shipping is opt-in: off, US, no key. The license key is a
+    third-party credential the owner pastes; the script never invents one,
+    never rotates one, and says where to get it."""
+    r = run("--out", out)
+    v = parse(out)
+    assert v["NEWRELIC_ENABLED"] == "false"
+    assert v["NEW_RELIC_REGION"] == "US"
+    assert v["NEW_RELIC_LICENSE_KEY"] == ""
+    assert v["AUDIT_EXPORT_INTERVAL"] == "3600"
+    assert v["AUDIT_EXPORT_HASH_RESOURCES"] == "false"
+    assert "NEW_RELIC_LICENSE_KEY" in r.stdout and "INGEST - LICENSE" in r.stdout
+    # Its own checklist block, not the public-deploy one.
+    public, rest = r.stdout.split("New Relic (optional)", 1)
+    assert "NEW_RELIC_LICENSE_KEY" not in public and "NEW_RELIC_LICENSE_KEY" in rest
+    before = out.read_bytes()
+    assert run("--out", out, "--rotate", "NEW_RELIC_LICENSE_KEY").returncode == 2
+    assert out.read_bytes() == before
+    lines = out.read_text(encoding="utf-8").splitlines()
+    comment = lines[lines.index("NEW_RELIC_LICENSE_KEY=") - 1]
+    assert "by exception" in comment and "log-shipper only" in comment
+    comment = lines[lines.index("NEWRELIC_ENABLED=false") - 1]
+    assert "exactly true" in comment

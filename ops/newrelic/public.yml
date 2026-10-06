@@ -1,0 +1,14 @@
+# The edge's logging override for the New Relic overlay. scripts/compose-files.sh
+# loads it after docker-compose.newrelic.yml when SITE_DOMAIN is set and
+# NEWRELIC_ENABLED=true. It is a file of its own because a compose override
+# cannot name a service that no loaded file defines: the edge exists only in
+# docker-compose.public.yml. The block is docker-compose.newrelic.yml's
+# x-fluentd (a test keeps them identical).
+services:
+  edge:
+    logging:
+      driver: fluentd
+      options:
+        fluentd-address: 127.0.0.1:24224
+        fluentd-async: "true"
+        tag: "aab.{{.Name}}"

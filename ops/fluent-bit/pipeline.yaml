@@ -1,0 +1,65 @@
+# The log shipper's pipeline: what it accepts, and what it changes before
+# sending. The output (where it sends) is in region-US.yaml / region-EU.yaml,
+# which include this file; docker-compose.newrelic.yml starts Fluent Bit with
+# the one NEW_RELIC_REGION names. docs/logging.md, "Shipping logs and the
+# audit record to New Relic", explains every step.
+#
+# Records arrive from Docker's fluentd log driver, one per log line, tagged
+# aab.<container name>, with the fields container_id, container_name, source
+# (stdout or stderr) and log (the line itself).
+
+service:
+  flush: 5
+  log_level: info
+  # No HTTP endpoint: nothing needs to reach the shipper but the daemon.
+  http_server: off
+  parsers_file: parsers.yaml
+
+pipeline:
+  inputs:
+    # The Docker daemon connects here. Compose publishes the port on the
+    # host's 127.0.0.1 only; no container can reach it.
+    - name: forward
+      listen: 0.0.0.0
+      port: 24224
+      # While New Relic is unreachable, at most this much waits in memory.
+      # Above it the input pauses, and Docker's driver drops lines (it never
+      # blocks a service: fluentd-async). docker compose logs keeps them.
+      mem_buf_limit: 32MB
+
+  filters:
+    # 1. Docker splits a line longer than 16 KB into parts. Join them, so a
+    #    long JSON line (a large audit row) still parses as one object.
+    - name: multiline
+      match: "aab.*"
+      multiline.key_content: log
+      mode: partial_message
+
+    # 2. The WhatsApp sidecar prints the pairing QR to stdout, for an
+    #    operator with Docker access on this server. The QR links a phone to
+    #    this broker, so it must never leave the server. Keep only the
+    #    sidecar's real log lines: Go's log format (2026/09/24 20:31:35...)
+    #    and whatsmeow's (20:31:35.601 [Module LEVEL]). Everything else it
+    #    prints (the QR block, the banners around it, anything new) stays
+    #    local, in docker compose logs.
+    - name: grep
+      match_regex: '^aab\..*whatsapp-sidecar.*$'
+      regex: 'log ^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}|\d{2}:\d{2}:\d{2}\.\d{3} \[)'
+
+    # 3. A JSON line (LOG_FORMAT=json, and every audit row) becomes
+    #    attributes New Relic can query: level, logger, service, request_id,
+    #    message; or table, id, decision, outcome, hash for the audit record.
+    #    A text line does not parse and passes unchanged.
+    - name: parser
+      match: "aab.*"
+      key_name: log
+      parser: aab_json
+      reserve_data: on
+      preserve_key: on
+
+    # 4. A parsed service line has its own message: drop the raw copy. An
+    #    audit row has none, so its raw line stays as the log message.
+    - name: modify
+      match: "aab.*"
+      condition: Key_exists message
+      remove: log
