@@ -1,13 +1,14 @@
 # Logging
 
-Every service writes one line per event to its own stdout; Docker keeps those
-lines, rotated, and `docker compose logs` reads them. Logs are the
+Every service writes one line per event to its own stdout. Docker keeps those
+lines and rotates them, and `docker compose logs` reads them. Logs are the
 **operational** trail: what the broker and the plugins did, how long it took,
-what failed. The **accountability** trail is unchanged: the hash-chained
-decision record (every decision and outcome, with its authority chain) and the
-audit table (every human action). The two meet on the **request id**: each log
-line carries the id of the request or background job it belongs to, and the
-decision rows that request produced carry the same id in `request_id`.
+and what failed. The **accountability** trail does not change. It is the
+hash-chained decision record and the audit table. The decision record holds
+every decision and outcome, with its authority chain. The audit table holds
+every human action. The two trails meet on the **request id**. Each log line
+carries the id of the request or background job it belongs to. The decision
+rows of that request carry the same id in `request_id`.
 
 ## Who logs what
 
@@ -20,8 +21,8 @@ decision rows that request produced carry the same id in `request_id`.
 | `edge` (public overlay) | Caddy | Caddy's own log, unchanged. |
 | `uvicorn` | `uvicorn`, `uvicorn.error` | Server start and stop, through the same handler and format. uvicorn's own access log is off: see [The access line](#the-access-line). |
 
-The `aab` CLI logs to **stderr** (at WARNING unless `LOG_LEVEL` says
-otherwise): its stdout is its output, and `aab simulate` / `aab skill build`
+The `aab` CLI logs to **stderr**, at WARNING unless `LOG_LEVEL` sets a
+different level. Its stdout is its output. `aab simulate` and `aab skill build`
 run broker code in-process.
 
 ## Format
@@ -35,55 +36,62 @@ Text (the default, `LOG_FORMAT=text`):
 ```
 
 `<UTC timestamp, ms>Z <LEVEL> <logger> [<service> <request id>] <message>`.
-The service is `broker`, `plugin-<service>` or `installer`; the request id is `-` for
-lines outside any request (boot, the scheduler's idle ticks).
+The service is `broker`, `plugin-<service>` or `installer`. The request id is
+`-` for lines outside any request, for example boot or the scheduler's idle
+ticks.
 
-The message is a fixed text followed by `key=value` pairs (logfmt): a value is
-bare when it has no space, quote, `=`, backslash or control character, and
-otherwise double-quoted with those escaped; lists are comma-joined, an empty
-value is `-`, a value longer than 200 characters is cut. So a value (a key
-name an agent chose, a resource id) can never end the line, fake a second
-pair or a second line.
+The message is a fixed text followed by `key=value` pairs (logfmt). These
+rules apply to a value:
 
-JSON (`LOG_FORMAT=json`): one object per line with the same fields, for a log
-collector:
+- A value is bare when it has no space, quote, `=`, backslash or control character.
+- Any other value goes in double quotes, with those characters escaped.
+- A list becomes one comma-joined value.
+- An empty value is `-`.
+- The formatter cuts a value longer than 200 characters.
+
+Thus a value can never end the line, fake a second pair or fake a second line.
+Examples of such values are a key name an agent chose and a resource id.
+
+JSON (`LOG_FORMAT=json`) gives one object per line with the same fields, for a
+log collector:
 
 ```json
 {"ts": "2026-09-24T20:29:08.839Z", "level": "INFO", "logger": "broker.access", "service": "broker", "request_id": "smoke-run-1", "message": "request method=GET path=/v1/targets status=200 duration_ms=42 actor=key:smoke-agent ip=172.19.0.1"}
 ```
 
-plus `exc` (the traceback) when there is one. JSON is ASCII-escaped, so a
-line is always one line.
+The object also has `exc` (the traceback) when there is one. The JSON is
+ASCII-escaped, so a line is always one line.
 
 The sidecar writes Go's standard format with UTC microseconds
 (`2026/09/24 20:31:35.601156 request method=GET path=/status status=200
-duration_ms=0 request_id=smoke-health-1`), the same key=value style, and has
-no JSON mode.
+duration_ms=0 request_id=smoke-health-1`). It uses the same key=value style.
+It has no JSON mode.
 
 ## Request ids and the decision record
 
-- **Every HTTP request** gets an id: the caller's `X-Request-Id` when it is
-  well formed (`[A-Za-z0-9._-]{1,128}`), else a fresh 32-hex-character id.
-  The broker refuses ids that start with `sched-` or `tg-` (those are its own
-  background jobs, so no caller can make its calls look like the
-  scheduler's) and generates one instead. The id is echoed in the
-  `X-Request-Id` response header, so an agent can quote it.
+- **Every HTTP request** gets an id. It is the caller's `X-Request-Id` when
+  that is well formed (`[A-Za-z0-9._-]{1,128}`), else a fresh
+  32-hex-character id. The broker rejects ids that start with `sched-` or
+  `tg-` and generates one instead. Those prefixes belong to its own
+  background jobs, so no caller can make its calls look like the scheduler's.
+  The `X-Request-Id` response header echoes the id, so an agent can quote it.
 - **The decision record uses it**: `engine.new_request_id()` returns the
-  current request's id, so a decision row's `request_id` is the id on that
-  request's log lines. (It is a correlation id, not a unique key: an agent
-  that sends the same `X-Request-Id` twice gets two sets of rows with it.)
+  current request's id. So the `request_id` of a decision row is the id on
+  the log lines of that request. It is a correlation id, not a unique key. An
+  agent that sends the same `X-Request-Id` twice gets two sets of rows with it.
 - **It crosses every hop**: the broker sends it to the plugin service on
-  every plugin call (`/perform`, and also `/normalize`, `/resolve`, `/status`
-  and the rest), the plugin runtime runs the call under it, and
+  every plugin call. That is `/perform`, and also `/normalize`, `/resolve`,
+  `/status` and the rest. The plugin runtime runs the call under it.
   plugin-whatsapp forwards it to the sidecar, which puts it on its request
-  line. One agent call is therefore one id in the broker, the plugin, the
-  sidecar and the decision record.
-- **Background work** runs under ids of its own: each scheduler tick under a
-  `sched-<hex>` id and each delivery in it under a fresh `sched-<hex>` (the
-  per-delivery line names its tick); each Telegram update under a
-  `tg-<hex>` id (a tap's approval, the delivery it triggers and the decision
-  rows all carry it). A console approval runs under the console request's
-  id.
+  line. Thus one agent call is one id in the broker, the plugin, the sidecar
+  and the decision record.
+- **Background work** runs under ids of its own:
+  - Each scheduler tick runs under a `sched-<hex>` id.
+  - Each delivery in a tick runs under a fresh `sched-<hex>` id. The
+    per-delivery line names its tick.
+  - Each Telegram update runs under a `tg-<hex>` id. A tap's approval, the
+    delivery it triggers and the decision rows all carry it.
+  - A console approval runs under the id of the console request.
 
 To follow one call:
 
@@ -93,124 +101,187 @@ docker compose logs --no-log-prefix | grep smoke-run-1
 
 ## The access line
 
-One line per request, after the response, from `request_log.py` (the same
-middleware in the broker and the plugin runtime):
+`request_log.py` writes one line per request, after the response. The broker
+and the plugin runtime use the same middleware:
 
 ```
 request method=POST path=/v1/targets/echo/actions/list_items status=200 duration_ms=12 actor=key:reader ip=172.19.0.1
 ```
 
 - `path` is the raw path **without the query string, always**. The OAuth
-  callback's query carries the authorization code and the state nonce, and
-  an agent's GET query carries its params; the middleware never reads the
-  query string at all.
-- `actor` is who was authenticated: `key:<name>` (an agent key),
-  `monitor:<token name>` (a monitor token on `/health`),
-  `owner:<username>` (a session or admin token), `plugin:<service>` in a
-  plugin service (the broker, holding that service's token), or `-`.
-- `ip` is the client address the origin guard trusts (`CF-Connecting-IP`
-  behind Cloudflare, else the socket peer).
-- 5xx lines are WARNING; health probes (`/health`, `/v1/health`) and the
-  owner's monitoring summary (`/v1/admin/health`) are not logged.
+  callback's query carries the authorization code and the state nonce. An
+  agent's GET query carries its params. The middleware never reads the query
+  string at all.
+- `actor` is the caller that authenticated:
+  - `key:<name>`: an agent key.
+  - `monitor:<token name>`: a monitor token on `/health`.
+  - `owner:<username>`: a session or admin token.
+  - `plugin:<service>`, in a plugin service: the broker, which holds the
+    token of that service.
+  - `-`: none of these.
+- `ip` is the client address the origin guard trusts. That is
+  `CF-Connecting-IP` behind Cloudflare, else the socket peer.
+- 5xx lines are WARNING. The middleware writes no line for health probes
+  (`/health`, `/v1/health`) or for the owner's monitoring summary
+  (`/v1/admin/health`).
 
-uvicorn's own access log is **off**, structurally: uvicorn writes its access
-line only when the `uvicorn.access` logger has a handler path (that is all
-`--no-access-log` changes), and the logging setup leaves it none, so uvicorn
-never writes one, with or without the flag. Its line would repeat ours and
-carry the query string. The images also pass `--no-access-log`.
+uvicorn's own access log is **off**, structurally. uvicorn writes its access
+line only when the `uvicorn.access` logger has a handler path. That is all
+that `--no-access-log` changes. The logging setup gives that logger no handler
+path, so uvicorn never writes the line, with or without the flag. Its line
+would duplicate our line and carry the query string. The images also pass
+`--no-access-log`.
 
 ## Never logged, and the backstop
 
-Log lines never carry: params or results of an action, message bodies,
-notes, resource labels (ids are logged, names are not), cookie values,
-`Authorization` headers, passwords, the setup token, agent keys, admin
-tokens, plugin tokens, the sidecar token, the Telegram bot token or a link
-code, OAuth codes, client secrets, refresh or access tokens, installation
-tokens, private keys, Fernet keys, `INSTALLER_TOKEN`, the installer's
-GitHub token. Where a value's name is useful it is logged by name
-(`secret_fields=client_secret`, `secrets_set=setup_token`,
-`installer github token stored`), never with the value. Exception text is
-logged as the exception's class where it could quote input.
+Log lines never carry these values:
 
-The tests prove it: `tests/targets/test_secrets_in_logs.py` drives setup,
-login, admin tokens, key create/rotate/use, delegation, the Telegram token,
-the installer's GitHub token (stored, then relayed with an inspect),
-plugin configure, a Google connect with minted tokens and a GitHub App
-install with minted tokens, with every logger at DEBUG, and fails if any
-secret value appears in any record or in the handler's output. The plugins'
-own suites do the same for their credentials.
+- Params or results of an action.
+- Message bodies.
+- Notes.
+- Resource labels. Log lines carry ids, not names.
+- Cookie values.
+- `Authorization` headers.
+- Passwords.
+- The setup token.
+- Agent keys.
+- Admin tokens.
+- Plugin tokens.
+- The sidecar token.
+- The Telegram bot token or a link code.
+- OAuth codes.
+- Client secrets.
+- Refresh or access tokens.
+- Installation tokens.
+- Private keys.
+- Fernet keys.
+- `INSTALLER_TOKEN`.
+- The installer's GitHub token.
+
+When the name of a value is useful, the log line carries the name, never the
+value: `secret_fields=client_secret`, `secrets_set=setup_token`,
+`installer github token stored`. When exception text can quote input, the log
+line carries only the exception's class.
+
+The tests prove it. `tests/targets/test_secrets_in_logs.py` sets every logger
+to DEBUG and drives these flows:
+
+- Setup and login.
+- Admin tokens.
+- Key create, rotate and use.
+- Delegation.
+- The Telegram token.
+- The installer's GitHub token: stored, then sent with an inspect.
+- Plugin configure.
+- A Google connect with minted tokens.
+- A GitHub App install with minted tokens.
+
+The test fails if any secret value appears in any record or in the handler's
+output. The plugins' own suites do the same for their credentials.
 
 A **redaction backstop** sits on the handler (`RedactSecrets`, the pattern
-table `SECRET_PATTERNS` in `logging_setup.py`): anything shaped like an agent
-key (`aab_` + 48 hex), an admin token (`aab_admin_` + 48 hex), a
-`Bearer <token>`, a Telegram bot token, a Google access or refresh token or
-client secret, a GitHub token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`,
-`github_pat_`), a Fernet key, a PEM block, a session cookie, credentials
-inside a URL (`https://user:token@host`, `https://token@host`), or the value
-after a secret-bearing field name (`password=`, `client_secret=`,
-`X-Plugin-Token:`, `X-Installer-Token:`, `git_token=`, `installer_git_token=`,
-`installer_token=`, ...) becomes `<redacted>`, in the message, the traceback
-and the stack. It edits a copy of the record, so a test's capture still sees
-what the code logged. It is a backstop, not the mechanism: the 64-hex-digit
-secrets (plugin tokens, the sidecar token, the signing key) cannot be told
-apart from a SHA-256 by shape, so they are kept out by never being logged.
+table `SECRET_PATTERNS` in `logging_setup.py`). It replaces each of these
+shapes with `<redacted>`, in the message, the traceback and the stack:
 
-The setup and the backstop are one module, `logging_setup.py` (with
-`request_log.py` for the access line), kept in **three byte-identical
-copies**: `broker/broker/`, `plugin-runtime/aab_plugin_runtime/` and
-`installer/aab_installer/`. The three packages must not depend on each
-other, and `broker/tests/test_logging_setup.py` fails if the copies differ,
-so a pattern added to one is added to all.
+- An agent key (`aab_` + 48 hex).
+- An admin token (`aab_admin_` + 48 hex).
+- A `Bearer <token>`.
+- A Telegram bot token.
+- A Google access or refresh token or client secret.
+- A GitHub token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`).
+- A Fernet key.
+- A PEM block.
+- A session cookie.
+- Credentials inside a URL (`https://user:token@host`, `https://token@host`).
+- The value after a secret-bearing field name (`password=`,
+  `client_secret=`, `X-Plugin-Token:`, `X-Installer-Token:`, `git_token=`,
+  `installer_git_token=`, `installer_token=`, ...).
 
-Third-party loggers that would log request URLs with their query strings
-(`httpx`: a Gmail search, the bot token in the Telegram API path), protocol
-payloads (`mcp`: tool arguments) or form fields are held at WARNING whatever
-`LOG_LEVEL` says.
+The backstop edits a copy of the record, so a test's capture still sees what
+the code logged. It is a backstop, not the mechanism. It cannot tell a
+64-hex-digit secret from a SHA-256 by its shape. Those secrets are the plugin
+tokens, the sidecar token and the signing key. The code keeps them out of the
+log because it never logs them.
+
+The setup and the backstop are one module, `logging_setup.py`, with
+`request_log.py` for the access line. The repository keeps **three
+byte-identical copies** of them: `broker/broker/`,
+`plugin-runtime/aab_plugin_runtime/` and `installer/aab_installer/`. The three
+packages must not depend on each other. `broker/tests/test_logging_setup.py`
+fails if the copies differ, so a new pattern goes into all three copies.
+
+Some third-party loggers stay at WARNING whatever `LOG_LEVEL` says. At lower
+levels, they log secrets or content:
+
+- `httpx` logs request URLs with their query strings: a Gmail search, the bot
+  token in the Telegram API path.
+- `mcp` logs protocol payloads: tool arguments.
+- Any third-party logger that logs form fields gets the same limit.
 
 ## The installer's job logs
 
-An install, upgrade or remove is a job, and its log is for the owner: the
-console's job panel shows it, and it is kept in
+An install, upgrade or remove is a job, and its log is for the owner. The
+console's job panel shows it. The installer keeps it in
 `plugins.d/_installer/jobs/<id>.json` (root-owned, 0700 directory) across
-restarts of the installer and the broker. It holds the steps, the commands
-run (their arguments carry no secret: the compose file list and service
-names), their exit codes and the last 15 non-empty lines of each command's
-output. Every line passes the same redaction backstop, then every run of 64
-hex digits (the shape of every plugin token, at the cost of image digests)
-becomes `<hex64>`, and every secret value the job was given becomes
-`<redacted>` whatever its shape: `INSTALLER_TOKEN`, and the GitHub token its
-request carried (held in memory for that job only, never saved). Lines are
-capped at 500 characters and a job at 300 lines (the first 20 and the last
-280 are kept). git's own output never reaches it: a failed clone reports
-the step and git's exit code only.
+restarts of the installer and the broker. The log holds these items:
+
+- The steps.
+- The commands that ran. Their arguments carry no secret: they are the compose
+  file list and service names.
+- The exit codes of those commands.
+- The last 15 non-empty lines of the output of each command.
+
+Every line goes through the same redaction backstop. Then two more
+replacements apply:
+
+- Every run of 64 hex digits becomes `<hex64>`. That is the shape of every
+  plugin token. The cost is that image digests become `<hex64>` too.
+- Every secret value the job received becomes `<redacted>`, whatever its
+  shape. That is `INSTALLER_TOKEN` and the GitHub token its request carried.
+  The installer holds that token in memory for that job only and never saves
+  it.
+
+A line has at most 500 characters, and a job at most 300 lines. The log keeps
+the first 20 and the last 280 lines. git's own output never gets into the log.
+A failed clone reports only the step and git's exit code.
 
 ## Levels
 
-`LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, `ERROR`; `WARN` and lower case
-accepted; default `INFO`) and `LOG_FORMAT` (`text` or `json`) are read once
-at start by every Python service; a value not recognised logs a WARNING and
-falls back to `INFO` / `text`. The sidecar reads `LOG_LEVEL` too: it sets
-whatsmeow's level, and `WARNING` or `ERROR` drop its per-request lines.
+Every Python service reads `LOG_LEVEL` and `LOG_FORMAT` once, at start:
 
-- **INFO**: every line described above. Idle background work is silent (a
-  scheduler tick logs only when something was due).
-- **WARNING**: refusals and failures worth a look: agent and admin
-  authentication failures (with the reason class: `missing`, `malformed`,
-  `admin_token`, `unknown_key`, `chain:expired`, ...), rate-limited logins,
-  budget refusals (naming the exhausted grant), 5xx outcomes, a plugin
-  service not reachable, a health check that failed, Telegram poll errors
-  (class, status and backoff), requests that did not come through the edge.
-- **ERROR**: a broken decision chain on verify, unexpected failures.
+- `LOG_LEVEL` is `DEBUG`, `INFO`, `WARNING` or `ERROR`. The service also
+  accepts `WARN` and lower case. The default is `INFO`.
+- `LOG_FORMAT` is `text` or `json`.
+
+When the service does not recognise a value, it logs a WARNING and falls back
+to `INFO` or `text`. The sidecar also reads `LOG_LEVEL`. It sets the level of
+whatsmeow, and `WARNING` or `ERROR` drop its per-request lines.
+
+- **INFO**: every line this document describes. Idle background work is
+  silent: a scheduler tick logs only when something was due.
+- **WARNING**: rejections and failures worth a look:
+  - Agent and admin authentication failures, with the reason class
+    (`missing`, `malformed`, `admin_token`, `unknown_key`, `chain:expired`,
+    ...).
+  - Rate-limited logins.
+  - Budget rejections, which name the exhausted grant.
+  - 5xx outcomes.
+  - A plugin service that the broker cannot reach.
+  - A failed health check.
+  - Telegram poll errors (class, status and backoff).
+  - Requests that did not come through the edge.
+- **ERROR**: a broken decision chain on verify, and unexpected failures.
 - **DEBUG**: adds one line per broker-to-plugin call.
 
-These are environment settings, not console settings (`docs/configuration.md`):
-they are process-level, read before any database is open, and the plugin
-containers have no console. Set them in `.env` (`scripts/init_secrets.py`
-writes the defaults) and restart: `docker compose up -d`.
+These are environment settings, not console settings (`docs/configuration.md`).
+They are process-level, and each service reads them before it opens any
+database. The plugin containers have no console. Set them in `.env`.
+`scripts/init_secrets.py` writes the defaults. Then restart with
+`docker compose up -d`.
 
 ## Rotation
 
-`docker-compose.yml` (and the public overlay) give every service the same
+`docker-compose.yml` and the public overlay give every service the same
 logging block through an `x-logging` anchor:
 
 ```yaml
@@ -221,10 +292,10 @@ x-logging: &logging
     max-file: "5"
 ```
 
-At most five 10 MB files per container, about 50 MB each; the oldest is
-dropped. Change the anchor to keep more or less. Container logs are not a
-backup: the decision record and the audit table (in `broker.db`) are what
-you keep.
+Each container keeps at most five 10 MB files, about 50 MB in all.
+Docker deletes the oldest file. Change the anchor to keep more or less.
+Container logs are not a backup. Keep the decision record and the audit table,
+which are in `broker.db`.
 
 ## Reading
 
@@ -241,20 +312,20 @@ In public mode add `-f docker-compose.yml -f docker-compose.public.yml`
 
 ## Shipping to a collector
 
-Keep the services writing to stdout and change the Docker **log driver**
-instead: replace the `x-logging` anchor with, for example, `driver: local`
-(compressed local files), `journald`, `syslog`, `fluentd`, `gelf` or
-`awslogs`, with that driver's options. Set `LOG_FORMAT=json` so the collector
-receives one JSON object per line with `ts`, `level`, `logger`, `service`,
-`request_id` and `message` as fields. `docker compose logs` reads `json-file`,
-`local` and `journald` directly; with other drivers Docker's dual logging
-keeps a local copy for it (Docker 20.10 and later).
+Keep the services writing to stdout, and change the Docker **log driver**
+instead. Replace the `x-logging` anchor with a different driver and its
+options, for example `driver: local` (compressed local files), `journald`,
+`syslog`, `fluentd`, `gelf` or `awslogs`. Set `LOG_FORMAT=json`. Then the
+collector receives one JSON object per line, with `ts`, `level`, `logger`,
+`service`, `request_id` and `message` as fields. `docker compose logs` reads
+`json-file`, `local` and `journald` directly. With other drivers, Docker's
+dual logging keeps a local copy for it (Docker 20.10 and later).
 
 ## The WhatsApp pairing QR
 
-While waiting to be paired, the sidecar prints the pairing QR as a block of
-characters in its log, as it always has (the pairing path that needs no
-console, `docs/plugins/whatsapp.md`). A code is valid for tens of seconds and
-worthless once a device is paired, and reading a container's log already
-takes Docker access on the host. Its log lines record the event
-(`qr event=code`, `qr served`), never the code.
+While the sidecar waits for pairing, it prints the pairing QR as a block of
+characters in its log, as it always has. This is the pairing path that needs
+no console (`docs/plugins/whatsapp.md`). A code is valid for tens of seconds.
+It has no value after a device pairs. Also, a person needs Docker access on
+the server to read a container's log. The sidecar's log lines record the
+event (`qr event=code`, `qr served`), never the code.
