@@ -518,6 +518,15 @@ Notes:
   from there, and the `compose.yml` that the installer writes there joins the
   compose file set (`scripts/compose-files.sh`). Section 4.1 has the
   boundary.
+- **The New Relic overlay** (opt-in, `docker-compose.newrelic.yml`, loaded
+  when `NEWRELIC_ENABLED=true`). It sends every service's log lines and the
+  audit record to New Relic Logs. `log-shipper` (Fluent Bit) is the only
+  container with `NEW_RELIC_LICENSE_KEY`. It is alone on `net_logs` and
+  publishes one port, on the host's loopback, for the Docker log driver.
+  `audit-exporter` reads `broker.db` from a read-only `broker_data` mount,
+  with no network and no credential. `docs/logging.md` has the details.
+  `log-shipper` runs as uid 65534 (`nobody`), with a read-only root file
+  system and no capabilities.
 - Every image runs as a non-root user (`aab`), with one uvicorn worker in the
   broker. The exception is `aab-installer`, which runs as root on purpose.
   Whoever holds the socket is root on the machine. Thus an unprivileged user
@@ -539,7 +548,7 @@ it holds.
 
 | Container | Receives | Must never receive |
 |---|---|---|
-| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `SITE_DOMAIN` (public overlay only: builds the OAuth redirect URI `https://<SITE_DOMAIN>/oauth/callback/<service>`), `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE` and each installed external plugin (from its rendered overlay), `INSTALLER_URL` and `INSTALLER_TOKEN` (installer overlay only), `BROKER_DB`, `TZ`, `LOG_LEVEL`, `LOG_FORMAT` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, `INSTALLER_ALLOWED_SOURCES`, the Docker socket, the `wa_data` and `wa_session` volumes |
+| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `SITE_DOMAIN` (public overlay only: builds the OAuth redirect URI `https://<SITE_DOMAIN>/oauth/callback/<service>`), `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE` and each installed external plugin (from its rendered overlay), `INSTALLER_URL` and `INSTALLER_TOKEN` (installer overlay only), `BROKER_DB`, `TZ`, `LOG_LEVEL`, `LOG_FORMAT` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, `INSTALLER_ALLOWED_SOURCES`, `NEW_RELIC_LICENSE_KEY`, the Docker socket, the `wa_data` and `wa_session` volumes |
 | `plugin-whatsapp` | `PLUGIN_TOKEN_WHATSAPP`, `PLUGIN_SECRETS_KEY_WHATSAPP`, `SIDECAR_URL` (`http://whatsapp-sidecar:8081`), `SIDECAR_TOKEN`, `MESSAGES_DB` (`/data/messages.db`), `LOG_LEVEL`, `LOG_FORMAT`, `wa_data` (ro) | Other services' tokens/keys, broker secrets (`DECISION_SIGNING_KEY`, `BROKER_SECRETS_KEY`, `SETUP_TOKEN`, `ORIGIN_SECRET`), the `wa_session` volume |
 | `whatsapp-sidecar` | `SIDECAR_TOKEN`, `DEVICE_NAME`, `TZ`, `LOG_LEVEL`, `SESSION_DIR` (`/session`), `wa_data` (rw), `wa_session` (rw; the only container that mounts it) | Everything else |
 | `plugin-github` | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_GITHUB` / `PLUGIN_SECRETS_KEY_GITHUB`), `LOG_LEVEL`, `LOG_FORMAT`; the App id, slug and private key are console config, not env (+ the optional read-only `/run/secrets/github` bind holding the PEM, a file alternative to pasting it) | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN` |
@@ -547,6 +556,8 @@ it holds.
 | `plugin-<service>` (each installed external plugin) | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_<SERVICE>` / `PLUGIN_SECRETS_KEY_<SERVICE>`), the literal `environment` of its descriptor, its allowlisted `env_passthrough` (`TZ`, `LOG_LEVEL`, `LOG_FORMAT`), `<service>_secrets` at `/secrets` and the `<service>_*` volumes it declares | Other services' tokens/keys, broker and installer secrets, `SIDECAR_TOKEN`, any bind mount, any other volume or network (the installer renders its overlay; the repository supplies none) |
 | `aab-installer` (installer overlay only) | `INSTALLER_TOKEN`, `INSTALLER_ALLOWED_SOURCES`, `AAB_HOME`, `LOG_LEVEL`, `LOG_FORMAT`; the Docker socket and the checkout at `AAB_HOME` (same path inside), so it can read `.env`: it is root on the host | Any other variable in its environment, a published port, any network but `net_installer` |
 | `edge` | `SITE_DOMAIN`, `ORIGIN_SECRET`, origin certificate + key, Cloudflare origin-pull CA | Every other secret |
+| `log-shipper` (New Relic overlay only) | `NEW_RELIC_LICENSE_KEY` (the only container that receives it); its configuration `ops/fluent-bit/` (ro) | Every other secret, any volume, any network but `net_logs` |
+| `audit-exporter` (New Relic overlay only) | `BROKER_DB`, `AUDIT_EXPORT_STATE`, `AUDIT_EXPORT_INTERVAL`, `AUDIT_EXPORT_HASH_RESOURCES`, `LOG_LEVEL`, `LOG_FORMAT`; `broker_data` (ro) and `audit_export_state` | `NEW_RELIC_LICENSE_KEY`, every broker or plugin secret, any network (`network_mode: none`), write access to `broker_data` |
 
 The table names the `.env` entries that feed each container. Inside a plugin
 container, the names are generic. `aab_plugin_runtime.from_env` reads

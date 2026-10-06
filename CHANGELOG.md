@@ -10,8 +10,46 @@ lives only in `VERSION`.
   License, version 3 or later (`AGPL-3.0-or-later`), with the license
   classifier on every Python package and a License section in the README
   that says how the license reaches plugins built on the runtime.
+- **Shipping logs and the audit record to New Relic** (opt-in,
+  `NEWRELIC_ENABLED=true`; `docs/logging.md`). `docker-compose.newrelic.yml`,
+  added last by `scripts/compose-files.sh`, adds:
+  - `log-shipper`: Fluent Bit 5.1.3 (`ops/fluent-bit/`, output `nrlogs`,
+    endpoint by `NEW_RELIC_REGION`, US or EU). It is the only container that
+    receives `NEW_RELIC_LICENSE_KEY`, sits alone on `net_logs`, runs as
+    `nobody` read-only, and publishes only `127.0.0.1:24224` for the Docker
+    log driver. Its pipeline joins Docker's split long lines, parses JSON
+    lines into attributes, and keeps only the WhatsApp sidecar's real log
+    lines, so the pairing QR never leaves the server. Its own log stays local.
+  - `audit-exporter`: `aab audit export --loop` (new module
+    `broker/audit_export.py`) from the broker image, hourly by default
+    (`AUDIT_EXPORT_INTERVAL`). It prints every new `decisions` and
+    `audit_log` row, all columns with `hash` and `prev_hash`, as one JSON
+    line with `service: "audit"` and `table`. It opens `broker.db` read-only
+    (`mode=ro`, `query_only`) from a read-only `broker_data` mount, with no
+    network and no credential. A cursor in its own volume moves only after a
+    batch is out (at least once, never a gap) and notices a replaced
+    database. `AUDIT_EXPORT_HASH_RESOURCES=true` replaces every resource id,
+    and every string in `audit_log.detail`, with `sha256:<16 hex>`.
+  - Every service's logging switches to the `fluentd` driver with
+    `fluentd-async`, so a shipper outage never blocks a service, and Docker's
+    dual logging keeps `docker compose logs`. The edge, `aab-installer` and
+    each installed plugin get the switch from their own override file
+    (`ops/newrelic/public.yml`, `ops/newrelic/installer.yml`, and
+    `plugins.d/<service>/newrelic.yml`, which the installer now renders on
+    every install and upgrade).
+  - `.env` gains `NEWRELIC_ENABLED=false`, `NEW_RELIC_REGION=US`, an empty
+    `NEW_RELIC_LICENSE_KEY` (a third-party credential kept in the file by
+    exception, because Fluent Bit reads it at start; `docs/configuration.md`),
+    `AUDIT_EXPORT_INTERVAL=3600` and `AUDIT_EXPORT_HASH_RESOURCES=false`.
+    The console's file-only list names them.
 
 ### Changed
+- The broker holds one idle database connection while it runs
+  (`db.hold_open()`), so `broker.db-wal` and `-shm` always exist. A reader on
+  a read-only mount (the audit exporter) cannot create them, and SQLite
+  deletes them whenever the last connection closes.
+- The broker image creates `/audit-export`, owned by `aab`, for the audit
+  exporter's cursor volume.
 - Every document under `docs/` is rewritten in simplified technical English
   (short active sentences, one instruction each, a fixed vocabulary, lists
   instead of long enumerations), with every heading, table, code block,

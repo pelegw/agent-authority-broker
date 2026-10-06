@@ -36,6 +36,8 @@ console setting with its bounds.
 | `plugin-google` | `./plugins/google` | `net_google` | none | `google_secrets` |
 | `aab-installer` (installer overlay only) | `./installer` | `net_installer` | none | `/var/run/docker.sock`, the checkout `${AAB_HOME}` at the same path |
 | `plugin-<service>` (each installed external plugin) | `./plugins.d/<service>/src` (the plugin's own Dockerfile) | `net_<service>` | none | `<service>_secrets`, the `<service>_*` volumes its descriptor declares |
+| `log-shipper` (New Relic overlay only) | `fluent/fluent-bit` (pinned version) | `net_logs` | `127.0.0.1:24224` (the Docker daemon's log driver) | `ops/fluent-bit` (ro) |
+| `audit-exporter` (New Relic overlay only) | `./broker` (the broker image) | none (`network_mode: none`) | none | `broker_data` (ro), `audit_export_state` |
 
 - `edge_net` carries edge ↔ broker only, so a compromised edge cannot reach any
   plugin's `/perform`.
@@ -52,9 +54,14 @@ console setting with its bounds.
 - Each installed external plugin gets `net_<service>`, which it shares with
   the broker only, exactly like the in-tree plugins. The installer writes its
   overlay. The plugin's repository never supplies it.
+- `net_logs` (New Relic overlay only) holds `log-shipper` alone. The Docker
+  daemon reaches it on the host's loopback, not through a network. The
+  `audit-exporter` has no network at all.
 - No network is `internal: true`: the broker (Telegram, Cloudflare JWKS), the
   plugins (GitHub, Google) and the sidecar (WhatsApp) all need egress.
-- Every image runs as the non-root user `aab` (uid 10001).
+- Every image runs as the non-root user `aab` (uid 10001). The New Relic
+  overlay's `log-shipper` runs Fluent Bit's image as uid 65534 (`nobody`),
+  with a read-only root file system and no capabilities.
 - The build context of a plugin is `./plugins/<service>`, with the named
   context `runtime` (`./plugin-runtime`, the `aab-plugin-runtime` package).
   Each plugin package ships its own manifests. The broker keeps
@@ -128,6 +135,12 @@ It prints these files, in this order:
 3. `docker-compose.installer.yml`, when `INSTALLER_ENABLED=true`.
 4. `plugins.d/<service>/compose.yml` for every installed external plugin. It
    takes only directories whose name is a valid service name.
+5. `docker-compose.newrelic.yml`, when `NEWRELIC_ENABLED=true`. After it come
+   the logging overrides of the services it cannot name itself:
+   `ops/newrelic/public.yml` (with item 2), `ops/newrelic/installer.yml`
+   (with item 3) and `plugins.d/<service>/newrelic.yml` (with item 4, when
+   the installer wrote one). See
+   [Shipping logs and the audit record to New Relic](#shipping-logs-and-the-audit-record-to-new-relic).
 
 `deploy/push.sh`, the installer and these docs all use it. Thus the machine,
 a deploy and an install always agree on what the stack is. On a local run
@@ -326,7 +339,7 @@ gdrive behind one token and one key.
 
 | Container | Receives | Must never receive |
 |---|---|---|
-| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `SITE_DOMAIN` (public overlay only: builds the OAuth redirect URI `https://<SITE_DOMAIN>/oauth/callback/<service>`), `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE` and each installed external plugin (from its rendered overlay), `INSTALLER_URL` and `INSTALLER_TOKEN` (installer overlay only), `BROKER_DB`, `TZ`, `LOG_LEVEL`, `LOG_FORMAT` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, `INSTALLER_ALLOWED_SOURCES`, the Docker socket, the `wa_data` and `wa_session` volumes |
+| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `SITE_DOMAIN` (public overlay only: builds the OAuth redirect URI `https://<SITE_DOMAIN>/oauth/callback/<service>`), `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE` and each installed external plugin (from its rendered overlay), `INSTALLER_URL` and `INSTALLER_TOKEN` (installer overlay only), `BROKER_DB`, `TZ`, `LOG_LEVEL`, `LOG_FORMAT` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, `INSTALLER_ALLOWED_SOURCES`, `NEW_RELIC_LICENSE_KEY`, the Docker socket, the `wa_data` and `wa_session` volumes |
 | `plugin-whatsapp` | `PLUGIN_TOKEN_WHATSAPP`, `PLUGIN_SECRETS_KEY_WHATSAPP`, `SIDECAR_URL` (`http://whatsapp-sidecar:8081`), `SIDECAR_TOKEN`, `MESSAGES_DB` (`/data/messages.db`), `LOG_LEVEL`, `LOG_FORMAT`, `wa_data` (ro) | Other services' tokens/keys, broker secrets (`DECISION_SIGNING_KEY`, `BROKER_SECRETS_KEY`, `SETUP_TOKEN`, `ORIGIN_SECRET`), the `wa_session` volume |
 | `whatsapp-sidecar` | `SIDECAR_TOKEN`, `DEVICE_NAME`, `TZ`, `LOG_LEVEL`, `SESSION_DIR` (`/session`), `wa_data` (rw), `wa_session` (rw; the only container that mounts it) | Everything else |
 | `plugin-github` | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_GITHUB` / `PLUGIN_SECRETS_KEY_GITHUB`), `LOG_LEVEL`, `LOG_FORMAT`; the App id, slug and private key are console config, not env (+ the optional read-only `/run/secrets/github` bind holding the PEM, a file alternative to pasting it) | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN` |
@@ -334,6 +347,8 @@ gdrive behind one token and one key.
 | `plugin-<service>` (each installed external plugin) | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_<SERVICE>` / `PLUGIN_SECRETS_KEY_<SERVICE>`), the literal `environment` of its descriptor, its allowlisted `env_passthrough` (`TZ`, `LOG_LEVEL`, `LOG_FORMAT`), `<service>_secrets` at `/secrets` and the `<service>_*` volumes it declares | Other services' tokens/keys, broker and installer secrets, `SIDECAR_TOKEN`, any bind mount, any other volume or network (the installer renders its overlay; the repository supplies none) |
 | `aab-installer` (installer overlay only) | `INSTALLER_TOKEN`, `INSTALLER_ALLOWED_SOURCES`, `AAB_HOME`, `LOG_LEVEL`, `LOG_FORMAT`; the Docker socket and the checkout at `AAB_HOME` (same path inside), so it can read `.env`: it is root on the host | Any other variable in its environment, a published port, any network but `net_installer` |
 | `edge` | `SITE_DOMAIN`, `ORIGIN_SECRET`, origin certificate + key, Cloudflare origin-pull CA | Every other secret |
+| `log-shipper` (New Relic overlay only) | `NEW_RELIC_LICENSE_KEY` (the only container that receives it); its configuration `ops/fluent-bit/` (ro) | Every other secret, any volume, any network but `net_logs` |
+| `audit-exporter` (New Relic overlay only) | `BROKER_DB`, `AUDIT_EXPORT_STATE`, `AUDIT_EXPORT_INTERVAL`, `AUDIT_EXPORT_HASH_RESOURCES`, `LOG_LEVEL`, `LOG_FORMAT`; `broker_data` (ro) and `audit_export_state` | `NEW_RELIC_LICENSE_KEY`, every broker or plugin secret, any network (`network_mode: none`), write access to `broker_data` |
 
 The table names the `.env` entries that feed each container. Inside a plugin
 container, the names are generic. `aab_plugin_runtime.from_env` reads
@@ -383,7 +398,7 @@ There are two ways. Pick one:
 
 | Volume | Mounted by | Holds | Encrypted by |
 |---|---|---|---|
-| `broker_data` | broker (`/gwdata`) | `broker.db`: owner account, sessions, admin-token/key hashes, grants, plugin enable flags and non-secret config, console settings, Telegram link state and bot token, the installer's GitHub token, hidden resources, action queue, decision record, capacity ledger, audit log | `BROKER_SECRETS_KEY` for the secrets entered in the console (the Telegram bot token, the installer's GitHub token); the rest is hashes or non-secret (the decision chain is HMAC-signed with `DECISION_SIGNING_KEY`) |
+| `broker_data` | broker (`/gwdata`); audit-exporter (`/gwdata`, ro; New Relic overlay) | `broker.db`: owner account, sessions, admin-token/key hashes, grants, plugin enable flags and non-secret config, console settings, Telegram link state and bot token, the installer's GitHub token, hidden resources, action queue, decision record, capacity ledger, audit log | `BROKER_SECRETS_KEY` for the secrets entered in the console (the Telegram bot token, the installer's GitHub token); the rest is hashes or non-secret (the decision chain is HMAC-signed with `DECISION_SIGNING_KEY`) |
 | `wa_data` | whatsapp-sidecar (rw), plugin-whatsapp (ro) | `messages.db` (the archive) | nothing (the archive is message content, not a credential) |
 | `wa_session` | whatsapp-sidecar (`/session`, rw), nobody else | `session.db` (the WhatsApp account session, whatsmeow's own store) | **nothing**: the one credential not encrypted at rest, mitigated by a volume only the sidecar mounts and non-root containers |
 | `whatsapp_secrets` | plugin-whatsapp (`/secrets`) | Nothing today: the WhatsApp manifest has no config, and the store exists because the runtime provides one | `PLUGIN_SECRETS_KEY_WHATSAPP` |
@@ -392,6 +407,7 @@ There are two ways. Pick one:
 | `<service>_secrets` (each installed plugin) | `plugin-<service>` (`/secrets`) | That plugin's own secret store (what its console config marks secret) | `PLUGIN_SECRETS_KEY_<SERVICE>` |
 | `<service>_*` (declared by an installed plugin, e.g. `finance_data`) | `plugin-<service>`, at the path its descriptor names | That plugin's data (the finance database) | whatever the plugin does (`finance_data`: nothing, plain SQLite) |
 | `caddy_data` | edge | Caddy's runtime state | n/a |
+| `audit_export_state` | audit-exporter (`/audit-export`; New Relic overlay) | The audit exporter's cursor: per table, the last exported id and a digest of that row | nothing (no secret) |
 
 Compose puts the project name before each name (`aab_broker_data`, ...).
 Back up all of them together with `.env` (see `deploy/DEPLOY.md` >
@@ -413,6 +429,69 @@ one service, use `docker compose logs -f --since 10m broker`. To follow one
 request, use `docker compose logs --no-log-prefix | grep <request-id>`.
 [logging.md](logging.md) gives the format, the never-logged list, the
 redaction backstop and how to ship logs to a collector.
+
+## Shipping logs and the audit record to New Relic
+
+The opt-in New Relic overlay sends every service's log lines and the audit
+record (the `decisions` and `audit_log` tables) to New Relic Logs. An agent
+elsewhere can then query them with NRQL. `docs/logging.md` has the full
+description: the pipeline, the audit export, outages and the NRQL examples.
+
+**Enabling it.** Copy the INGEST - LICENSE key from New Relic (user menu >
+API keys). Set these lines in `.env`:
+
+```
+NEWRELIC_ENABLED=true
+NEW_RELIC_REGION=US
+NEW_RELIC_LICENSE_KEY=<the key you copied>
+LOG_FORMAT=json
+```
+
+Then run `$C up -d --build`, with `C` from
+[The compose file set](#the-compose-file-set).
+
+- **The key.** It is the one third-party credential in `.env`, because
+  Fluent Bit reads it at start (`docs/configuration.md`). Only `log-shipper`
+  receives it. Without it, compose refuses to start the overlay.
+- **The region.** `US` (the default) or `EU`, in capitals. It picks
+  `ops/fluent-bit/region-US.yaml` or `region-EU.yaml`. Any other value stops
+  the shipper from starting.
+- **What leaves the server.** Every log line, and every row of the two audit
+  tables with all its columns. They carry identifiers (resource ids, key
+  names, usernames, client IPs) but no secret, params, message text, note or
+  label. `AUDIT_EXPORT_HASH_RESOURCES=true` hashes the resource ids in the
+  audit export, not in the log lines.
+- **What never leaves.** The WhatsApp pairing QR (the shipper drops it), the
+  shipper's own log, every other table, and every secret.
+- **Retention.** New Relic keeps logs for a limited time: 30 days on the
+  free tier at the time of writing. `broker.db` stays the record. Back it up.
+- **A shipper outage blocks nothing.** The services log with
+  `fluentd-async`, and `docker compose logs` keeps working through Docker's
+  dual logging.
+
+One NRQL example, the denies per agent key in the last day:
+
+```sql
+SELECT count(*) FROM Log
+WHERE service = 'audit' AND `table` = 'decisions' AND decision = 'deny'
+FACET key_name SINCE 1 day ago
+```
+
+**Verify it.** After `$C up -d --build`:
+
+1. `$C ps` shows `log-shipper` with `127.0.0.1:24224->24224/tcp` and
+   `audit-exporter` up. No other new port is published.
+2. `$C logs log-shipper` shows `listening on 0.0.0.0:24224` and
+   `configured, hostname=log-api.newrelic.com:443` (`log-api.eu.newrelic.com`
+   for EU).
+3. `$C logs audit-exporter` shows `audit export done hash_resources=false
+   decisions=<n> audit_log=<n>`.
+4. In New Relic, `SELECT count(*) FROM Log WHERE service = 'audit' SINCE 1
+   hour ago` counts the exported rows.
+
+Nobody has run steps 1 to 4 against a real New Relic account yet. The
+pipeline and the Docker log driver were checked locally, with a stdout
+output in place of New Relic.
 
 ## Rotating secrets
 
@@ -438,7 +517,8 @@ public mode).
 | `INSTALLER_TOKEN` | broker, aab-installer | `$C up -d broker aab-installer` (with `C` from [The compose file set](#the-compose-file-set)). A job in flight is lost: the installer marks it failed on restart. |
 
 Rotate third-party values at their source. Then enter them again where they
-live: the console for credentials, `.env` for Cloudflare Access.
+live: the console for credentials, `.env` for Cloudflare Access and for the
+New Relic license key (the one credential kept there by exception).
 
 | Value | Where to rotate | Then |
 |---|---|---|
@@ -448,6 +528,7 @@ live: the console for credentials, `.env` for Cloudflare Access.
 | `CF_ACCESS_AUD` / team domain | Cloudflare Zero Trust | `up -d broker`. |
 | Origin certificate / AOP CA | Cloudflare SSL/TLS > Origin Server | Replace files in `edge/certs`, `up -d edge`. |
 | The installer's GitHub token (private plugin repositories) | GitHub > Settings > Developer settings > tokens: regenerate, or create a new one and delete the old | Paste it in the console (Plugins > + Add plugin, Replace). Used from the next inspect, install or upgrade; no restart. |
+| `NEW_RELIC_LICENSE_KEY` (New Relic overlay) | New Relic > user menu > API keys: create a new INGEST - LICENSE key, delete the old one after | Put it in `.env`, then `$C up -d log-shipper`. |
 
 **Clearing a plugin's old store.** After its `PLUGIN_SECRETS_KEY_<SERVICE>`
 changes, a plugin service reports "reconnect required" and fails closed. Its
@@ -530,6 +611,7 @@ to run, because their overlays stay in the file set.
 ```
 plugins.d/<service>/src/          the plugin repository at the reviewed commit
 plugins.d/<service>/compose.yml   the overlay rendered from its descriptor
+plugins.d/<service>/newrelic.yml  its logging override for the New Relic overlay
 plugins.d/<service>/install.json  source, ref, commit, plugins, volumes, when
 plugins.d/_installer/             job state and log lines; temporary clones
 ```

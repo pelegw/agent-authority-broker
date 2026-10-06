@@ -19,11 +19,14 @@ rows of that request carry the same id in `request_id`.
 | `aab-installer` (installer overlay) | `aab_installer.*` | One access line per API call from the broker (`aab_installer.access`, actor `broker`); refused calls (bad or missing `X-Installer-Token`, with the path and whether the header was present); each package inspected (source, ref, commit, service, plugin ids); each job queued, done or failed (job id, kind, service, source, ref, duration, the exception class); the ready line (version, `AAB_HOME`, the allowed sources, `git_auth=per_request`: the installer holds no GitHub token, the broker sends one with each request that needs it). The job's own log, shown in the console, is separate: see [The installer's job logs](#the-installers-job-logs). |
 | `whatsapp-sidecar` | Go `log` | One request line per API call (method, path, status, duration, request id); send results (message id only); QR events; connection state changes; whatsmeow's own lines. |
 | `edge` (public overlay) | Caddy | Caddy's own log, unchanged. |
+| `audit-exporter` (New Relic overlay) | `broker.audit_export` | On stdout, one JSON object per new row of the audit record: this is the export itself. On stderr, one line per run (`audit export done hash_resources=<true|false> decisions=<n> audit_log=<n>`), or the reason a run failed. See [Shipping logs and the audit record to New Relic](#shipping-logs-and-the-audit-record-to-new-relic). |
+| `log-shipper` (New Relic overlay) | Fluent Bit | Its own start, connection and retry lines. They stay on this server, in a rotated `json-file` log. |
 | `uvicorn` | `uvicorn`, `uvicorn.error` | Server start and stop, through the same handler and format. uvicorn's own access log is off: see [The access line](#the-access-line). |
 
 The `aab` CLI logs to **stderr**, at WARNING unless `LOG_LEVEL` sets a
-different level. Its stdout is its output. `aab simulate` and `aab skill build`
-run broker code in-process.
+different level. Its stdout is its output. `aab simulate`, `aab skill build`
+and `aab audit export` run broker code in-process. The lines of
+`aab audit export` carry the service name `audit-exporter`.
 
 ## Format
 
@@ -297,6 +300,10 @@ Docker deletes the oldest file. Change the anchor to keep more or less.
 Container logs are not a backup. Keep the decision record and the audit table,
 which are in `broker.db`.
 
+The New Relic overlay changes the driver of every service but the shipper to
+`fluentd`. Docker's dual logging then keeps the local copy. Its defaults are
+five files of 20 MB per container, compressed.
+
 ## Reading
 
 ```bash
@@ -320,6 +327,345 @@ collector receives one JSON object per line, with `ts`, `level`, `logger`,
 `service`, `request_id` and `message` as fields. `docker compose logs` reads
 `json-file`, `local` and `journald` directly. With other drivers, Docker's
 dual logging keeps a local copy for it (Docker 20.10 and later).
+
+For New Relic, do not edit the anchors. The opt-in overlay in the next
+section does all of it, the audit record included.
+
+## Shipping logs and the audit record to New Relic
+
+The New Relic overlay sends two streams off this server to New Relic Logs:
+
+- **The operational logs**: every line of every service, as above.
+- **The audit record**: every row of the `decisions` and `audit_log` tables
+  of `broker.db`, one log event per row.
+
+Then an agent elsewhere can query both with NRQL. The overlay is off by
+default. Nothing leaves the server until the owner turns it on.
+
+### What the overlay adds
+
+`docker-compose.newrelic.yml` adds two services and changes one setting of
+every service:
+
+- **`log-shipper`** runs Fluent Bit (`fluent/fluent-bit`, a pinned version).
+  Its configuration is in `ops/fluent-bit/`. It is the only container that
+  receives `NEW_RELIC_LICENSE_KEY`. It is alone on the network `net_logs`. It
+  mounts its configuration read-only and nothing else.
+- **`audit-exporter`** runs `aab audit export --loop` from the broker image.
+  It mounts `broker_data` read-only and has no network at all. It holds no
+  New Relic credential. Its stdout is the export.
+- **Every service** logs through Docker's `fluentd` driver to
+  `127.0.0.1:24224`, the shipper's only published port. The options are
+  `fluentd-async: "true"` and `tag: aab.{{.Name}}`.
+
+The shipper's own log stays local, in a rotated `json-file` log. Sent
+through itself, its errors about New Relic would loop back into New Relic.
+
+A compose override cannot name a service that no loaded file defines. Thus
+three services get their override from a file of their own:
+
+| Service | Override file | Loaded when |
+|---|---|---|
+| `edge` | `ops/newrelic/public.yml` | `SITE_DOMAIN` is set |
+| `aab-installer` | `ops/newrelic/installer.yml` | `INSTALLER_ENABLED=true` |
+| `plugin-<service>` (each installed plugin) | `plugins.d/<service>/newrelic.yml` | the installer wrote it |
+
+`scripts/compose-files.sh` adds these files after all other files, and only
+together with the file that defines the service. The installer writes
+`newrelic.yml` on every install and upgrade, whatever the setting. A plugin
+installed before this change has no such file. Its logs stay local until
+its next upgrade.
+
+### Enabling it
+
+1. Get the ingest license key. In New Relic, open your user menu, then
+   API keys. Copy the key of type INGEST - LICENSE.
+2. Set these lines in `.env`:
+
+   ```
+   NEWRELIC_ENABLED=true
+   NEW_RELIC_REGION=US
+   NEW_RELIC_LICENSE_KEY=<the key you copied>
+   LOG_FORMAT=json
+   ```
+
+   Use `NEW_RELIC_REGION=EU` for an account in the EU data center. Write it
+   in capitals.
+3. Optional: set `AUDIT_EXPORT_HASH_RESOURCES=true` (see
+   [What leaves the server](#what-leaves-the-server)). Set
+   `AUDIT_EXPORT_INTERVAL` to export more often than once an hour.
+4. Apply it:
+
+   ```bash
+   C="docker compose $(scripts/compose-files.sh)"
+   $C up -d --build
+   $C logs log-shipper
+   ```
+
+`NEWRELIC_ENABLED` must be exactly `true`, as `INSTALLER_ENABLED` must.
+`LOG_FORMAT=json` is not required. But with it, New Relic receives `level`,
+`logger`, `service`, `request_id` and `message` as attributes. A text line
+arrives as one `message` only.
+
+To turn shipping off, set `NEWRELIC_ENABLED=false`. Then run
+`$C up -d --remove-orphans`, with `C` set again. Compose recreates every
+service with its local `json-file` log and removes the two New Relic
+containers.
+
+### The license key
+
+The key is the one third-party credential in `.env`
+(`docs/configuration.md`). Fluent Bit reads it from its environment when it
+starts. No broker code holds it, so the console cannot take it.
+
+- Compose hands it to `log-shipper` alone. A test enforces this.
+- The overlay requires it (`${NEW_RELIC_LICENSE_KEY:?...}`). With the overlay
+  on and no key, compose refuses to start anything.
+- `scripts/init_secrets.py` writes it empty and never generates or rotates
+  it.
+- Nothing logs it. The shipper's configuration names it as
+  `${NEW_RELIC_LICENSE_KEY}` only.
+- An ingest key can only send data. It cannot read anything back.
+
+To rotate it, create a new ingest key in New Relic and put it in `.env`.
+Then run `$C up -d log-shipper` and delete the old key in New Relic.
+
+### Region
+
+`NEW_RELIC_REGION` picks the shipper's configuration file:
+
+| Value | File | Endpoint |
+|---|---|---|
+| `US` (the default) | `ops/fluent-bit/region-US.yaml` | `https://log-api.newrelic.com/log/v1` |
+| `EU` | `ops/fluent-bit/region-EU.yaml` | `https://log-api.eu.newrelic.com/log/v1` |
+
+Any other value names no file, and Fluent Bit does not start.
+`$C logs log-shipper` then shows `could not open configuration file`. The two
+files differ only in the endpoint, and a test keeps them so. Fluent Bit's New
+Relic output is named `nrlogs`.
+
+### What leaves the server
+
+- Every log line of every service, after the four steps of
+  `ops/fluent-bit/pipeline.yaml` (below). The lines carry no secret, params,
+  message text, note or label ([Never logged](#never-logged-and-the-backstop)).
+  But they do carry identifiers: resource ids (a WhatsApp chat id holds a
+  phone number), key names, usernames and client IPs.
+- Every row of `decisions` and `audit_log`, with every column. A decision row
+  holds `params_hash`, never the params. `audit_log.detail` can quote
+  identifiers, for example a hidden resource, a Telegram chat id or the
+  resources of a capability.
+
+With `AUDIT_EXPORT_HASH_RESOURCES=true`, the audit export replaces these
+values with `sha256:<first 16 hex digits>`:
+
+- The `resource` column of both tables.
+- Every string inside `audit_log.detail`. Keys and numbers stay.
+
+Equal values still give equal hashes, so counts and groups still work. Two
+limits apply:
+
+- The hash has no key. Somebody who guesses a short identifier, such as a
+  phone number, can confirm the guess.
+- The option changes the audit export only. The service log lines still
+  carry `resource=` in clear. Keep shipping off if no identifier may leave.
+
+### What never leaves the server
+
+- The WhatsApp pairing QR. The sidecar prints it to stdout for an operator
+  on this server, and the QR can link a phone to this broker. The shipper
+  keeps only the sidecar's real log lines: Go's format
+  (`2026/09/24 20:31:35.601156 ...`) and whatsmeow's
+  (`20:31:35.601 [WhatsApp INFO] ...`). The QR block, the banners and
+  anything else the sidecar prints stay in `docker compose logs`.
+- The shipper's own log.
+- Any table but `decisions` and `audit_log`. The exporter never reads
+  `actions` (params, notes, labels) or `plugin_secrets`.
+- Any secret or token. They are not in the logs and not in those two tables.
+
+Keep `LOG_LEVEL=INFO` while shipping. `DEBUG` adds lines meant for local
+diagnosis.
+
+### The shipper's pipeline
+
+`ops/fluent-bit/pipeline.yaml` changes each record in four steps:
+
+1. Docker splits a line longer than 16 KB into parts. The `multiline` filter
+   joins them, so a large audit row still parses as one JSON object.
+2. The `grep` filter drops every line of `whatsapp-sidecar` that is not a
+   log line (above).
+3. The `parser` filter turns each JSON line into attributes. A text line
+   does not parse and passes unchanged.
+4. A parsed service line has its own `message`, so the `modify` filter drops
+   the raw copy. An audit row has no `message`, so its raw line stays as the
+   log message.
+
+Every event also carries `container_name` (for example `/aab-broker-1`) and
+`source` (`stdout` or `stderr`).
+
+### The audit export
+
+`aab audit export` (module `broker/broker/audit_export.py`) prints each row
+it did not print before as one JSON line:
+
+```json
+{"service":"audit","table":"decisions","id":42,"request_id":"5f0c...","kind":"decision","ts":1790000000,"principal_id":"...","key_id":3,"key_name":"bot","grant_chain":"[\"...\"]","target":"whatsapp","action":"send_message","resource":"...","params_hash":"...","decision":"deny","reason":"out_of_grant","enforced_where":"{}","outcome":null,"actor_principal":null,"actor_via":null,"prev_hash":"...","hash":"...","signed":1}
+```
+
+- `service` is always `audit`. `table` is `decisions` or `audit_log`. The
+  other keys are the columns of the row, with their stored values.
+- The JSON columns (`grant_chain`, `enforced_where`, `detail`) stay JSON
+  text, as stored. The hash chain covers their parsed values
+  (`broker/broker/decisions.py`), so parse them to recompute a hash.
+- `ts` is the time of the decision, in unix seconds. The event's own
+  `timestamp` is the time of the export, up to one interval later.
+
+How it reads `broker.db`:
+
+- The volume is mounted read-only, and the connection is `mode=ro` with
+  `query_only`. The exporter cannot change the record it copies.
+- SQLite can read a WAL database from a read-only mount only while
+  `broker.db-wal` and `broker.db-shm` exist. The exporter cannot create them.
+  Thus the broker keeps one idle connection open while it runs
+  (`db.hold_open()`), and the two files exist as long as it runs.
+- While the broker is stopped, a run fails with `broker.db could not be
+  read (unable to open database file); is the broker running?` and exports
+  nothing. The next run continues where the last good one ended.
+
+Where it resumes:
+
+- A cursor file in the volume `audit_export_state` holds, per table, the
+  last exported id and a digest of that row. It cannot live in
+  `app_config`, because the exporter cannot write `broker.db`.
+- The exporter prints a batch of up to 500 rows, then moves the cursor. A
+  crash between the two prints that batch again. Thus a row can arrive
+  twice, but never not at all. `table`, `id` and `hash` identify a repeat.
+- If the row under the cursor is gone or changed, `broker.db` was replaced
+  or restored. The exporter logs a warning and exports that table again from
+  the start.
+- A missing, empty or malformed `broker.db` exports nothing and moves
+  nothing.
+
+To send everything again, for example after an outage that lost lines, run
+the exporter once with `--reset`:
+
+```bash
+$C stop audit-exporter
+$C run --rm audit-exporter aab audit export --reset
+$C start audit-exporter
+```
+
+Without Docker, the same command reads any copy of `broker.db`:
+`aab audit export --db broker.db --state cursor.json`.
+
+### Outages and delivery
+
+- **The shipper is down or not started yet.** Every service starts and runs:
+  `fluentd-async` connects in the background. `docker compose logs` keeps
+  working through Docker's dual logging.
+- **New Relic is unreachable.** The shipper retries without end. Records
+  wait in its memory, up to 32 MB.
+- **Lines are lost when a buffer is full.** That happens when the shipper is
+  full, when the Docker driver's buffer is full, or when the daemon or the
+  shipper restarts. The lost lines are still in `docker compose logs`.
+  A lost audit row shows as a gap (the NRQL below finds it). Send the rows
+  again with `--reset`.
+
+New Relic is a copy for queries, not the record. The authoritative record is
+`broker.db`, with its hash chain (`aab decisions verify`).
+
+**Trust.** Docker's `fluentd` driver has no authentication, so the shipper's
+port has none either. Any process on this host can send it lines, with any
+fields. No container can: the port is on the host's loopback, and no
+container shares `net_logs`. Thus an event in New Relic is only as
+trustworthy as this host. Before an agent relies on an audit event, it walks
+the chain (below). A forged decision row shows up there as a conflict: two
+rows with one id, or a `prev_hash` that matches no row. Only
+`aab decisions verify`, which holds `DECISION_SIGNING_KEY`, tells which row
+is real.
+
+### Retention
+
+New Relic keeps log events for a limited time. At the time of writing, the
+free tier keeps them for 30 days and ingests 100 GB per month at no cost.
+Check the current values on your account's data management page. An event
+older than the retention is gone from New Relic. Back up `broker.db` for
+anything older (`deploy/DEPLOY.md` > Operations > Backups).
+
+### Querying with NRQL
+
+An agent queries through New Relic's NerdGraph API with a New Relic user key.
+That key reads data. It is a different key from the ingest key, and it never
+goes into this server's `.env`. All examples run on the `Log` event type.
+
+Denies per agent key, last day:
+
+```sql
+SELECT count(*) FROM Log
+WHERE service = 'audit' AND `table` = 'decisions' AND decision = 'deny'
+FACET key_name, reason SINCE 1 day ago
+```
+
+Outcomes that failed with a 5xx (503 is "not delivered", 502 is "outcome
+unknown"):
+
+```sql
+SELECT count(*) FROM Log
+WHERE service = 'audit' AND `table` = 'decisions' AND kind = 'outcome'
+  AND (outcome IN ('unavailable', 'unknown') OR outcome LIKE 'error:5%')
+FACET target, action, outcome SINCE 1 day ago
+```
+
+HTTP 5xx answers in the access lines (needs `LOG_FORMAT=json`):
+
+```sql
+SELECT count(*) FROM Log
+WHERE logger LIKE '%.access' AND message LIKE '% status=5%'
+FACET service SINCE 1 hour ago
+```
+
+Failed owner logins, by client IP:
+
+```sql
+SELECT count(*) FROM Log
+WHERE service = 'audit' AND `table` = 'audit_log'
+  AND action IN ('auth.login_failed', 'auth.setup_failed')
+FACET capture(detail, r'.*"ip": "(?P<ip>[^"]*)".*') SINCE 1 day ago
+```
+
+Installer and pin events, newest first:
+
+```sql
+SELECT ts, actor, action, resource, result, detail FROM Log
+WHERE service = 'audit' AND `table` = 'audit_log'
+  AND action IN ('plugin.pin', 'plugin.unpin', 'plugin.refused', 'plugin.install',
+                 'plugin.upgrade', 'plugin.remove', 'installer.git_token.set',
+                 'installer.git_token.clear')
+SINCE 7 days ago LIMIT 100
+```
+
+The installer's own job lines: `SELECT message FROM Log WHERE service =
+'installer' SINCE 7 days ago`.
+
+A gap in the decision chain. First a quick check:
+
+```sql
+SELECT min(id), max(id), count(*) FROM Log
+WHERE service = 'audit' AND `table` = 'decisions' SINCE 7 days ago
+```
+
+If `max - min + 1` is greater than `count`, ids are missing. A repeated batch
+adds rows, so it can hide a gap. The full check walks the chain:
+
+```sql
+SELECT id, prev_hash, hash FROM Log
+WHERE service = 'audit' AND `table` = 'decisions' SINCE 7 days ago LIMIT MAX
+```
+
+Sort the result by `id` and drop repeats of the same `id` and `hash`. Then
+each `prev_hash` must equal the `hash` of the row before it. The first row of
+the chain has a `prev_hash` of 64 zeros. A query returns at most 5000 rows,
+so walk a long chain in id ranges (`AND id > 5000`, ...).
 
 ## The WhatsApp pairing QR
 

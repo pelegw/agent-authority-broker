@@ -22,6 +22,16 @@ here instead of holding them.
 
 ## Not verified
 
+- **Shipping to New Relic.** Nobody has sent data to a real New Relic
+  account yet: it needs the owner's license key. These parts were checked
+  locally under Docker:
+  - The overlay, with `docker compose config`.
+  - The shipper's configuration, with Fluent Bit's `--dry-run`.
+  - Docker's `fluentd` driver feeding the shipper's pipeline, with a stdout
+    output in place of New Relic.
+  - A service that starts and keeps logging while the shipper is down.
+  - The audit exporter in the broker image, reading a read-only volume while
+    another container held the database open. The full stack did not run.
 - **Google downscoped refresh against the real endpoint.** The plugin rejects
   any token wider than it asked for. If Google ignores the requested subset,
   the manifests' `scopes` narrowing moves to `proxy` and does not claim target

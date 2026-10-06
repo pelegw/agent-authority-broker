@@ -92,8 +92,9 @@ if [ "\$(sed -n 's/^AAB_HOME=//p' .env | tail -n 1 | tr -d '\r')" != '${REMOTE_D
   echo 'WARNING: AAB_HOME in .env is not ${REMOTE_DIR}: the plugin installer would mount the wrong checkout.'
 fi
 # The compose file set is never hand-listed: the base file, the public overlay
-# (SITE_DOMAIN set), the installer overlay (INSTALLER_ENABLED=true) and every
-# installed plugin's rendered overlay (plugins.d/<service>/compose.yml).
+# (SITE_DOMAIN set), the installer overlay (INSTALLER_ENABLED=true), every
+# installed plugin's rendered overlay (plugins.d/<service>/compose.yml) and
+# the New Relic overlay with its logging overrides (NEWRELIC_ENABLED=true).
 C="docker compose \$(sh scripts/compose-files.sh)"
 echo "compose files: \$(sh scripts/compose-files.sh)"
 \$C up -d --build
@@ -102,5 +103,6 @@ REMOTE
 
 echo
 echo "Deployed: edge, broker, plugin-whatsapp, whatsapp-sidecar, plugin-github, plugin-google,"
-echo "plus aab-installer and every installed plugin when INSTALLER_ENABLED=true."
+echo "plus aab-installer and every installed plugin when INSTALLER_ENABLED=true,"
+echo "and log-shipper and audit-exporter when NEWRELIC_ENABLED=true."
 echo "Open https://\${SITE_DOMAIN}/admin (via Cloudflare Access) to create the owner account."
