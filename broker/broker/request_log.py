@@ -30,8 +30,9 @@ from urllib.parse import quote
 from .logging_setup import NO_ID, bind, kv, new_request_id, valid_request_id
 
 HEADER = b"x-request-id"
-# Container and orchestrator probes: frequent, and never interesting.
-QUIET_PATHS = frozenset({"/health", "/v1/health"})
+# Container and orchestrator probes, and the owner's monitoring summary:
+# frequent, and never interesting.
+QUIET_PATHS = frozenset({"/health", "/v1/health", "/v1/admin/health"})
 
 
 def _header(scope, name: bytes) -> str | None:

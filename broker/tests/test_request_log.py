@@ -69,6 +69,14 @@ def test_health_probes_are_not_logged(client, caplog):
     assert access_lines(caplog) == []
 
 
+def test_the_owner_health_summary_is_not_logged_either(client, echo_local, admin_headers,
+                                                       caplog):
+    # A monitor asks every minute; like the liveness probe, it is noise.
+    caplog.set_level(logging.INFO)
+    assert client.get("/v1/admin/health", headers=admin_headers).status_code == 200
+    assert access_lines(caplog) == []
+
+
 def test_the_actor_is_the_agent_key(client, echo_local, make_agent, caplog):
     agent = make_agent([cap(["list_items"])], name="reader-7")
     caplog.set_level(logging.INFO)

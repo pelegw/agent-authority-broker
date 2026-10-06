@@ -211,6 +211,8 @@ layers are checked: the Access identity and the owner credential.
 ```bash
 curl https://aab.example.com/v1/health          # {"status":"ok","version":"0.2.0"}
 curl -s -o /dev/null -w '%{http_code}\n' https://<elastic-ip>/v1/health   # should FAIL/timeout: origin not directly reachable
+curl -H "Authorization: Bearer $AAB_ADMIN_TOKEN" -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+     -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" https://aab.example.com/v1/admin/health   # 200 ok / 503 degraded: the line for your uptime monitor
 ```
 `https://aab.example.com/v1/admin/*` should require Access; a request without the
 Cloudflare secret header (i.e. straight to the origin) should get 403.

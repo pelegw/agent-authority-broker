@@ -108,7 +108,8 @@ request method=POST path=/v1/targets/echo/actions/list_items status=200 duration
   plugin service (the broker, holding that service's token), or `-`.
 - `ip` is the client address the origin guard trusts (`CF-Connecting-IP`
   behind Cloudflare, else the socket peer).
-- 5xx lines are WARNING; health probes (`/health`) are not logged.
+- 5xx lines are WARNING; health probes (`/health`, `/v1/health`) and the
+  owner's monitoring summary (`/v1/admin/health`) are not logged.
 
 uvicorn's own access log is **off**, structurally: uvicorn writes its access
 line only when the `uvicorn.access` logger has a handler path (that is all

@@ -1,11 +1,13 @@
 """Owner routes for day-to-day operation: queued actions, hidden resources,
-resource lookup for pickers, and the decision record.
+resource lookup for pickers, the decision record, and the health summary
+an uptime monitor polls.
 """
 
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .. import decisions, hidden
@@ -13,7 +15,7 @@ from ..actions import queue
 from ..deps import AdminContext, require_admin
 from ..errors import PolicyError
 from ..logging_setup import kv
-from ..services import admin, plugins_admin
+from ..services import admin, plugins_admin, system_health
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 log = logging.getLogger(__name__)
@@ -96,3 +98,19 @@ def verify_decisions(from_id: int | None = None,
         ok=result["ok"], checked=result["checked"], first_bad_id=result["first_bad_id"],
         signed=result["signed"], from_id=from_id, by=ctx.username, via=ctx.via))
     return result
+
+
+# ------------------------------------------------------------ health summary
+
+@router.head("/v1/admin/health", include_in_schema=False)
+@router.get("/v1/admin/health")
+def health_summary(request: Request) -> Response:
+    """200 when every check is ok, 503 when any is not: the status code is
+    what a monitor alerts on, the body says which check and why. HEAD runs
+    the same checks and answers with the status alone (UptimeRobot and
+    other monitors probe with HEAD)."""
+    report = system_health.summary()
+    code = 200 if report["status"] == "ok" else 503
+    if request.method == "HEAD":
+        return Response(status_code=code)
+    return JSONResponse(report, status_code=code)

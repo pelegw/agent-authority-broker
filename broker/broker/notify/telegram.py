@@ -156,6 +156,12 @@ def poll_running(running: bool) -> None:
     _poll["running"] = running
 
 
+def poll_state() -> dict:
+    """A copy of the poll loop's state: running, last success, last error
+    (type and status only), error streak."""
+    return dict(_poll)
+
+
 def poll_ok() -> bool:
     """Record a successful getUpdates; True when it ends an error streak."""
     recovered = _poll["consecutive_errors"] > 0
@@ -301,7 +307,7 @@ def status() -> dict:
         "user_id": user_id() or None,
         "linking": pending_link() is not None,
         "active": active(),
-        "poll": dict(_poll),
+        "poll": poll_state(),
     }
 
 

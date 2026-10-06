@@ -133,8 +133,25 @@ gateway, for example), set `BROKER_PORT` in `.env`.
    `plugin-whatsapp` towards `whatsapp-sidecar:8081`), while the broker
    reaches all three (step 5 lists all five plugins).
 3. **Health.** `curl -s http://127.0.0.1:8080/health` and `/v1/health`
-   answer `200 {"status":"ok","version":"0.2.0"}`. They report liveness only,
-   never plugin or connection state.
+   answer `200 {"status":"ok","version":"0.2.0"}` (`HEAD` answers the status
+   alone). They report liveness only, never plugin or connection state. The
+   owner's summary for an uptime monitor is `GET` or `HEAD`
+   `/v1/admin/health` with an `aab_admin_` token (or the
+   session cookie): it checks the database, refreshes every enabled
+   plugin's `/status` live (in parallel, stored as the plugin cards store
+   it) and reads the Telegram channel, then answers
+   `200 {"status":"ok", ...}` or `503 {"status":"degraded",
+   "failing":["plugins.whatsapp", ...], ...}`. `checks.database`,
+   `checks.plugins.<id>` and `checks.telegram` each carry `ok`; a disabled
+   plugin or channel is never a failure, an enabled plugin must be
+   reachable, healthy and connected, and an enabled Telegram channel must
+   have a readable token, a linked chat, a running poll loop and fewer
+   than three poll errors in a row. Point the monitor at it with
+   `Authorization: Bearer aab_admin_...` (in public mode also the
+   Cloudflare Access service-token headers, as for the CLI in
+   `deploy/DEPLOY.md`) and alert on the status code. The call takes one
+   plugin timeout at most. None of these routes is written to the access
+   log.
 4. **Setup page.** `/admin` shows the setup page until the owner exists:
    `GET /auth/status` answers `{"setup_completed":false,"login_required":false}`.
    `POST /auth/setup` with `{setup_token, username, password}` answers

@@ -5,6 +5,22 @@ lives only in `VERSION`.
 
 ## [Unreleased]
 
+### Added
+- `GET /v1/admin/health`: the owner's health summary for an uptime monitor.
+  Behind owner credentials (an `aab_admin_` token or the session), it checks
+  the database, refreshes every enabled plugin's `/status` live (in
+  parallel, stored as the plugin cards store it) and reads the Telegram
+  channel, then answers `200 {"status": "ok"}` or `503 {"status":
+  "degraded", "failing": [...]}` with one `ok` per check. A disabled
+  plugin or channel never fails the summary; an enabled plugin must be
+  reachable, healthy and connected; an enabled Telegram channel must have a
+  readable token, a linked chat, a running poll loop and fewer than three
+  poll errors in a row. Like `/health`, it is not written to the access
+  log. `/health` itself is unchanged: liveness only, for anyone.
+- `HEAD` on `/health`, `/v1/health` and `/v1/admin/health`, answering the
+  status alone, because uptime monitors such as UptimeRobot probe with
+  HEAD (FastAPI does not derive HEAD from GET; it answered 405).
+
 ### Changed
 - The role is presented as what it always was in `effective = P ∩ G ∩ R`: a
   **ceiling**. It never grants anything (the capabilities are the only

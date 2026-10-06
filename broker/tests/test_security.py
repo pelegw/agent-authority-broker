@@ -75,6 +75,7 @@ def test_health_is_exempt_from_origin_secret(env, monkeypatch):
     client = _fresh_client()
     assert client.get("/v1/health").status_code == 200  # probes work without the secret
     assert client.get("/health").status_code == 200
+    assert client.head("/health").status_code == 200   # UptimeRobot probes with HEAD
 
 
 def test_cf_connecting_ip_used_only_when_trusted(env, monkeypatch):
