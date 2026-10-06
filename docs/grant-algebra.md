@@ -1,13 +1,13 @@
 # Grant algebra
 
-The formal spec for `broker/broker/authority/`. Every statement here has a
-test; the invariants at the end are hypothesis properties in
+This is the formal spec for `broker/broker/authority/`. Every statement here
+has a test. The invariants at the end are hypothesis properties in
 `broker/tests/authority/test_grant_properties.py`.
 
 ## Objects
 
-**Capability** (`capability.Capability`): an immutable allow-statement on one
-target.
+**Capability** (`capability.Capability`): an immutable statement that permits
+actions on one target.
 
 ```json
 {"target": "echo",
@@ -29,30 +29,36 @@ target.
 - `expires_at`: unix seconds; `null` = never (+∞).
 - `budget`: `{per_minute?, per_day?}`; absent field = unlimited.
 
-**Bottom** (⊥, nothing allowed) is `None`. A Capability with an empty action
-set or an empty selector cannot be constructed.
+**Bottom** (⊥, nothing permitted) is `None`. The constructor rejects a
+Capability with an empty action set or an empty selector.
 
-**Grant** (`grant.Grant`): a list of capabilities held by a key, with
-`kind ∈ {root, expansion, delegation}`, `status ∈ {pending, active, rejected,
-expired, revoked}`, optional `expires_at`, and `parent_grant_id` (null for a
-root). A grant is **live** at `now` iff `status = active ∧ (expires_at = null
-∨ expires_at > now)`.
+**Grant** (`grant.Grant`): a list of capabilities that a key holds, with these
+fields:
 
-**FormTable**: `target -> {name -> FormSpec(form, values, kind)}` built from
-validated manifests (`form_table`). Derived narrowings are not in it.
-**Lattice** bundles a FormTable with `ancestors(kind, id) -> [ids]`, the
-folder ancestry used by `subtree` (default: no ancestry, only exact ids
-match).
+- `kind ∈ {root, expansion, delegation}`.
+- `status ∈ {pending, active, rejected, expired, revoked}`.
+- Optional `expires_at`.
+- `parent_grant_id` (null for a root).
+
+A grant is **live** at `now` iff
+`status = active ∧ (expires_at = null ∨ expires_at > now)`.
+
+**FormTable**: `target -> {name -> FormSpec(form, values, kind)}`.
+`form_table` builds it from validated manifests. Narrowings with
+`derived_from` are not in it.
+**Lattice** bundles a FormTable with `ancestors(kind, id) -> [ids]`. That is
+the folder ancestry that `subtree` uses. The default has no ancestry: only
+exact ids match.
 
 ## Order: `cap_le(child, parent)`
 
 `child ≤ parent` iff all of:
 
-1. same target, and the target is in the FormTable;
-2. `child.actions ⊆ parent.actions`;
-3. `rank(child.mode) ≤ rank(parent.mode)`;
-4. `child.expires_at ≤ parent.expires_at` (null = +∞);
-5. per budget field: parent absent, or child present and `≤` parent;
+1. same target, and the target is in the FormTable.
+2. `child.actions ⊆ parent.actions`.
+3. `rank(child.mode) ≤ rank(parent.mode)`.
+4. `child.expires_at ≤ parent.expires_at` (null = +∞).
+5. per budget field: parent absent, or child present and `≤` parent.
 6. per selector dimension (union of both sides), by form:
 
 | form | `≤` |
@@ -69,41 +75,50 @@ match).
 | `flag` | parent `false` ⇒ child `false` (absent = `true`). `true` is top, so a flag must be named for the permission it grants (`attachments`, `file_content`, not `metadata_only`); see below |
 | `level` | `rank(child) ≤ rank(parent)` in the manifest's `values` order |
 
-Anything the table cannot interpret (unknown target, a dimension the
-manifest does not declare, a value of the wrong type or outside a level's
-values, a name in the wrong slot) makes `cap_le` **false**.
+`cap_le` is **false** for anything that the table cannot interpret:
+
+- An unknown target.
+- A dimension that the manifest does not declare.
+- A value of the wrong type, or outside the values of a level.
+- A name in the wrong slot.
 
 ## Meet: `meet(a, b)`
 
-The greatest capability ≤ both, or ⊥:
+The result is the greatest capability ≤ both, or ⊥:
 
-- different targets or unknown target ⇒ ⊥;
-- `actions = a ∩ b`; empty ⇒ ⊥;
-- `mode = min`, `expires_at = min` (null = +∞), budget `min` per field;
-- selector per dimension: absent on one side ⇒ the other side; `list`,
-  `pattern` ⇒ `∩`; `subtree` ⇒ the nodes of each side that lie inside the
-  other side's roots, **pruned** of any root inside another kept root (so the
-  representation is canonical); an empty result ⇒ ⊥;
-- constraints: `range` ⇒ `min`, `flag` ⇒ `and`, `level` ⇒ `min`; a result
-  equal to top (`true`, the highest level) is dropped;
+- different targets or unknown target ⇒ ⊥.
+- `actions = a ∩ b`; empty ⇒ ⊥.
+- `mode = min`, `expires_at = min` (null = +∞), budget `min` per field.
+- selector per dimension:
+  - absent on one side ⇒ the other side.
+  - `list`, `pattern` ⇒ `∩`.
+  - `subtree` ⇒ the nodes of each side that lie inside the other side's
+    roots, **pruned** of any root inside another kept root (so the
+    representation is canonical).
+  - an empty result ⇒ ⊥.
+- constraints: `range` ⇒ `min`, `flag` ⇒ `and`, `level` ⇒ `min`. The meet
+  drops a result equal to top (`true`, the highest level).
 - anything uninterpretable ⇒ ⊥.
 
-Properties: commutative, associative (exactly, thanks to pruning and
-dropping tops), idempotent up to `≤`-equivalence (exactly on canonical
-input), `meet(a,b) ≤ a, b`, and it is the greatest such (`x ≤ a ∧ x ≤ b ⇒
-x ≤ meet(a,b)`).
+`meet` has these properties:
+
+- It is commutative.
+- It is associative (exactly, thanks to pruning and dropping tops).
+- It is idempotent up to `≤`-equivalence (exactly on canonical input).
+- `meet(a,b) ≤ a, b`.
+- It is the greatest such (`x ≤ a ∧ x ≤ b ⇒ x ≤ meet(a,b)`).
 
 ## Normalization: `normalize(cap, manifest) -> [cap]`
 
-Canonical form, applied when a capability enters the system:
+`normalize` makes the canonical form when a capability enters the system:
 
-1. expand action sugar (`*`, `read_*`, `write_*`, `destructive_*`);
+1. expand action sugar (`*`, `read_*`, `write_*`, `destructive_*`).
 2. validate every dimension and constraint against its declared form
-   (unknown names and derived dimensions raise);
-3. drop `"*"` selectors and top-valued constraints;
-4. reads are always direct: a draft capability containing reads is split
+   (unknown names and `derived_from` dimensions raise).
+3. drop `"*"` selectors and top-valued constraints.
+4. reads are always direct: split a draft capability that contains reads
    into `{reads, direct}` + `{writes, draft}`. Hence every stored draft
-   capability holds writes only, and `cap_le` / `meet` can compare `mode`
+   capability holds writes only. Thus `cap_le` / `meet` can compare `mode`
    by rank without knowing side effects.
 
 Normalization is idempotent. `[]` means ⊥.
@@ -111,26 +126,30 @@ Normalization is idempotent. `[]` means ⊥.
 ## Grants
 
 **Single cover**: `grant_le(child, parent)` iff every child capability is
-≤ **one** parent capability. Conservative (a child capability spanning two
-parent capabilities is refused), O(n·m), and each child capability has one
-explainable parent.
+≤ **one** parent capability. This rule is conservative: it rejects a child
+capability that spans two parent capabilities. It costs O(n·m). Each child
+capability has one explainable parent.
 
 **`narrow(parent, requested)`** = `{meet(r, p) : r ∈ requested, p ∈ parent,
 same target} \ {⊥}`, deduped, wrapped in `NarrowedCapabilities`. By
 construction `grant_le(narrow(p, r), p)` and every result is ≤ some requested
 capability. `clipped(requested, narrowed)` lists the requested capabilities
-not covered by a single narrowed one; empty means "you got exactly what you
-asked for", otherwise callers return 400 with the narrowed version.
+that no single narrowed capability covers. Empty means "you got exactly what
+you asked for". Otherwise, callers return 400 with the narrowed version.
 
-**Structural guarantee.** `NarrowedCapabilities.__post_init__` raises unless
-given a sentinel private to `grant.py` (not exported), the class cannot be
-subclassed, and `dataclasses.replace` cannot copy the sentinel.
-`store.insert_child_grant` accepts only `type(x) is NarrowedCapabilities`,
-checks the parent is live, same principal, and in the key's lineage, clamps
-the child's expiry to the parent's, and re-checks `grant_le(child_row,
-parent_row)` inside the same `BEGIN IMMEDIATE` transaction, rolling back on
-failure. Root grants go through `insert_root_grant`, which refuses delegated
-keys.
+**Structural protection.** `NarrowedCapabilities.__post_init__` raises unless
+it gets a sentinel that is private to `grant.py` and not exported. The class
+does not permit subclasses. `dataclasses.replace` cannot copy the sentinel.
+`store.insert_child_grant` does these steps:
+
+- It accepts only `type(x) is NarrowedCapabilities`.
+- It checks that the parent is live, has the same principal, and is in the
+  lineage of the key.
+- It clamps the expiry of the child to the expiry of the parent.
+- It checks `grant_le(child_row, parent_row)` again inside the same
+  `BEGIN IMMEDIATE` transaction, and rolls back on failure.
+
+Root grants go through `insert_root_grant`, which rejects delegated keys.
 
 ## Effective permissions (live)
 
@@ -152,51 +171,66 @@ effective = { meet(meet(c, p), r1, ..., rn) : c ∈ G, p ∈ P,
             minus the key's merged denies, minus expired capabilities
 ```
 
-R is applied for **every** key in the chain, not only the caller's, so
-lowering an ancestor's role bounds its descendants at once.
+The broker applies R for **every** key in the chain, not only for the key of
+the caller. Thus lowering the role of an ancestor bounds its descendants at
+once.
 
-**The role is a ceiling.** It never grants anything: a key with no grants
-has an empty G, and a meet with R cannot add to it. It only caps every
-capability below it, per side effect: under `read-draft` a direct
-capability's writes run as drafts, under `read-only` they are denied, and
-under `full` (everything direct) nothing changes, so the capabilities
-decide. That is why an owner-created key defaults to `full`
-(`auth.OWNER_KEY_DEFAULT_ROLE`) and a lower ceiling is something the owner
-chooses; a delegated key defaults to its caller's role and never exceeds it.
-Each role's mode per side effect only rises with its rank, so meeting the
-roles of a whole key chain is exactly meeting the lowest one, which
-`get_my_access` reports as the key's `ceiling` (`role_ceiling.key_ceiling`).
+**The role is a ceiling.** It never grants anything. A key with no grants has
+an empty G, and a meet with R cannot add to it. It only caps every capability
+below it, per side effect:
+
+- Under `read-draft`, the writes of a direct capability run as drafts.
+- Under `read-only`, the broker denies those writes.
+- Under `full` (everything direct), nothing changes, so the capabilities
+  decide.
+
+That is why a key that the owner creates defaults to `full`
+(`auth.OWNER_KEY_DEFAULT_ROLE`). A lower ceiling is a choice of the owner. A
+delegated key defaults to the role of its caller and never exceeds it. The
+mode of each role per side effect only rises with its rank. Thus meeting the
+roles of a whole key chain is exactly meeting the lowest one. `get_my_access`
+reports that role as the `ceiling` of the key (`role_ceiling.key_ceiling`).
 
 `broker/broker/role_ceiling.py` spells out what the ceiling does to each
-action, for the agent (`get_my_access`: `effective_mode` wherever the
-ceiling lowers an action, as `draft` or `denied`), for the owner (the
-pending-grant list's `ceiling_note` and the Telegram card: approving a
-request the ceiling caps does not do what the agent asked) and for the
-console's capability editor (the same rule client-side, from a table a test
-holds equal to `roles.role_caps`). It is built from the pieces the engine
-uses (`roles.role_caps`, the meet's lower mode, `policy.run_mode`), and it
-only describes: `policy.evaluate` decides, and a test holds the description
-to real engine decisions for every ceiling, mode and side effect.
+action, for three readers:
 
-Nothing trusts a stored child grant: a root edited narrower shrinks every
-descendant on the next call, a hand-edited child row cannot exceed its
-parent, and disabling a plugin, revoking or expiring any link, or disabling
-any ancestor key (authentication walks the key chain) takes effect with no
-cascade writes. Any unparseable grant row makes `effective` return `[]` for
-that key.
+- The agent: `get_my_access` shows `effective_mode` wherever the ceiling
+  lowers an action, as `draft` or `denied`.
+- The owner: the `ceiling_note` of the pending-grant list, and the Telegram
+  card. If the ceiling caps a request, approving it does not do what the
+  agent asked.
+- The capability editor of the console: the same rule on the client side,
+  from a table that a test holds equal to `roles.role_caps`.
+
+The module uses the same pieces as the engine: `roles.role_caps`, the lower
+mode of the meet, and `policy.run_mode`. It only describes. `policy.evaluate`
+decides. A test holds the description to real engine decisions for every
+ceiling, mode and side effect.
+
+Nothing trusts a stored child grant:
+
+- A root that becomes narrower shrinks every descendant on the next call.
+- A hand-edited child row cannot exceed its parent.
+- These changes take effect with no cascade writes: disabling a plugin,
+  revoking or expiring any link, or disabling any ancestor key.
+  Authentication walks the key chain.
+
+Any unparseable grant row makes `effective` return `[]` for that key.
 
 ## Denies (outside the lattice)
 
 The lattice has no deny. Denies are sets `{target: {kind: [ids]}}`:
 
-- per key (`api_keys.denies`); a key's effective denies are the **union**
-  along its key chain (`merged_denies`), computed at authentication;
-- owner-level `hidden_resources` (phase 3).
+- Per key (`api_keys.denies`). The effective denies of a key are the
+  **union** along its key chain (`merged_denies`). The broker calculates them
+  at authentication.
+- Owner-level `hidden_resources` (phase 3).
 
-`apply_denies` subtracts denied ids from explicit selectors whose dimension's
-resource kind matches (an emptied selector makes the capability ⊥).
-`"*"` selectors cannot be subtracted from; `is_denied` is the
-resolution-time check the policy engine applies to the concrete resource.
+`apply_denies` subtracts denied ids from the explicit selectors whose
+dimension has a matching resource kind. An emptied selector makes the
+capability ⊥. `apply_denies` cannot subtract from `"*"` selectors.
+`is_denied` is the resolution-time check that the policy engine applies to
+the concrete resource.
 
 ## Invariants (hypothesis properties)
 
@@ -218,28 +252,34 @@ resolution-time check the policy engine applies to the concrete resource.
     meet exceeds its root.
 11. Denies only grow along a key chain.
 
-CI runs 200 derandomized examples per property; `HYPOTHESIS_PROFILE=dev`
+CI runs 200 derandomized examples per property. `HYPOTHESIS_PROFILE=dev`
 runs 1000 random ones.
 
 ## Flag polarity (a rule for manifest authors)
 
-`true` is top for a `flag`: an absent flag means `true`, normalization drops
-`true`, and `meet` drops a result equal to `true`. So a flag can only ever
-restrict by being `false`, and it must be **named for the permission it
-grants**. A flag named for a restriction (`hide_private: true`,
-`metadata_only: true`) would be dropped as top and restrict nothing: the
-grant would fail open without any error. The Google manifests therefore use
-`private_events`, `others_events` and `file_content` (restricting with
-`false`) where the plan said `hide_private`, `own_events_only` and
-`metadata_only`, and their tests lint flag names. Likewise a `level`'s last
-value is top, so its values run from most restrictive to most permissive
-(`[freebusy, full]`, `[draft, direct]`).
+`true` is top for a `flag`:
+
+- An absent flag means `true`.
+- Normalization drops `true`.
+- `meet` drops a result equal to `true`.
+
+Thus a flag can only ever restrict by being `false`. Its name must state
+**the permission it grants**. Consider a flag named for a restriction,
+for example `hide_private: true` or `metadata_only: true`. Normalization
+drops it as top, and it restricts nothing. The grant then fails open without
+any error. Thus the Google manifests use `private_events`, `others_events`
+and `file_content`, and restrict with `false`. The plan said `hide_private`,
+`own_events_only` and `metadata_only`. The tests of the Google manifests lint
+the flag names. Likewise, the last value of a `level` is top. Thus its values
+run from the most restrictive to the most permissive (`[freebusy, full]`,
+`[draft, direct]`).
 
 ## Known conservative choices
 
-- Single cover refuses a child capability that two parent capabilities
-  could jointly cover.
-- `pattern` is compared as exact strings; `feat/*` does not cover `feat/x`.
-- A selector dimension that does not apply to some of a capability's actions
-  is still compared; a request carrying an irrelevant restriction may be
-  refused as not ≤ rather than accepted. Never permissive.
+- Single cover rejects a child capability that no single parent capability
+  covers, even when two parent capabilities cover it together.
+- The broker compares `pattern` as exact strings. `feat/*` does not cover
+  `feat/x`.
+- The broker still compares a selector dimension that does not apply to some
+  actions of a capability. Thus it can reject a request that carries an
+  irrelevant restriction as not ≤, and not accept it. Never permissive.
