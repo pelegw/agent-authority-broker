@@ -5,9 +5,9 @@ without giving them any of your credentials.
 
 An agent holds one thing: an `aab_` key, which works against this broker and
 nothing else. The broker holds no target credential either. Each target runs
-behind its own plugin container, which keeps that target's credential
-encrypted in its own volume and, where the target supports it, mints a
-short-lived, narrowed token for each call.
+behind its own plugin container. That container keeps the target's
+credential encrypted in its own volume. Where the target supports it, the
+container mints a short-lived, narrowed token for each call.
 
 On every call, the broker works out what the key can do right now:
 
@@ -15,10 +15,10 @@ On every call, the broker works out what the key can do right now:
 effective = P(owner) ∩ G(grant chain) ∩ R(role)   minus hidden and denied resources
 ```
 
-`P` is what you have connected, `G` is the key's grants walked up to the root,
-and `R` is the key's role, a ceiling that caps the grants below it. The broker
-then lets the call through, turns it into a draft for you to approve (in the
-console or on Telegram), or rejects it. Every decision goes into a
+`P` is what you have connected. `G` is the key's grants, walked up to the
+root. `R` is the key's role: a ceiling that caps the grants below it. The
+broker then lets the call through, turns it into a draft for you to approve
+(in the console or on Telegram), or rejects it. Every decision goes into a
 hash-chained, signed record before anything runs.
 
 - **Grants only narrow.** An agent can ask for more, and you approve. It can
@@ -51,7 +51,7 @@ hash-chained, signed record before anything runs.
 Each plugin service is one container on a private network shared with the
 broker only. No plugin can reach another plugin, the edge or the broker's
 database, and no plugin port is ever published. The broker sends each plugin
-*requirements* (what the key may see, the limits, the permission the call
+*requirements* (what the key can see, the limits, the permission the call
 needs), never a credential. Details and trust boundaries:
 [docs/architecture.md](docs/architecture.md).
 
@@ -102,9 +102,9 @@ GitHub App. You enter both in the console, never in `.env`
 | Drive | `plugin-google` | List, search, read, download; create, upload, move, share; trash and delete (destructive) | [google.md](docs/plugins/google.md) |
 
 A plugin is a manifest (actions, resources, limits) plus an adapter in its
-own container. The broker derives REST routes, MCP tools, approval cards, the
-console's capability editor and the agent guide from the manifest, so a new
-plugin touches no engine code.
+own container. From the manifest, the broker builds the REST routes, the MCP
+tools, the approval cards, the console's capability editor and the agent
+guide. A new plugin touches no engine code.
 
 **External plugins.** A plugin can live in its own repository. In the
 console, click **+ Add plugin**, enter `github.com/you/aab-plugin-x` at a
@@ -116,10 +116,10 @@ builds and starts it; you approve the manifest first. Start with
 ## Agents
 
 - **REST.** Every action is `POST /v1/targets/{target}/actions/{action}` with
-  `{"params": {...}}`, plus optional `as_draft`, `run_at` and `note`. A call
-  answers `200` with the result, `202` when it waits for approval or its
-  time, `403` when outside the grant, `404` for missing or hidden, `503` when
-  not delivered and safe to retry, `502` when the outcome is unknown.
+  `{"params": {...}}`, plus optional `as_draft`, `run_at` and `note`. The
+  answers: `200` with the result; `202` when the call waits for approval or
+  for its time; `403` outside the grant; `404` for missing or hidden; `503`
+  not delivered, safe to retry; `502` outcome unknown, never retried.
 - **MCP.** `/mcp` serves the same key one tool per action the key can reach
   right now, plus `get_my_access`, `request_permission` and `delegate`.
 - **The guide.** `GET /v1/me/skill` tells the agent how to address things and

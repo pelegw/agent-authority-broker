@@ -1,7 +1,8 @@
 # Status and caveats
 
-Version 0.3.0, single owner. This page says what is verified, what is not,
-and the limits an operator must know. The README does not repeat it.
+Version 0.3.0, single owner. This page lists the verified items, the items
+not yet verified, and the limits an operator must know. The README links
+here instead of holding them.
 
 ## Verified
 
