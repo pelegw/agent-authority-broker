@@ -296,13 +296,13 @@ one token and one key.
 
 | Container | Receives | Must never receive |
 |---|---|---|
-| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `SITE_DOMAIN` (public overlay only: builds the OAuth redirect URI `https://<SITE_DOMAIN>/oauth/callback/<service>`), `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE` and each installed external plugin (from its rendered overlay), `INSTALLER_URL` and `INSTALLER_TOKEN` (installer overlay only), `BROKER_DB`, `TZ`, `LOG_LEVEL`, `LOG_FORMAT` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, `INSTALLER_ALLOWED_SOURCES`, `INSTALLER_GIT_TOKEN`, the Docker socket, the `wa_data` and `wa_session` volumes |
+| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `SITE_DOMAIN` (public overlay only: builds the OAuth redirect URI `https://<SITE_DOMAIN>/oauth/callback/<service>`), `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE` and each installed external plugin (from its rendered overlay), `INSTALLER_URL` and `INSTALLER_TOKEN` (installer overlay only), `BROKER_DB`, `TZ`, `LOG_LEVEL`, `LOG_FORMAT` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, `INSTALLER_ALLOWED_SOURCES`, the Docker socket, the `wa_data` and `wa_session` volumes |
 | `plugin-whatsapp` | `PLUGIN_TOKEN_WHATSAPP`, `PLUGIN_SECRETS_KEY_WHATSAPP`, `SIDECAR_URL` (`http://whatsapp-sidecar:8081`), `SIDECAR_TOKEN`, `MESSAGES_DB` (`/data/messages.db`), `LOG_LEVEL`, `LOG_FORMAT`, `wa_data` (ro) | Other services' tokens/keys, broker secrets (`DECISION_SIGNING_KEY`, `BROKER_SECRETS_KEY`, `SETUP_TOKEN`, `ORIGIN_SECRET`), the `wa_session` volume |
 | `whatsapp-sidecar` | `SIDECAR_TOKEN`, `DEVICE_NAME`, `TZ`, `LOG_LEVEL`, `SESSION_DIR` (`/session`), `wa_data` (rw), `wa_session` (rw; the only container that mounts it) | Everything else |
 | `plugin-github` | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_GITHUB` / `PLUGIN_SECRETS_KEY_GITHUB`), `LOG_LEVEL`, `LOG_FORMAT`; the App id, slug and private key are console config, not env (+ the optional read-only `/run/secrets/github` bind holding the PEM, a file alternative to pasting it) | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN` |
 | `plugin-google` | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_GOOGLE` / `PLUGIN_SECRETS_KEY_GOOGLE`), `LOG_LEVEL`, `LOG_FORMAT`; nothing Google-specific: the OAuth client id and secret are console config, and the broker passes the redirect URI with each connect | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN`, `SITE_DOMAIN` |
 | `plugin-<service>` (each installed external plugin) | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_<SERVICE>` / `PLUGIN_SECRETS_KEY_<SERVICE>`), the literal `environment` of its descriptor, its allowlisted `env_passthrough` (`TZ`, `LOG_LEVEL`, `LOG_FORMAT`), `<service>_secrets` at `/secrets` and the `<service>_*` volumes it declares | Other services' tokens/keys, broker and installer secrets, `SIDECAR_TOKEN`, any bind mount, any other volume or network (the installer renders its overlay; the repository supplies none) |
-| `aab-installer` (installer overlay only) | `INSTALLER_TOKEN`, `INSTALLER_ALLOWED_SOURCES`, `INSTALLER_GIT_TOKEN` (optional; given to git only through `GIT_ASKPASS`), `AAB_HOME`, `LOG_LEVEL`, `LOG_FORMAT`; the Docker socket and the checkout at `AAB_HOME` (same path inside), so it can read `.env`: it is root on the host | Any other variable in its environment, a published port, any network but `net_installer` |
+| `aab-installer` (installer overlay only) | `INSTALLER_TOKEN`, `INSTALLER_ALLOWED_SOURCES`, `AAB_HOME`, `LOG_LEVEL`, `LOG_FORMAT`; the Docker socket and the checkout at `AAB_HOME` (same path inside), so it can read `.env`: it is root on the host | Any other variable in its environment, a published port, any network but `net_installer` |
 | `edge` | `SITE_DOMAIN`, `ORIGIN_SECRET`, origin certificate + key, Cloudflare origin-pull CA | Every other secret |
 
 The table names the `.env` entries each container is fed from. Inside a
@@ -316,8 +316,10 @@ services (`plugin-whatsapp`, `plugin-github`, `plugin-google`) are wired
 this way.
 
 Third-party credentials are not in the env split at all (`docs/configuration.md`):
-the owner enters them in the console. The Telegram bot token is stored in
-`broker.db`, encrypted under `BROKER_SECRETS_KEY`; the GitHub App id and key
+the owner enters them in the console. The Telegram bot token and the
+installer's read-only GitHub token (for private plugin repositories; the
+broker sends it to the installer per request, and the installer keeps none)
+are stored in `broker.db`, encrypted under `BROKER_SECRETS_KEY`; the GitHub App id and key
 and the Google OAuth client id and secret are entered in each plugin's config
 form and relayed once to that plugin's `/configure`, never stored by the
 broker.
@@ -345,7 +347,7 @@ Two ways, pick one:
 
 | Volume | Mounted by | Holds | Encrypted by |
 |---|---|---|---|
-| `broker_data` | broker (`/gwdata`) | `broker.db`: owner account, sessions, admin-token/key hashes, grants, plugin enable flags and non-secret config, console settings, Telegram link state and bot token, hidden resources, action queue, decision record, capacity ledger, audit log | `BROKER_SECRETS_KEY` for the secrets entered in the console (the Telegram bot token); the rest is hashes or non-secret (the decision chain is HMAC-signed with `DECISION_SIGNING_KEY`) |
+| `broker_data` | broker (`/gwdata`) | `broker.db`: owner account, sessions, admin-token/key hashes, grants, plugin enable flags and non-secret config, console settings, Telegram link state and bot token, the installer's GitHub token, hidden resources, action queue, decision record, capacity ledger, audit log | `BROKER_SECRETS_KEY` for the secrets entered in the console (the Telegram bot token, the installer's GitHub token); the rest is hashes or non-secret (the decision chain is HMAC-signed with `DECISION_SIGNING_KEY`) |
 | `wa_data` | whatsapp-sidecar (rw), plugin-whatsapp (ro) | `messages.db` (the archive) | nothing (the archive is message content, not a credential) |
 | `wa_session` | whatsapp-sidecar (`/session`, rw), nobody else | `session.db` (the WhatsApp account session, whatsmeow's own store) | **nothing**: the one credential not encrypted at rest, mitigated by a volume only the sidecar mounts and non-root containers |
 | `whatsapp_secrets` | plugin-whatsapp (`/secrets`) | Nothing today: the WhatsApp manifest has no config, and the store exists because the runtime provides one | `PLUGIN_SECRETS_KEY_WHATSAPP` |
@@ -357,8 +359,8 @@ Two ways, pick one:
 
 Compose prefixes names with the project (`aab_broker_data`, ...). Back up all
 of them together with `.env`; see `deploy/DEPLOY.md` > Operations > Backups.
-`BROKER_SECRETS_KEY` protects the secrets entered in the console (today the
-Telegram bot token); a `broker_data` backup restored without it means
+`BROKER_SECRETS_KEY` protects the secrets entered in the console (the
+Telegram bot token and the installer's GitHub token); a `broker_data` backup restored without it means
 re-entering them, and the broker refuses to boot while encrypted values exist
 and the key is missing.
 
@@ -387,7 +389,7 @@ the new environment (`docker compose up -d <services>`; add
 |---|---|---|
 | `SETUP_TOKEN` | broker | Nothing, unless the owner does not exist yet: then use the new value on the setup page. `docker compose up -d broker`. |
 | `ORIGIN_SECRET` | broker, edge, Cloudflare Transform Rule | Update the Transform Rule's `X-AAB-Origin` value first, then `up -d broker edge` (public overlay). Requests in between get 403. |
-| `BROKER_SECRETS_KEY` | broker | `up -d broker`. Secrets entered in the console no longer decrypt: Channels > Telegram shows "re-enter required" (Telegram stays off until then); paste the bot token again. |
+| `BROKER_SECRETS_KEY` | broker | `up -d broker`. Secrets entered in the console no longer decrypt: Channels > Telegram shows "re-enter required" (Telegram stays off until then); paste the bot token again. The installer's GitHub token, if set, shows "re-enter required" in Plugins > + Add plugin (inspect, install and upgrade answer 409 until then); paste it again. |
 | `DECISION_SIGNING_KEY` | broker | `up -d broker`. Existing decision rows no longer verify under the new key (`verify` reports the first old row as bad). Rotate only on suspected compromise. |
 | `PLUGIN_TOKEN_WHATSAPP` / `_GITHUB` / `_GOOGLE`, and `PLUGIN_TOKEN_<SERVICE>` of an installed plugin | broker and that plugin service | `up -d broker plugin-<service>`: both ends must restart together, calls fail with 503 in between. |
 | `PLUGIN_SECRETS_KEY_WHATSAPP` | plugin-whatsapp | `up -d plugin-whatsapp`. Its store holds nothing today, so nothing needs re-entering. The WhatsApp session (in `wa_session`) is unaffected. |
@@ -407,7 +409,7 @@ live (the console for credentials, `.env` for Cloudflare Access):
 | Google OAuth client secret | Google Cloud Console > Credentials > reset secret | Re-enter it in the Google plugin form. |
 | `CF_ACCESS_AUD` / team domain | Cloudflare Zero Trust | `up -d broker`. |
 | Origin certificate / AOP CA | Cloudflare SSL/TLS > Origin Server | Replace files in `edge/certs`, `up -d edge`. |
-| `INSTALLER_GIT_TOKEN` | GitHub > Settings > Developer settings > tokens: regenerate, or create a new one and delete the old | Put it in `.env`, then `$C up -d aab-installer`. |
+| The installer's GitHub token (private plugin repositories) | GitHub > Settings > Developer settings > tokens: regenerate, or create a new one and delete the old | Paste it in the console (Plugins > + Add plugin, Replace). Used from the next inspect, install or upgrade; no restart. |
 
 **Clearing a plugin's old store.** After its `PLUGIN_SECRETS_KEY_<SERVICE>`
 changes, a plugin service reports "reconnect required" and fails closed: its
@@ -449,9 +451,7 @@ inside `docker build`, like any image).
    one path segment), `AAB_HOME` = the checkout's absolute path as the
    Docker daemon sees it (default `/opt/aab`; the installer mounts it at the
    same path, so compose resolves every relative path exactly as on the
-   host), and for private plugin repositories `INSTALLER_GIT_TOKEN` (a
-   read-only GitHub token: fine-grained with Contents: read-only on the
-   plugin repositories, or classic with `repo`). `INSTALLER_TOKEN` is
+   host). `INSTALLER_TOKEN` is
    generated by `scripts/init_secrets.py` (`--rotate INSTALLER_TOKEN` appends
    it to an older `.env`; `deploy/push.sh` does that, and appends `AAB_HOME`).
 2. The plugin base image: `docker login ghcr.io` with a `read:packages`
@@ -463,6 +463,15 @@ inside `docker build`, like any image).
    `deploy/push.sh`): `aab-installer` starts, and the broker is recreated on
    `net_installer` with `INSTALLER_URL` and `INSTALLER_TOKEN`. The console's
    + Add plugin now inspects instead of explaining how to turn it on.
+4. Only for private plugin repositories: in the console, Plugins, + Add
+   plugin, paste a read-only GitHub token into "GitHub token for private
+   plugin repositories" and choose Set (fine-grained, only the plugin
+   repositories, Contents: read-only; or classic with `repo`). It is not a
+   `.env` line: the broker stores it encrypted under `BROKER_SECRETS_KEY`
+   and sends it to the installer with each inspect, install and upgrade
+   request, and the installer keeps no copy (`docs/configuration.md`). An
+   `INSTALLER_GIT_TOKEN=` line left in an older `.env` is ignored; delete
+   it.
 
 Turning it off again (`INSTALLER_ENABLED=false`, then `up -d`) stops
 installing, upgrading and removing; installed plugins keep running, because
@@ -544,3 +553,10 @@ repository under `INSTALLER_ALLOWED_SOURCES` and tagged `v0.1.0`.
    lines, `$C config --services` no longer lists `plugin-echo`. Install again
    (same secrets restored), then Remove with purge: volumes and secrets gone.
    The console is back to its previous state.
+8. A private repository: make the fixture repository private. Inspect now
+   fails with `clone_failed`. In + Add plugin, set a fine-grained read-only
+   token for it ("GitHub token for private plugin repositories": the badge
+   turns to set); Inspect and Install now succeed. The token appears in no
+   job log (`plugins.d/_installer/jobs/`), no `install.json`, no `.env`, and
+   in neither `$C logs broker` nor `$C logs aab-installer`; the audit log has
+   `installer.git_token.set` under the owner. Clear it: Inspect fails again.

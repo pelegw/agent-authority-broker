@@ -651,7 +651,7 @@ equal to root on the host. These limits apply:
 | The overlay comes from the descriptor, never from the repository. | the installer |
 | One job at a time. The log never holds a token. | the installer |
 | Off by default. | `INSTALLER_ENABLED=false` |
-| Private repositories need a read-only Git token. | `INSTALLER_GIT_TOKEN` in `.env` |
+| Private repositories need a read-only GitHub token. The broker stores it encrypted. The installer keeps no copy. | the console: **+ Add plugin**, **GitHub token for private plugin repositories** |
 | The base image must be in the daemon's image store. | `docker login ghcr.io`, then `docker pull` on the host |
 
 See `docs/plugin-packaging.md` and `docs/deployment.md` for the exact
@@ -955,11 +955,14 @@ Use the examples in section 10. Set `service: notes`, `plugins: [notes]`,
 ### Step 7. Tag, push, install
 
 1. Commit. Tag `v0.1.0`. Push to a repository the installer's allowlist
-   covers. For a private repository, set `INSTALLER_GIT_TOKEN` on the host.
-2. In the console, open Plugins. Click **+ Add plugin**. Enter the source and
-   `v0.1.0`. Click **Inspect**.
-3. Read the review card. Click **Install**. Wait for the job.
-4. Enable the card. Create a key with a capability on `notes`. Call
+   covers.
+2. In the console, open Plugins. Click **+ Add plugin**.
+3. For a private repository, set the GitHub token once. Paste a read-only
+   token in **GitHub token for private plugin repositories**. Click **Set**.
+   The badge shows **set**.
+4. Enter the source and `v0.1.0`. Click **Inspect**.
+5. Read the review card. Click **Install**. Wait for the job.
+6. Enable the card. Create a key with a capability on `notes`. Call
    `GET /v1/me/skill` with that key. The notes section is there.
 
 ## 13. Security rules for plugin authors

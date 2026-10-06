@@ -188,6 +188,9 @@ Everything else is configured in the console:
 
 - **The Telegram bot token** (Channels > Telegram), stored in `broker.db`
   encrypted under `BROKER_SECRETS_KEY`, write-only.
+- **The installer's read-only GitHub token** for private plugin repositories
+  (Plugins > + Add plugin), stored the same way and sent to the installer
+  only with the inspect, install or upgrade request that clones.
 - **Every plugin credential**: the GitHub App id, slug and private key (or
   the PAT fallback), and the Google OAuth client id and secret (one shared
   Google account card for Gmail, Calendar and Drive). Secret fields are

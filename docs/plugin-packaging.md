@@ -269,10 +269,12 @@ One job runs at a time; its state and log lines (never a token) live in
 installer and the broker, which is how the console follows a job through the
 broker's own restart.
 
-## Private repositories: `INSTALLER_GIT_TOKEN`
+## Private repositories: the GitHub token in the console
 
-The installer clones anonymously over https unless the host's `.env` sets
-`INSTALLER_GIT_TOKEN`, a **read-only** GitHub token:
+The installer clones anonymously over https unless the owner has stored a
+**read-only** GitHub token in the console: Plugins, **+ Add plugin**, the
+"GitHub token for private plugin repositories" field (Set, Clear, and a
+state badge: not set, set, or re-enter required). Make it:
 
 - fine-grained (preferred): resource owner = the plugins' owner, repository
   access = only the plugin repositories, permissions = Contents: read-only
@@ -280,18 +282,28 @@ The installer clones anonymously over https unless the host's `.env` sets
 - or a classic token with the `repo` scope (it reads every repository the
   account can: prefer fine-grained).
 
-It reaches the `aab-installer` container alone (not the broker, not any
-plugin), and git only through `GIT_ASKPASS`: a fixed script the installer
-writes (it holds no secret) prints the token from the environment of the one
-clone or fetch that talks to the remote. The token is never part of a URL or
-an argument, so no git error, process listing or job log can carry it; it is
-offered only when the source is on `github.com`, and the script answers only
-`github.com`'s credential prompts (a redirect to another host gets nothing).
-Job log lines are masked for its value whatever its shape, and the redaction
-backstop of every service masks URL credentials and the field names
-`installer_git_token`, `installer_token` and `git_token`. Rotate it at GitHub
-and in `.env`, then recreate the installer:
-`docker compose $(scripts/compose-files.sh) up -d aab-installer`.
+It is not in `.env`. Like the Telegram bot token, it is a third-party
+credential, so the broker stores it encrypted under `BROKER_SECRETS_KEY`
+(write-only: no route returns it) and the installer holds none of its own.
+The broker sends it in the body of each inspect, install and upgrade request
+(`git_token`); the installer uses it for that request's clone, or for the
+job's single clone at its start, and writes it nowhere: not the job record,
+`install.json`, a job log line or a log line. git gets it only through
+`GIT_ASKPASS`: a fixed script the installer writes (it holds no secret)
+prints the token from the environment of the one clone or fetch that talks
+to the remote. The token is never part of a URL or an argument, so no git
+error, process listing or job log can carry it; it is offered only when the
+source is on `github.com` (and on the allowlist, which is checked first),
+and the script answers only `github.com`'s credential prompts (a redirect to
+another host gets nothing). Job log lines are masked for its value whatever
+its shape, and the redaction backstop of every service masks URL credentials
+and the field names `git_token`, `installer_git_token` and
+`installer_token`.
+
+Rotate it at GitHub, then paste the new one in the same field (Replace). If
+`BROKER_SECRETS_KEY` changes, the field shows "re-enter required" and
+inspect, install and upgrade answer 409 until you paste it again or clear
+it. Nothing needs a restart.
 
 The plugin's own Docker build does not need it: the base image already holds
 the runtime, and the build context is the clone the installer made.
@@ -337,5 +349,7 @@ the runtime, and the build context is the clone the installer made.
   reviewed.
 - Decide authority: the broker pins, and a plugin is served only when it
   offers exactly the pinned manifest.
+- Keep a git credential: the GitHub token comes with the one request that
+  needs it and is used for that clone only (see Private repositories).
 - Talk to plugins, or anything on the network other than an allowlisted git
   host (and the Docker daemon's own image pulls).

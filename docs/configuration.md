@@ -17,7 +17,7 @@ readable, or before containers can authenticate each other.
 | Key | Why it cannot be in the database |
 |---|---|
 | `SETUP_TOKEN` | Authorizes creating the owner account; it must exist before anyone can log in. Inert once setup completes. |
-| `BROKER_SECRETS_KEY` | Decrypts the secrets entered in the console (the Telegram bot token); a key stored beside its ciphertext protects nothing. |
+| `BROKER_SECRETS_KEY` | Decrypts the secrets entered in the console (the Telegram bot token, the installer's GitHub token); a key stored beside its ciphertext protects nothing. |
 | `DECISION_SIGNING_KEY` | Signs the hash-chained decision record; a key kept in the database could re-sign a tampered chain. |
 | `ORIGIN_SECRET` | Origin lockdown behind Cloudflare; checked before any login exists. |
 | `PLUGIN_TOKEN_<SERVICE>` | Broker ↔ plugin service authentication; both containers need it at start. |
@@ -56,7 +56,6 @@ otherwise be one click from root on the host.
 | `INSTALLER_ENABLED` | `scripts/compose-files.sh` | Loads `docker-compose.installer.yml` at all. Off (`false`) by default: without it there is no installer container, no `net_installer`, and the console's + Add plugin only explains how to turn it on. |
 | `INSTALLER_ALLOWED_SOURCES` | the installer | Comma-separated repositories it may clone, e.g. `github.com/you/*` (`*` is exactly one path segment). Empty refuses every inspect and install (fail closed). The one thing that decides whose code can be built on this host. |
 | `INSTALLER_TOKEN` | the broker and the installer | Generated (`--rotate INSTALLER_TOKEN`); the `X-Installer-Token` the broker presents on `net_installer`, compared in constant time. An empty token refuses to boot. |
-| `INSTALLER_GIT_TOKEN` | the installer only | Optional read-only GitHub token for private plugin repositories (fine-grained with Contents: read-only on those repositories, or classic with `repo`). The one third-party credential in `.env`: the installer must clone before any plugin exists, and has no console of its own. Handed to git through `GIT_ASKPASS` for `github.com` only, never in a URL, never logged, never seen by the broker. |
 | `AAB_HOME` | compose and the installer | The checkout's absolute path on the host (`deploy/push.sh`'s `REMOTE_DIR`, default `/opt/aab`). The installer mounts it at the same path, so every relative path compose resolves inside it is the host's. |
 | `INSTALLER_URL` | the broker | Set by the installer overlay (`http://aab-installer:8070`), never by hand. Empty means the installer is off: the install routes answer 503 saying so. |
 
@@ -67,6 +66,14 @@ owner's approval of each installed manifest in the `plugin_pins` table, and
 each installed service's `PLUGIN_TOKEN_<SERVICE>` /
 `PLUGIN_SECRETS_KEY_<SERVICE>` in `.env`, added by the installer through
 `scripts/init_secrets.py` like every other generated secret.
+
+The read-only GitHub token for private plugin repositories is **not** in
+this table: it is a credential, not a bound, so it lives in the console
+(below). It bounds nothing (the allowlist decides which repositories can be
+cloned; the token only lets git read the private ones among them), and as a
+third-party credential it follows the rule the Telegram bot token follows:
+entered in the console, encrypted under `BROKER_SECRETS_KEY`, never in a
+file.
 
 The console's Settings view lists every env-only key with its reason
 (`GET /v1/admin/settings` → `env_only`); secrets are shown as set/unset,
@@ -83,6 +90,7 @@ console-editable nor listed there.
 | Google OAuth client id and secret | Plugins > Google | Relayed once to `plugin-google`'s `/configure`, encrypted in its own volume. Never stored by the broker. |
 | Plugin enable/disable, non-secret plugin config | Plugins | `plugins` table |
 | Install, upgrade, remove an external plugin; approve (pin) an offered manifest | Plugins > + Add plugin, a card's Upgrade / Remove, Offered, awaiting review | The pin in `plugin_pins` (audited `plugin.pin`); the install itself in `plugins.d/` and `.env`, done by the installer within the bounds above |
+| GitHub token for private plugin repositories (optional, read-only) | Plugins > + Add plugin | `plugin_secrets` (slot `broker`, name `installer_git_token`), Fernet under `BROKER_SECRETS_KEY`, via `crypto.py` only. Write-only: no route returns it. Sent to the installer in the body of inspect, install and upgrade requests only; the installer keeps no copy. |
 | Operator settings (below) | Settings | `app_config` as `setting:<name>` (JSON) |
 
 ### The Telegram token at runtime
@@ -101,6 +109,42 @@ console-editable nor listed there.
 - Other routes: `GET /v1/admin/telegram` (status and poll health, never the
   token), `POST .../link/start` (one-time code, 5 minutes, private chat only),
   `.../enable`, `.../disable`, `.../test`, `.../unlink`.
+
+### The installer's GitHub token at runtime
+
+Private plugin repositories need a read-only GitHub token to clone. Why it
+is a console setting and not `.env`: it is a third-party credential, like
+the Telegram bot token, and the rule for those is that the owner enters them
+in the console and the broker keeps them encrypted. Keeping it out of the
+installer's environment also means the container that is root on the host
+holds no credential at all between requests.
+
+- `POST /v1/admin/plugins/install/git-token {token}` stores it;
+  `DELETE /v1/admin/plugins/install/git-token` clears it (no key needed, so
+  an unreadable one can always be removed). Both answer
+  `{"git_token": "unset" | "set" | "unreadable", "secrets_key_configured": bool}`
+  and never the token. The shape is checked loosely: 20 to 255 printable
+  ASCII characters with no whitespace (a paste's surrounding whitespace is
+  dropped). Without `BROKER_SECRETS_KEY` the broker refuses to store it
+  (409). Each change is audited (`installer.git_token.set`,
+  `installer.git_token.clear`) under the owner's name and logged by name
+  only.
+- `GET /v1/admin/plugins/install/status` carries the same `git_token` state
+  word and `secrets_key_configured`.
+- When one is stored, the broker sends it as `git_token` in the body of
+  every inspect, install and upgrade request to the installer, and nowhere
+  else. The installer offers it to git through `GIT_ASKPASS` for
+  `github.com` sources on its allowlist only, for that request's clone or
+  that job's single clone at its start, and writes it nowhere (not the job
+  record, `install.json`, a job log line or a log line).
+- If `BROKER_SECRETS_KEY` changes, the stored token no longer decrypts: the
+  console shows "re-enter required", and inspect, install and upgrade are
+  refused with 409 `git_token_unreadable` (before anything is pinned or
+  asked of the installer) until the owner enters it again or clears it.
+  Remove needs no clone and keeps working.
+- Use a fine-grained token: resource owner = the plugins' owner, repository
+  access = only the plugin repositories, permissions = Contents: read-only.
+  A classic token with `repo` reads every repository the account can.
 
 ## Operator settings
 

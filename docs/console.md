@@ -36,7 +36,7 @@ like `/auth/*`.
 | `requests` | Actions awaiting approval (summary rendered from the manifest's `summary_template`, key chain when delegated, resource label and id, agent note, run time, all params) and permission requests (each capability spelled out: actions by side effect, selectors, constraints, mode, expiry, and the budget it **adds**), with a warning when the key's ceiling would cap the request (see "The ceiling (role)"). Approve / reject. | `/v1/admin/actions?status=pending`, `/v1/admin/actions/{id}/approve\|reject`, `/v1/admin/grants?status=pending`, `/v1/admin/grants/{id}/approve\|reject` |
 | `scheduled` | Actions waiting for their `run_at`, with cancel. | `/v1/admin/actions?status=scheduled`, `/v1/admin/actions/{id}/cancel` |
 | `decisions` | The decision record filtered by key, plugin, decision and time; key chain root to leaf, grant chain, `enforced_where` per dimension, outcome rows; "Verify chain". | `/v1/admin/decisions`, `/v1/admin/decisions/verify` |
-| `plugins` | Per plugin: enable / disable, the config form generated from `config_schema`, health, and a connection panel by `connection.kind`. Plugins that share a connection slot get one shared card above their own (see below). **+ Add plugin** installs an external plugin from its repository; installed plugins show where they came from with Upgrade and Remove; offered manifests wait for review (see "Adding a plugin from its repository"). | `/v1/admin/plugins[/{id}]`, `.../enable`, `.../disable`, `.../health`, `.../connect/start`, `.../connect/finish`, `.../connect/qr.png`, `.../disconnect`; `/v1/admin/plugins/install/status`, `.../install/inspect`, `.../install`, `.../install/jobs/{id}`, `/v1/admin/plugins/installed`, `/v1/admin/plugins/{service}/upgrade`, `.../{service}/remove`, `/v1/admin/plugins/offered`, `/v1/admin/plugins/{id}/pin` |
+| `plugins` | Per plugin: enable / disable, the config form generated from `config_schema`, health, and a connection panel by `connection.kind`. Plugins that share a connection slot get one shared card above their own (see below). **+ Add plugin** installs an external plugin from its repository; installed plugins show where they came from with Upgrade and Remove; offered manifests wait for review; the Add plugin dialog holds the write-only GitHub token for private repositories (see "Adding a plugin from its repository"). | `/v1/admin/plugins[/{id}]`, `.../enable`, `.../disable`, `.../health`, `.../connect/start`, `.../connect/finish`, `.../connect/qr.png`, `.../disconnect`; `/v1/admin/plugins/install/status`, `.../install/git-token`, `.../install/inspect`, `.../install`, `.../install/jobs/{id}`, `/v1/admin/plugins/installed`, `/v1/admin/plugins/{service}/upgrade`, `.../{service}/remove`, `/v1/admin/plugins/offered`, `/v1/admin/plugins/{id}/pin` |
 | `keys` | Key list (the ceiling shown only below `full`); create (with the capability editor, the ceiling defaulting to `full`, and denies, plaintext shown once); edit the ceiling (role), rate, expiry, disabled, denies and the root grant's capabilities; revoke other grants; rotate (new plaintext once); disable; a "Tree" link for keys in a delegation chain. | `/v1/admin/keys[/{id}]`, `/v1/admin/keys/{id}/rotate`, `/v1/admin/grants/{id}/revoke` |
 | `delegations` | The key forest: each key under the key it came from, with status, live, depth and orphan badges, why a key is not live, a grants summary and its capabilities; expand / collapse; edit, disable / enable, revoke. `#/delegations/<key id>` opens the tree on that key. | `/v1/admin/keys/tree`, `/v1/admin/keys/{id}` (PATCH), `/v1/admin/grants/{id}/revoke` |
 | `hidden` | Hide a resource by picking it by name (the label is captured at hide time); list; unhide. | `/v1/admin/hidden`, `/v1/admin/resolve` |
@@ -198,12 +198,30 @@ External plugins (`docs/plugin-packaging.md`) are installed by the opt-in
 - **+ Add plugin** (the Plugins view's header) first asks
   `GET /v1/admin/plugins/install/status`. When the installer is **off** (no
   `INSTALLER_URL` on the broker), the dialog does not offer Inspect: it lists
-  the `.env` lines that turn it on (`INSTALLER_ENABLED=true`,
-  `INSTALLER_ALLOWED_SOURCES=github.com/<you>/*`, and the optional
-  `INSTALLER_GIT_TOKEN` for private repositories), the one-time
+  the `.env` lines that turn it on (`INSTALLER_ENABLED=true` and
+  `INSTALLER_ALLOWED_SOURCES=github.com/<you>/*`), the one-time
   `docker login ghcr.io`, and the command that loads the overlay
-  (`docker compose $(scripts/compose-files.sh) up -d`). Nothing in the
-  console can turn the installer on: it is root on the host.
+  (`docker compose $(scripts/compose-files.sh) up -d`), and says that the
+  GitHub token for private repositories is set in this dialog once the
+  installer is on, not in `.env`. Nothing in the console can turn the
+  installer on: it is root on the host.
+- **GitHub token for private plugin repositories**, under the repository
+  and ref fields: optional, write-only, like the Telegram bot token. A
+  password field in its own small form, with **Set** (Replace once one is
+  stored) and **Clear**, and a badge from the status's `git_token` state
+  word: **not set**, **set**, or **re-enter required** (`unreadable`: the
+  `BROKER_SECRETS_KEY` changed; inspect, install and upgrade are refused
+  until it is entered again or cleared). On submit the value is read once,
+  the field is emptied before the request is sent, and it goes to
+  `POST /v1/admin/plugins/install/git-token`; the page checks the broker's
+  shape rule first (20 to 255 printable characters, no spaces). Nothing ever
+  writes a token back: the script only ever compares `git_token` with the
+  state words (tested). Clear asks first, then
+  `DELETE /v1/admin/plugins/install/git-token`. Without `BROKER_SECRETS_KEY`
+  Set is disabled with the reason. The help line says to use a read-only
+  token, that the broker stores it encrypted and never shows it again, and
+  that it is sent to the installer only for clones of `github.com`
+  repositories on the installer's allowlist.
 - Otherwise the dialog takes a **repository** (`github.com/you/aab-plugin-x`;
   an https URL is accepted too) and a **release tag** (`v1.2.3`) or a full
   40-character commit, with the allowlist hint under them. **Inspect**
@@ -227,7 +245,9 @@ External plugins (`docs/plugin-packaging.md`) are installed by the opt-in
   `POST /v1/admin/plugins/{service}/upgrade`) sends only the repository, the
   ref and the reviewed commit. The broker inspects again, refuses if the ref
   moved, **pins every manifest** (audited `plugin.pin`), then asks the
-  installer for the job (`plugin.install` / `plugin.upgrade`).
+  installer for the job (`plugin.install` / `plugin.upgrade`). The stored
+  GitHub token, if any, is added by the broker to its own requests to the
+  installer; the page never holds it.
 - The **job panel** above the plugin cards polls
   `GET .../install/jobs/{id}` every 2 s and shows the job's state and log
   lines (the steps, the compose commands, their exit codes and a short

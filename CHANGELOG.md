@@ -27,9 +27,24 @@ lives only in `VERSION`.
     (`aab-plugin.yaml`, schema 1, strict) through a fixed template (one
     network, no ports, no bind mounts, only its own token and key), keeps
     install records and one job at a time in `plugins.d/`, and rolls a
-    failed install or upgrade back. Private repositories: the optional
-    read-only `INSTALLER_GIT_TOKEN`, given to git only through `GIT_ASKPASS`
-    for `github.com`, never in a URL or a log.
+    failed install or upgrade back. It holds no git credential: `/inspect`,
+    `/install` and `/upgrade` take an optional `git_token` (the broker's,
+    see below), used for that request's or that job's single clone, given
+    to git only through `GIT_ASKPASS` for `github.com`, masked in the job's
+    lines, and written nowhere (never a URL, the job record, `install.json`
+    or a log line).
+  - **Private plugin repositories: the GitHub token is a console setting.**
+    A read-only GitHub token, entered in the + Add plugin dialog (write-only
+    field, Set / Clear, a not set / set / re-enter required badge), stored
+    encrypted under `BROKER_SECRETS_KEY` through `crypto.py`
+    (`services/install_git_token.py`), exactly like the Telegram bot token:
+    `POST` / `DELETE /v1/admin/plugins/install/git-token`, audited
+    `installer.git_token.set` / `.clear`, never returned by any route; the
+    install status carries `git_token: unset | set | unreadable`. The broker
+    sends it in the body of inspect, install and upgrade only; one that no
+    longer decrypts refuses them with 409 `git_token_unreadable` before
+    anything is pinned or asked. Job answers relayed to the console are
+    projected to the job's known fields. It is not in `.env`.
   - **Install API** (`services/plugin_install.py`, `routers/admin_install.py`):
     `GET /v1/admin/plugins/install/status`, `POST .../install/inspect` (the
     review card: every manifest validated by the broker, actions with side
@@ -60,9 +75,11 @@ lives only in `VERSION`.
     without pushing and checks its contract.
   - New `.env` entries (all from `scripts/init_secrets.py`):
     `INSTALLER_ENABLED` (`false`), `INSTALLER_TOKEN` (generated),
-    `INSTALLER_ALLOWED_SOURCES` (empty), `AAB_HOME` (`/opt/aab`),
-    `INSTALLER_GIT_TOKEN` (empty); `--rotate` accepts any installed service's
-    `PLUGIN_TOKEN_<SERVICE>` / `PLUGIN_SECRETS_KEY_<SERVICE>`.
+    `INSTALLER_ALLOWED_SOURCES` (empty), `AAB_HOME` (`/opt/aab`);
+    `--rotate` accepts any installed service's
+    `PLUGIN_TOKEN_<SERVICE>` / `PLUGIN_SECRETS_KEY_<SERVICE>`. The checklist
+    it prints lists the installer's GitHub token among the console-entered
+    credentials.
 - `GET /v1/admin/health`: the owner's health summary for an uptime monitor.
   Behind owner credentials (an `aab_admin_` token or the session), it checks
   the database, refreshes every enabled plugin's `/status` live (in
@@ -97,8 +114,8 @@ lives only in `VERSION`.
   appends `INSTALLER_TOKEN` and `AAB_HOME` to an older `.env`.
 - The redaction backstop (all three `logging_setup.py` copies, now including
   the installer's) also masks credentials inside URLs and the values of
-  `X-Installer-Token`, `installer_git_token`, `installer_token` and
-  `git_token`. The broker's boot line names `installer_token` as set or
+  `X-Installer-Token`, `git_token`, `installer_git_token` and
+  `installer_token`. The broker's boot line names `installer_token` as set or
   unset and says whether the installer is configured.
 - `aab-plugin-runtime` is versioned on the gateway line: 0.3.0.
 - The role is presented as what it always was in `effective = P ∩ G ∩ R`: a

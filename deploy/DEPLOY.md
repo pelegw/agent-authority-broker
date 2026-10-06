@@ -267,23 +267,28 @@ renders itself (`docs/plugin-packaging.md`).
    ```bash
    INSTALLER_ENABLED=true
    INSTALLER_ALLOWED_SOURCES=github.com/pelegw/*     # env-only; empty refuses every install
-   INSTALLER_GIT_TOKEN=<read-only token>             # only for private plugin repositories
    AAB_HOME=/opt/aab                                 # this checkout's path (REMOTE_DIR)
    ```
 
    `INSTALLER_TOKEN` is generated (`deploy/push.sh` appends it to an older
-   `.env`, as it does `AAB_HOME`). `INSTALLER_GIT_TOKEN`: a fine-grained token
-   whose repository access is only the plugin repositories, with Contents:
-   read-only (or a classic token with `repo`, which reads everything the
-   account can: prefer fine-grained). It reaches the installer alone, and git
-   only through `GIT_ASKPASS`, for `github.com` only.
+   `.env`, as it does `AAB_HOME`). The GitHub token for private plugin
+   repositories is **not** a `.env` line: it is a console setting (step 4).
+   An `INSTALLER_GIT_TOKEN=` line left in an older `.env` is ignored;
+   delete it.
 3. **Deploy**: `deploy/push.sh`. The compose file set now includes
    `docker-compose.installer.yml`: `aab-installer` starts, and the broker is
    recreated on `net_installer` with `INSTALLER_URL` and `INSTALLER_TOKEN`.
-4. **Install**: console, Plugins, **+ Add plugin**,
-   `github.com/pelegw/aab-plugin-finance` and `v0.1.0`, Inspect, read the
-   review, Install. The job panel follows the build and the broker's restart;
-   the card appears disabled; enable it.
+4. **Install**: console, Plugins, **+ Add plugin**. For a private
+   repository, first paste a read-only GitHub token into "GitHub token for
+   private plugin repositories" and choose Set: a fine-grained token whose
+   repository access is only the plugin repositories, with Contents:
+   read-only (or a classic token with `repo`, which reads everything the
+   account can: prefer fine-grained). The broker stores it encrypted under
+   `BROKER_SECRETS_KEY` and sends it to the installer only with inspect,
+   install and upgrade; git gets it only through `GIT_ASKPASS`, for
+   `github.com` only. Then `github.com/pelegw/aab-plugin-finance` and
+   `v0.1.0`, Inspect, read the review, Install. The job panel follows the
+   build and the broker's restart; the card appears disabled; enable it.
 
 Upgrade and remove are on the plugin's card (`docs/console.md`). Installed
 plugins live in `/opt/aab/plugins.d/` (the installer's; `deploy/push.sh`
@@ -315,7 +320,7 @@ overlays stay in the file set), only installing, upgrading and removing stop.
 
   | What | Holds | Needs, to be useful |
   |---|---|---|
-  | `broker_data` volume | owner account, keys, grants, decision record, console settings, Telegram bot token (encrypted) | `DECISION_SIGNING_KEY` (old rows verify only under it), `BROKER_SECRETS_KEY` (else re-enter the Telegram token) |
+  | `broker_data` volume | owner account, keys, grants, decision record, console settings, Telegram bot token and the installer's GitHub token (encrypted) | `DECISION_SIGNING_KEY` (old rows verify only under it), `BROKER_SECRETS_KEY` (else re-enter both tokens) |
   | `wa_session` volume | WhatsApp session (**plaintext**: a backup is the live account) | nothing: treat the backup itself as a credential |
   | `wa_data` volume | WhatsApp message archive | nothing (message content: keep it as private as the account) |
   | `whatsapp_secrets` volume | nothing today (plugin-whatsapp has no config to store) | `PLUGIN_SECRETS_KEY_WHATSAPP` |
@@ -357,6 +362,7 @@ overlays stay in the file set), only installing, upgrading and removing stop.
   store must be cleared, its secret config re-entered and the plugin
   reconnected (`docs/deployment.md` > Rotating secrets); nothing else is
   lost. Losing `BROKER_SECRETS_KEY` means re-entering the Telegram bot
-  token. Losing `DECISION_SIGNING_KEY` means the existing decision record
+  token and, if you use one, the installer's GitHub token. Losing
+  `DECISION_SIGNING_KEY` means the existing decision record
   no longer verifies. **Never** commit `.env`, `data/` or
   `edge/certs/*` (already gitignored).
