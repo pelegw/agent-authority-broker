@@ -11,6 +11,7 @@ this: they authenticate with `aab_` keys (phase 2), which carry no admin power.
 | Setup token | `SETUP_TOKEN` in `.env`, `identity/setup.py` | One-time authorization to create the owner. |
 | Session | `aab_session` cookie + `sessions` table, `identity/sessions.py` | What the console uses after a password login. |
 | Admin token | `aab_admin_...`, `admin_tokens` table, `identity/admin_tokens.py` | Bearer credential for the CLI, scripts and deploys. |
+| Monitor token | `aab_monitor_...`, the same table with `scope = monitor` | Accepted by `/health` and `/v1/health` only (Bearer, or the Basic-auth password), for an uptime monitor. |
 | Cloudflare Access | `Cf-Access-Jwt-Assertion` header, `cf_access.py` | The outer layer in public deployments. |
 | Guard | `deps.require_admin` | Combines all of the above; returns an `AdminContext`. |
 
@@ -76,6 +77,18 @@ The plaintext appears in that response only; the database keeps its sha256.
 `GET /v1/admin/tokens` lists name, created/expires/last-used times, revoked and
 expired flags, never the token or its hash. `POST /v1/admin/tokens/{id}/revoke`
 kills one. `last_used_at` is refreshed at most once a minute.
+
+Every token has a `scope`, fixed at creation and spelled in its prefix.
+`admin` (the default) is the owner credential above. `monitor` mints
+`aab_monitor_<48 hex>`, which `/health` and `/v1/health` accept, as
+`Authorization: Bearer ...` or as the password of HTTP Basic auth (so a
+monitor that cannot set headers can still send it), to answer the full
+health summary (200 ok, 503 degraded; `docs/deployment.md`) instead of the
+anonymous liveness line. A monitor token is refused everywhere else, before
+any lookup, and an admin token or a session is refused on the probe, so the
+admin plane stays behind Cloudflare Access even though the probe is outside
+it. Failed monitor attempts feed the login rate limiter. Databases from
+before the column get it by migration; every token already in them is `admin`.
 
 The CLI uses these: `AAB_ADMIN_TOKEN` (or `--token`) plus `AAB_URL` (or `--url`).
 Mint the first one from the console after logging in.

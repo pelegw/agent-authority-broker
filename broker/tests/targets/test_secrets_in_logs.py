@@ -14,6 +14,7 @@ The capture handler sees records BEFORE the redaction backstop (which only
 edits the copy our own handler formats), so this proves nothing secret is
 logged in the first place; the handler's output is checked as well."""
 
+import base64
 import logging
 
 import pytest
@@ -93,6 +94,11 @@ def sweep(env, client, monkeypatch, tmp_path, secrets_key, echo_impl, caplog, ca
     r = client.post("/v1/admin/tokens", json={"name": "sweep"}, headers=CSRF_HEADERS)
     secrets["admin token"] = r.json()["token"]
     admin = {"Authorization": f"Bearer {secrets['admin token']}"}
+    r = client.post("/v1/admin/tokens", json={"name": "robot", "scope": "monitor"},
+                    headers=admin)
+    secrets["monitor token"] = r.json()["token"]
+    monitor_basic = base64.b64encode(f"uptimerobot:{secrets['monitor token']}".encode()).decode()
+    secrets["monitor basic header"] = monitor_basic
 
     # ---- plugins: echo (a secret field), Google (OAuth), GitHub (App key) --------------
     register_remote(echo_impl, tmp_path)
@@ -132,6 +138,15 @@ def sweep(env, client, monkeypatch, tmp_path, secrets_key, echo_impl, caplog, ca
     ok(client.post("/v1/admin/plugins/github/connect/finish", headers=admin,
                    json={"installation_id": gh_fakes.INSTALLATION_ID,
                          "state": install["state"]}))
+
+    # ---- the monitor: the summary over the probe, as Bearer and as Basic auth ---------
+    for headers in ({"Authorization": f"Bearer {secrets['monitor token']}"},
+                    {"Authorization": f"Basic {monitor_basic}"}):
+        assert client.get("/v1/health", headers=headers).status_code in (200, 503)
+    assert client.get("/v1/health", headers={"Authorization": f"Bearer {BOGUS_KEY}"}
+                      ).status_code == 401
+    assert client.get("/auth/me", headers={"Authorization": f"Bearer {secrets['monitor token']}"}
+                      ).status_code == 401
 
     # ---- Telegram: the bot token and a link code -----------------------------------
     ok(client.post("/v1/admin/telegram/token", headers=admin, json={"token": BOT_TOKEN}))

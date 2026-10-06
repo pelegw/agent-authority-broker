@@ -605,16 +605,21 @@
         </form>
       </div>
       <div class="card">
-        <div class="subhead"><h3>Admin tokens</h3><span class="count">for the aab CLI, scripts and deploys</span></div>
+        <div class="subhead"><h3>Admin tokens</h3><span class="count">for the aab CLI, scripts, deploys and uptime monitors</span></div>
         <div id="tokenBanner" data-ephemeral></div>
         <form class="grid" id="tokenForm" autocomplete="off">
           <label>Name<input name="tokname" required maxlength="64" placeholder="e.g. laptop-cli"></label>
+          <label>Scope<select name="scope">
+            <option value="admin">Admin: the CLI, scripts, deploys</option>
+            <option value="monitor">Monitor: the health summary only</option>
+          </select></label>
           <label>Expires in hours<input name="hours" type="number" min="1" max="87600" step="1" placeholder="never"></label>
           <button class="primary" type="submit">Create token</button>
         </form>
+        <div class="formhelp">A monitor token opens nothing but <code>/health</code> and <code>/v1/health</code>, where it turns the liveness probe into the full health summary (200 ok, 503 degraded). Send it as a Bearer token, or as the password of HTTP Basic auth for monitors that cannot set headers (UptimeRobot's free plan).</div>
         <div class="table-wrap" style="margin-top:.8rem">
           <table>
-            <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th></th></tr></thead>
+            <thead><tr><th>Name</th><th>Scope</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th></th></tr></thead>
             <tbody id="tokenRows"></tbody>
           </table>
         </div>
@@ -3341,7 +3346,7 @@ async function refreshAccount() {
   $("acctSub").textContent = `Signed in as ${me.username} (via ${me.via}); this credential expires ${relTime(me.expires_at)}. Admin tokens let scripts act as you; sessions are where you are signed in.`;
   const tr = $("tokenRows");
   tr.replaceChildren();
-  if (!tokens.length) tr.append(h("tr", null, h("td", { colspan: "6" }, empty("No admin tokens."))));
+  if (!tokens.length) tr.append(h("tr", null, h("td", { colspan: "7" }, empty("No admin tokens."))));
   for (const t of tokens) {
     const live = !t.revoked && !t.expired;
     const statusB = t.revoked ? badge("revoked", "bad") : t.expired ? badge("expired", "warn") : badge("active", "ok");
@@ -3351,7 +3356,9 @@ async function refreshAccount() {
       rv.onclick = () => revokeToken(t, rv);
       cell.append(rv);
     }
-    tr.append(h("tr", null, h("td", null, h("b", null, t.name)), h("td", null, fmtWhen(t.created_at)),
+    tr.append(h("tr", null, h("td", null, h("b", null, t.name)),
+      h("td", null, t.scope === "monitor" ? badge("monitor", "accent") : "admin"),
+      h("td", null, fmtWhen(t.created_at)),
       h("td", null, t.last_used_at ? relTime(t.last_used_at) : "never"), h("td", null, fmtWhen(t.expires_at)),
       h("td", null, statusB), cell));
   }
@@ -3387,13 +3394,14 @@ $("tokenForm").onsubmit = async (e) => {
   e.preventDefault();
   const f = e.target, btn = f.querySelector("button[type=submit]");
   const name = f.tokname.value.trim();
+  const scope = f.scope.value;
   const hours = f.hours.value ? Number(f.hours.value) : null;
   if (!name) return;
   if (hours !== null && (!Number.isInteger(hours) || hours < 1)) { toast("Expiry: a whole number of hours, or empty.", "err"); return; }
   try {
-    const r = await withBusy(btn, () => api("/v1/admin/tokens", { method: "POST", body: { name, expires_in_hours: hours } }));
+    const r = await withBusy(btn, () => api("/v1/admin/tokens", { method: "POST", body: { name, scope, expires_in_hours: hours } }));
     f.reset();
-    $("tokenBanner").replaceChildren(secretBox(r.token, `admin token "${r.name}"`));
+    $("tokenBanner").replaceChildren(secretBox(r.token, `${r.scope === "monitor" ? "monitor" : "admin"} token "${r.name}"`));
     refreshAccount().catch(showErr);
   } catch (err) { showErr(err); }
 };

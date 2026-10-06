@@ -8,6 +8,7 @@ per request, so the guard still runs only once.
 """
 
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
@@ -73,16 +74,22 @@ def change_password(body: PasswordBody, request: Request,
 class TokenBody(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     expires_in_hours: int | None = Field(default=None, ge=1, le=24 * 3650)
+    # admin: the CLI, scripts and deploys. monitor: /health and /v1/health
+    # only, where it turns the liveness probe into the full health summary.
+    scope: Literal["admin", "monitor"] = "admin"
 
 
 @router.post("/v1/admin/tokens")
 def create_token(body: TokenBody, ctx: AdminContext = Depends(require_admin)) -> dict:
-    """Mint an admin token. The plaintext is in this response and nowhere else."""
-    created = admin_tokens.create(ctx.principal_id, body.name, body.expires_in_hours)
+    """Mint an admin or monitor token. The plaintext is in this response and
+    nowhere else."""
+    created = admin_tokens.create(ctx.principal_id, body.name, body.expires_in_hours,
+                                  body.scope)
     _audit(ctx, "admin_token.create", created["id"],
-           {"name": body.name, "expires_at": created["expires_at"]})
-    # The id and name only: the plaintext exists in the response alone.
+           {"name": body.name, "scope": body.scope, "expires_at": created["expires_at"]})
+    # The id, name and scope only: the plaintext exists in the response alone.
     log.info("admin token created %s", kv(token_id=created["id"], name=body.name,
+                                          scope=body.scope,
                                           expires_at=created["expires_at"],
                                           by=ctx.username, via=ctx.via))
     return created

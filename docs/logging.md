@@ -104,6 +104,7 @@ request method=POST path=/v1/targets/echo/actions/list_items status=200 duration
   an agent's GET query carries its params; the middleware never reads the
   query string at all.
 - `actor` is who was authenticated: `key:<name>` (an agent key),
+  `monitor:<token name>` (a monitor token on `/health`),
   `owner:<username>` (a session or admin token), `plugin:<service>` in a
   plugin service (the broker, holding that service's token), or `-`.
 - `ip` is the client address the origin guard trusts (`CF-Connecting-IP`

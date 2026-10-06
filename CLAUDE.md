@@ -17,7 +17,8 @@ WhatsApp-only gateway) and reuses its security plumbing.
   `C:\Users\Peleg\.claude\plans\eager-sparking-pudding.md`
 - Python package `broker` in `broker/broker/`; admin CLI `aab` in `broker/cli/`.
 - Go WhatsApp sidecar in `sidecars/whatsapp/` (its own Docker build and `go test`).
-- Agent keys are `aab_...`; owner admin tokens are `aab_admin_...`.
+- Agent keys are `aab_...`; owner admin tokens are `aab_admin_...`; monitor
+  tokens (`/health` and `/v1/health` only) are `aab_monitor_...`.
 
 ## Running tests
 

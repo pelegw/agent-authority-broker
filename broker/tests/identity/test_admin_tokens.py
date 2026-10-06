@@ -48,8 +48,8 @@ def test_list_never_shows_plaintext_or_hash(client, admin_headers):
     listed = client.get("/v1/admin/tokens", headers=admin_headers).json()
     assert {t["name"] for t in listed} == {"test", "deploy"}
     for t in listed:
-        assert set(t) == {"id", "name", "created_at", "expires_at", "last_used_at",
-                          "revoked", "expired"}
+        assert set(t) == {"id", "name", "scope", "created_at", "expires_at",
+                          "last_used_at", "revoked", "expired"}
     dump = json.dumps(listed)
     assert created["token"] not in dump
     assert hashlib.sha256(created["token"].encode()).hexdigest() not in dump
@@ -282,3 +282,48 @@ def test_session_login_also_needs_access_when_enabled(cf_identity, client, owner
     # The session cookie alone is not enough either: Access is required every time.
     assert client.get("/auth/me").status_code == 403
     assert client.get("/auth/me", headers=jwt_header).status_code == 200
+
+
+# ------------------------------------------------------------ monitor tokens
+
+def test_monitor_token_has_its_own_prefix_and_scope(client, admin_headers):
+    r = client.post("/v1/admin/tokens", json={"name": "robot", "scope": "monitor"},
+                    headers=admin_headers)
+    assert r.status_code == 200, r.text
+    created = r.json()
+    assert re.fullmatch(r"aab_monitor_[0-9a-f]{48}", created["token"])
+    assert created["scope"] == "monitor"
+    listed = {t["name"]: t for t in client.get("/v1/admin/tokens", headers=admin_headers).json()}
+    assert listed["robot"]["scope"] == "monitor" and listed["test"]["scope"] == "admin"
+    with db.connect() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM audit_log WHERE action = 'admin_token.create'")]
+    dump = json.dumps(rows)
+    assert "monitor" in dump and created["token"] not in dump
+
+
+def test_monitor_token_never_opens_the_admin_plane(client, admin_headers):
+    token = client.post("/v1/admin/tokens", json={"name": "robot", "scope": "monitor"},
+                        headers=admin_headers).json()["token"]
+    for path in ("/auth/me", "/v1/admin/tokens", "/v1/admin/health", "/v1/admin/plugins"):
+        r = client.get(path, headers=_bearer(token))
+        assert r.status_code == 401, path
+        assert r.json() == {"error": "admin authentication required", "code": "unauthorized"}
+
+
+def test_token_scope_is_validated(client, admin_headers):
+    r = client.post("/v1/admin/tokens", json={"name": "x", "scope": "root"},
+                    headers=admin_headers)
+    assert r.status_code in (400, 422)
+
+
+def test_scope_column_is_added_to_an_older_database(client, admin_headers):
+    # A broker.db from before the column: every token in it is an admin token.
+    with db.connect() as conn:
+        conn.execute("ALTER TABLE admin_tokens DROP COLUMN scope")
+    db.init()
+    with db.connect() as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(admin_tokens)")}
+        scopes = {r["scope"] for r in conn.execute("SELECT scope FROM admin_tokens")}
+    assert "scope" in cols and scopes == {"admin"}
+    assert client.get("/auth/me", headers=admin_headers).status_code == 200

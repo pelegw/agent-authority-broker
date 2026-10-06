@@ -59,3 +59,10 @@ def test_setup_reads_the_password_with_getpass(cli_app, monkeypatch, capsys):
     assert aab.main(["setup", "--username", "owner", "--setup-token", SETUP_TOKEN]) == 0
     assert json.loads(capsys.readouterr().out)["setup_completed"] is True
     assert "Authorization" not in cli_app[0]   # setup never sends an admin token
+
+
+def test_tokens_create_with_monitor_scope(cli_app, admin_token, capsys):
+    assert aab.main(["--token", admin_token, "tokens", "create", "--name", "robot",
+                     "--scope", "monitor"]) == 0
+    created = json.loads(capsys.readouterr().out)
+    assert created["token"].startswith("aab_monitor_") and created["scope"] == "monitor"

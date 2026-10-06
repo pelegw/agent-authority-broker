@@ -42,7 +42,7 @@ like `/auth/*`.
 | `hidden` | Hide a resource by picking it by name (the label is captured at hide time); list; unhide. | `/v1/admin/hidden`, `/v1/admin/resolve` |
 | `channels` | Telegram: token state, bot name, set / replace / clear the bot token (write-only), link your chat (one-time code, waits until linked), enable / disable, test message, unlink, poll-loop health. | `/v1/admin/telegram`, `.../token` (POST, DELETE), `.../link/start`, `.../enable`, `.../disable`, `.../test`, `.../unlink` |
 | `settings` | Every console-editable operator setting with its value, default, bounds and source; one form, only changed settings sent; reset to default. "What lives in files" lists the env-only keys and why. | `/v1/admin/settings` (GET, PATCH) |
-| `account` | Change password; admin tokens (create with plaintext once, list, revoke); sessions (current one marked, revoke). | `/v1/admin/password`, `/v1/admin/tokens`, `/v1/admin/sessions` |
+| `account` | Change password; admin and monitor tokens (scope chosen at creation, plaintext once, list with scope, revoke); sessions (current one marked, revoke). | `/v1/admin/password`, `/v1/admin/tokens`, `/v1/admin/sessions` |
 
 The header shows two pills: plugins up of plugins enabled, and whether
 Telegram is on.

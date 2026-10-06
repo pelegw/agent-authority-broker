@@ -20,6 +20,18 @@ lives only in `VERSION`.
 - `HEAD` on `/health`, `/v1/health` and `/v1/admin/health`, answering the
   status alone, because uptime monitors such as UptimeRobot probe with
   HEAD (FastAPI does not derive HEAD from GET; it answered 405).
+- **Monitor tokens** (`aab_monitor_...`): `POST /v1/admin/tokens` takes
+  `scope: "admin" | "monitor"` (default `admin`; the console's token form
+  and `aab tokens create --scope monitor` expose it; tokens are listed with
+  their `scope`; the audit detail carries it). A monitor token is accepted
+  by `/health` and `/v1/health` only, as a Bearer token or as the password
+  of HTTP Basic auth, and turns the anonymous liveness answer into the full
+  health summary (200 ok, 503 degraded) outside Cloudflare Access, so an
+  uptime monitor needs neither an Access service token nor an admin
+  credential. It is refused on every admin route before any lookup; an
+  admin token or a session is refused on the probe; failed attempts feed
+  the login rate limiter. Existing databases gain the `scope` column by
+  migration, and every token already in them is `admin`.
 
 ### Changed
 - The role is presented as what it always was in `effective = P ∩ G ∩ R`: a

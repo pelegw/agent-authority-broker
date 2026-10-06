@@ -1,8 +1,9 @@
 """In-process throttle on failed owner-credential attempts, per client IP.
 
-Password login, the setup token and the password-change endpoint all feed the
-same limiter: after `MAX_FAILURES` failures inside `WINDOW_SECONDS` from one
-IP, further attempts are refused with 429 before any password is checked.
+Password login, the setup token, the password-change endpoint and the monitor
+token on /health all feed the same limiter: after `MAX_FAILURES` failures
+inside `WINDOW_SECONDS` from one IP, further attempts are refused with 429
+before any password or token is checked.
 
 In-process state is fine because the broker runs exactly one worker; it resets
 on restart, which only ever helps a legitimate owner.

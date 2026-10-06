@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS admin_tokens (
     expires_at   INTEGER,                     -- NULL = never
     last_used_at INTEGER,
     revoked      INTEGER NOT NULL DEFAULT 0
+    -- scope ('admin' | 'monitor') arrived after the first release: _MIGRATIONS.
 );
 
 -- Agent keys (aab_...). A key holds no authority by itself: authority comes
@@ -293,7 +294,11 @@ def _enable_wal(conn: sqlite3.Connection) -> str:
 # Columns added after the first release, as {table: {column: declaration}};
 # applied to pre-existing databases so an in-place upgrade doesn't require
 # recreating broker.db. Additive only: never rename or drop here.
-_MIGRATIONS: dict[str, dict[str, str]] = {}
+_MIGRATIONS: dict[str, dict[str, str]] = {
+    # admin: the CLI, scripts and deploys (every token before this column).
+    # monitor: /health and /v1/health only (identity/admin_tokens.py).
+    "admin_tokens": {"scope": "TEXT NOT NULL DEFAULT 'admin'"},
+}
 
 
 def _migrate(conn) -> None:

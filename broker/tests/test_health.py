@@ -1,12 +1,14 @@
 """Liveness (`/health`: unauthenticated, minimal, version-bearing) and the
 owner's health summary (`GET /v1/admin/health`: live checks, 200 or 503)."""
 
+import base64
 import sqlite3
 import types
 
 import pytest
 
 import broker
+from broker.identity import ratelimit
 from broker.notify import telegram
 from broker.plugins import settings
 from broker.plugins.adapter import AdapterError
@@ -154,3 +156,95 @@ def test_admin_health_answers_head_with_the_same_verdict(client, echo_local, adm
     r = client.head(SUMMARY, headers=admin_headers)
     assert (r.status_code, r.content) == (503, b"")       # the checks ran: stored too
     assert get_registry().last_health("echo")["healthy"] is False
+
+
+# ---- monitor tokens: the same paths answer the summary -------------------------
+
+@pytest.fixture()
+def monitor_token(client, admin_headers):
+    r = client.post("/v1/admin/tokens", json={"name": "robot", "scope": "monitor"},
+                    headers=admin_headers)
+    assert r.status_code == 200, r.text
+    return r.json()["token"]
+
+
+@pytest.fixture(autouse=True)
+def _clean_limiter():
+    ratelimit.reset()
+    yield
+    ratelimit.reset()
+
+
+def _basic(user, password):
+    raw = f"{user}:{password}".encode()
+    return {"Authorization": "Basic " + base64.b64encode(raw).decode()}
+
+
+def test_monitor_token_turns_the_probe_into_the_summary(client, echo_local, monitor_token):
+    bearer = {"Authorization": f"Bearer {monitor_token}"}
+    for path in ("/v1/health", "/health"):
+        r = client.get(path, headers=bearer)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "ok" and body["checks"]["plugins"]["echo"]["ok"] is True
+        assert body["version"] == broker.__version__
+        r = client.head(path, headers=bearer)
+        assert (r.status_code, r.content) == (200, b"")
+    # Without the token the same path is still the anonymous liveness answer.
+    assert client.get("/v1/health").json() == {"status": "ok", "version": broker.__version__}
+
+
+def test_monitor_token_reports_degraded_as_503(client, echo_local, monitor_token, monkeypatch):
+    monkeypatch.setattr(echo_local.impl, "status", _down)
+    bearer = {"Authorization": f"Bearer {monitor_token}"}
+    r = client.get("/v1/health", headers=bearer)
+    assert r.status_code == 503 and r.json()["failing"] == ["plugins.echo"]
+    r = client.head("/v1/health", headers=bearer)
+    assert (r.status_code, r.content) == (503, b"")
+    assert client.get("/v1/health").status_code == 200          # liveness never degrades
+
+
+def test_monitor_token_as_basic_auth(client, echo_local, monitor_token):
+    # UptimeRobot's free plan can send Basic auth but no custom header: the
+    # token goes in the password (any user), or in the user for a monitor with
+    # a single credential field.
+    assert client.get("/v1/health", headers=_basic("uptimerobot", monitor_token)).status_code == 200
+    assert client.get("/v1/health", headers=_basic(monitor_token, "")).status_code == 200
+    assert client.get("/v1/health", headers=_basic("uptimerobot", "wrong")).status_code == 401
+    assert client.get("/v1/health", headers={"Authorization": "Basic not-base64!"}).status_code == 401
+
+
+def test_other_credentials_are_refused_on_the_probe(client, echo_local, admin_token, make_agent,
+                                                    monitor_token):
+    # An admin token works nowhere here: the admin plane stays behind Access.
+    for headers in ({"Authorization": f"Bearer {admin_token}"}, make_agent().headers,
+                    _basic("owner", admin_token),
+                    {"Authorization": "Bearer aab_monitor_" + "0" * 48},
+                    {"Authorization": "Digest abc"}, {"Authorization": ""}):
+        ratelimit.reset()
+        r = client.get("/v1/health", headers=headers)
+        assert r.status_code == 401, headers
+        assert r.json() == {"error": "monitor token required", "code": "unauthorized"}
+    ratelimit.reset()
+    r = client.head("/v1/health", headers={"Authorization": f"Bearer {admin_token}"})
+    assert (r.status_code, r.content) == (401, b"")
+
+
+def test_bad_monitor_credentials_are_throttled_per_ip(client, echo_local, monitor_token):
+    bad = {"Authorization": "Bearer aab_monitor_" + "f" * 48}
+    for _ in range(ratelimit.MAX_FAILURES):
+        assert client.get("/v1/health", headers=bad).status_code == 401
+    assert client.get("/v1/health", headers=bad).status_code == 429
+    # The good token is throttled too (same IP); the anonymous probe never is.
+    good = {"Authorization": f"Bearer {monitor_token}"}
+    assert client.get("/v1/health", headers=good).status_code == 429
+    assert client.get("/v1/health").status_code == 200
+
+
+def test_revoked_monitor_token_is_401(client, echo_local, admin_headers, monitor_token):
+    listed = client.get("/v1/admin/tokens", headers=admin_headers).json()
+    robot = next(t for t in listed if t["name"] == "robot")
+    r = client.post(f"/v1/admin/tokens/{robot['id']}/revoke", headers=admin_headers)
+    assert r.status_code == 200
+    r = client.get("/v1/health", headers={"Authorization": f"Bearer {monitor_token}"})
+    assert r.status_code == 401

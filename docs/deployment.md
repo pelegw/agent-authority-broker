@@ -134,24 +134,28 @@ gateway, for example), set `BROKER_PORT` in `.env`.
    reaches all three (step 5 lists all five plugins).
 3. **Health.** `curl -s http://127.0.0.1:8080/health` and `/v1/health`
    answer `200 {"status":"ok","version":"0.2.0"}` (`HEAD` answers the status
-   alone). They report liveness only, never plugin or connection state. The
-   owner's summary for an uptime monitor is `GET` or `HEAD`
-   `/v1/admin/health` with an `aab_admin_` token (or the
-   session cookie): it checks the database, refreshes every enabled
-   plugin's `/status` live (in parallel, stored as the plugin cards store
-   it) and reads the Telegram channel, then answers
-   `200 {"status":"ok", ...}` or `503 {"status":"degraded",
+   alone). Anonymous, they report liveness only, never plugin or connection
+   state. With a **monitor token** (Account > Admin tokens, scope
+   "monitor"; or `aab tokens create --scope monitor`) the same paths answer
+   the full health summary: `Authorization: Bearer aab_monitor_...`, or the
+   token as the password of HTTP Basic auth
+   (`curl -u uptimerobot:aab_monitor_...`) for a monitor that cannot set
+   headers, such as UptimeRobot's free plan. The summary checks the
+   database, refreshes every enabled plugin's `/status` live (in parallel,
+   stored as the plugin cards store it) and reads the Telegram channel,
+   then answers `200 {"status":"ok", ...}` or `503 {"status":"degraded",
    "failing":["plugins.whatsapp", ...], ...}`. `checks.database`,
    `checks.plugins.<id>` and `checks.telegram` each carry `ok`; a disabled
    plugin or channel is never a failure, an enabled plugin must be
    reachable, healthy and connected, and an enabled Telegram channel must
    have a readable token, a linked chat, a running poll loop and fewer
-   than three poll errors in a row. Point the monitor at it with
-   `Authorization: Bearer aab_admin_...` (in public mode also the
-   Cloudflare Access service-token headers, as for the CLI in
-   `deploy/DEPLOY.md`) and alert on the status code. The call takes one
-   plugin timeout at most. None of these routes is written to the access
-   log.
+   than three poll errors in a row. The call takes one plugin timeout at
+   most. A monitor token opens nothing else, an admin token opens nothing
+   here, and the probe is outside Cloudflare Access, so the monitor needs
+   no Access service token; failed attempts feed the login rate limiter.
+   The owner's own view of the same summary is `GET` or `HEAD`
+   `/v1/admin/health` (session or admin token, behind Access). None of
+   these routes is written to the access log.
 4. **Setup page.** `/admin` shows the setup page until the owner exists:
    `GET /auth/status` answers `{"setup_completed":false,"login_required":false}`.
    `POST /auth/setup` with `{setup_token, username, password}` answers

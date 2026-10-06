@@ -89,6 +89,10 @@ def require_admin(
         scheme, _, token = authorization.partition(" ")
         if scheme != "Bearer" or not token.strip():
             raise _unauthorized(request, "malformed")
+        if token.strip().startswith(admin_tokens.MONITOR_PREFIX):
+            # A monitor token opens /health alone (routers/health.py): on the
+            # admin plane it is refused before any lookup, like a bad token.
+            raise _unauthorized(request, "monitor_token")
         auth = admin_tokens.authenticate(token.strip())
         if auth is None:
             raise _unauthorized(request, "unknown_or_revoked_token")

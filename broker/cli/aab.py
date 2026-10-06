@@ -11,6 +11,7 @@ Talks to the same admin REST API as the console, over httpx. Configuration:
 Examples:
   aab setup --username owner                  # SETUP_TOKEN from env or --setup-token
   aab tokens create --name deploy --expires-in-hours 24
+  aab tokens create --name uptimerobot --scope monitor   # /health only
   aab tokens list
   aab tokens revoke <token-id>
   aab sessions list
@@ -100,6 +101,8 @@ def build_parser() -> argparse.ArgumentParser:
     tc = tk.add_parser("create")
     tc.add_argument("--name", required=True)
     tc.add_argument("--expires-in-hours", type=int, default=None)
+    tc.add_argument("--scope", choices=["admin", "monitor"], default="admin",
+                    help="monitor: accepted by /health and /v1/health only")
     tk.add_parser("list")
     tr = tk.add_parser("revoke")
     tr.add_argument("id")
@@ -297,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     with make_client(args.url, args.token) as c:
         if args.cmd == "tokens" and args.sub == "create":
-            r = c.post("/v1/admin/tokens", json={"name": args.name,
+            r = c.post("/v1/admin/tokens", json={"name": args.name, "scope": args.scope,
                                                  "expires_in_hours": args.expires_in_hours})
         elif args.cmd == "tokens" and args.sub == "list":
             r = c.get("/v1/admin/tokens")
