@@ -33,6 +33,7 @@ SOURCE = "github.com/acme/aab-plugin-echo"
 V1, V2 = "a" * 40, "b" * 40
 JOB_ID = "c" * 32
 ECHO_TEXT = (ECHO_DIR / "manifest.yaml").read_text(encoding="utf-8")
+REAL_CALL = plugin_install._call            # before any test patches it
 
 
 def echo_text(version: str = "0.1.0", **changes) -> str:
@@ -708,3 +709,21 @@ def test_every_refused_mutation_is_audited_even_before_anything_is_pinned(client
     assert rows["plugin.install"]["resource"] == SOURCE         # no service known yet
     assert json.loads(rows["plugin.remove"]["detail"])["code"] == "not_installed"
     assert pins.all() == []
+
+
+def test_an_unexpected_failure_after_pinning_puts_the_pins_back(admin_ctx, fake, monkeypatch):
+    """Fail closed: a crash between the pin and the installer's answer (here,
+    in the call itself) leaves no pin behind and is audited as an error."""
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated crash")
+    monkeypatch.setattr(plugin_install, "_call",
+                        lambda method, path, *a, **kw: boom() if path == "/install"
+                        else REAL_CALL(method, path, *a, **kw))
+    with pytest.raises(RuntimeError):
+        plugin_install.install(admin_ctx, SOURCE, "v0.1.0", V1)
+    assert pins.all() == []
+    row = audit_rows("plugin.install")[-1]
+    assert row["result"] == "error"
+    assert json.loads(row["detail"])["code"] == "internal"
+    assert json.loads(row["detail"])["pins_restored"] == ["echo"]
+

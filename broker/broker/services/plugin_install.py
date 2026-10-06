@@ -351,6 +351,13 @@ def _pin_then_call(ctx, action: str, review: dict, texts: dict[str, str], path: 
         restored = [] if exc.code == "unknown_outcome" else _restore(snapshots, registered)
         _refused(ctx, action, service, detail, exc, pins_restored=restored)
         raise
+    except Exception:
+        # Anything unexpected before the installer accepted: fail closed, no
+        # pin may outlive a request that did not happen.
+        restored = _restore(snapshots, registered)
+        _refused(ctx, action, service, detail, PolicyError(500, "internal error", "internal"),
+                 pins_restored=restored)
+        raise
     _audit(ctx, action, service, {**detail, "job": submitted.get("id"),
                                   "plugins": sorted(texts)})
     log.info("plugin %s requested %s", action.split(".")[1], kv(
