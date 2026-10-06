@@ -22,5 +22,6 @@ This directory holds the design and operator documents. The table gives the phas
 | `approval-volume.md` | phase 8 | Simulated human interrupts under standing grants and under per-action approval (8-hour reference numbers), budget exhaustion, what the simulation does not model. |
 | `plugin-packaging.md` | 0.3.0 | External plugins: a plugin as its own repository, the `aab-plugin.yaml` descriptor (every field and rule), the base image `ghcr.io/pelegw/aab-plugin-base` and a Dockerfile template, the overlay the installer writes and the limits it enforces, versioning, install / upgrade / remove below the console, private repositories (the read-only GitHub token, a console setting), work against a gateway checkout. |
 | `plugins-guide.md` | 0.3.0 | The plugin guide for a reader with no prior knowledge, in simplified technical English with diagrams: what a plugin is, how one call flows, the manifest and plugin API contracts, the adapter, the connection, the runtime, the package and descriptor, the install flow, a complete worked plugin with tests, the security rules for plugin authors. |
+| `status.md` | 0.3.0 | What is verified and what is not, the operating limits and caveats (moved out of the README). |
 
 The public deploy runbook (EC2 and Cloudflare) is `deploy/DEPLOY.md`. `CLAUDE.md` gives the path of the implementation plan.
