@@ -60,6 +60,25 @@ jobs:
         working-directory: installer
         run: python -m pytest
 
+  # The base image every external plugin builds FROM (plugins/base;
+  # release.yml publishes it as ghcr.io/pelegw/aab-plugin-base on a v* tag).
+  # Built here on every push without pushing, so a broken base Dockerfile
+  # fails CI before a release depends on it, and the contract plugins rely on
+  # (docs/plugin-packaging.md) is checked inside the image.
+  plugin-base-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker build plugins/base (no push)
+        run: docker build --build-context runtime=plugin-runtime -t aab-plugin-base:ci plugins/base
+      - name: The image keeps the contract plugins build on
+        run: |
+          docker run --rm aab-plugin-base:ci sh -c '
+            test "$(id -u):$(id -g)" = "10001:10001" &&
+            test "$(stat -c %u:%a /secrets)" = "10001:700" &&
+            test "$PLUGIN_SECRETS_DIR" = /secrets &&
+            python -c "import aab_plugin_runtime, uvicorn"'
+
   # The WhatsApp plugin service (plugins/whatsapp): its own package and tests.
   # The broker job above also runs broker/tests/targets, which serves this
   # plugin through the runtime end to end (imported from source there).

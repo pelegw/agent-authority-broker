@@ -1,0 +1,78 @@
+name: release
+
+# On a v* tag, publish what external plugins build against, at the gateway's
+# version (docs/plugin-packaging.md):
+#   * the aab-plugin-runtime wheel, attached to the GitHub Release of the tag
+#     (the release is created when it does not exist yet);
+#   * the plugin base image ghcr.io/pelegw/aab-plugin-base:<version> and :latest
+#     (plugins/base/Dockerfile), pushed with this repository's GITHUB_TOKEN.
+# Nothing is published unless the tag is exactly v<VERSION> and the runtime is
+# on the same X.Y line: a plugin that asks for base image 0.3.0 must get the
+# 0.3 runtime.
+#
+# GHCR packages of a private repository are private: the host that builds
+# plugins needs a one-time `docker login ghcr.io` with a read:packages token
+# (docs/deployment.md).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write          # create the release and upload the wheel
+  packages: write          # push the base image to ghcr.io
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: The tag, VERSION and the runtime line agree
+        id: version
+        run: |
+          version="$(cat VERSION)"
+          test "${GITHUB_REF_NAME}" = "v${version}" \
+            || { echo "tag ${GITHUB_REF_NAME} is not v${version} (VERSION)"; exit 1; }
+          runtime="$(python3 -c 'import tomllib; print(tomllib.load(open("plugin-runtime/pyproject.toml", "rb"))["project"]["version"])')"
+          test "${runtime%.*}" = "${version%.*}" \
+            || { echo "plugin-runtime ${runtime} is not on the ${version%.*} line"; exit 1; }
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - name: Build the runtime wheel
+        run: |
+          python -m pip install --upgrade pip
+          pip wheel --no-deps --wheel-dir dist ./plugin-runtime
+          ls -l dist
+      - name: Attach the wheel to the release (created if absent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 \
+            || gh release create "${GITHUB_REF_NAME}" --verify-tag --title "${GITHUB_REF_NAME}" \
+                 --notes "See CHANGELOG.md. The plugin runtime wheel is attached; the plugin base image is ghcr.io/pelegw/aab-plugin-base:${{ steps.version.outputs.version }}."
+          gh release upload "${GITHUB_REF_NAME}" dist/aab_plugin_runtime-*.whl --clobber
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push the plugin base image
+        uses: docker/build-push-action@v6
+        with:
+          context: plugins/base
+          build-contexts: |
+            runtime=plugin-runtime
+          push: true
+          tags: |
+            ghcr.io/pelegw/aab-plugin-base:${{ steps.version.outputs.version }}
+            ghcr.io/pelegw/aab-plugin-base:latest
+          # The source label links the package to this repository on GHCR
+          # (its visibility and access follow the repository's).
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=Base image for Agent Authority Broker external plugins
