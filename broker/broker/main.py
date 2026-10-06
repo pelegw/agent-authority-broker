@@ -28,9 +28,9 @@ from .notify import telegram_inbound  # noqa: E402
 from .origin import OriginGuardMiddleware  # noqa: E402
 from .plugins.registry import get_registry, init_registry  # noqa: E402
 from .request_log import RequestContextMiddleware  # noqa: E402
-from .routers import (actions, admin, admin_keys, admin_ops, admin_plugins,  # noqa: E402
-                      admin_settings, admin_telegram, auth, delegations, health, me, oauth,
-                      permissions, skill, targets)
+from .routers import (actions, admin, admin_install, admin_keys, admin_ops,  # noqa: E402
+                      admin_plugins, admin_settings, admin_telegram, auth, delegations, health,
+                      me, oauth, permissions, skill, targets)
 from .routers import console  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -47,9 +47,10 @@ def log_boot(journal_mode: str) -> None:
     s = get_settings()
     secrets = {"setup_token": s.setup_token, "broker_secrets_key": s.broker_secrets_key,
                "decision_signing_key": s.decision_signing_key,
-               "origin_secret": s.origin_secret}
+               "origin_secret": s.origin_secret, "installer_token": s.installer_token}
     log.info("broker starting %s", kv(
         version=__version__, public_mode=s.public_mode(), cf_access=s.cf_access_enabled,
+        installer=bool(s.installer_url.strip()),
         allow_insecure_admin=s.allow_insecure_admin, db=s.broker_db,
         journal_mode=journal_mode, secrets_set=sorted(n for n, v in secrets.items() if v),
         secrets_unset=sorted(n for n, v in secrets.items() if not v),
@@ -107,8 +108,10 @@ api = FastAPI(
 
 # Every router whose routes form the admin plane; each is guarded router-wide
 # by require_admin (tests/identity/test_admin_tokens.py walks this list).
-ADMIN_ROUTERS = (admin.router, admin_plugins.router, admin_keys.router, admin_ops.router,
-                 admin_telegram.router, admin_settings.router)
+# admin_install comes before admin_plugins: routes match in order, and
+# GET /v1/admin/plugins/installed must not reach GET /v1/admin/plugins/{plugin}.
+ADMIN_ROUTERS = (admin.router, admin_install.router, admin_plugins.router, admin_keys.router,
+                 admin_ops.router, admin_telegram.router, admin_settings.router)
 
 api.include_router(health.router)
 # Pre-login owner endpoints (status/setup/login/logout): outside require_admin.

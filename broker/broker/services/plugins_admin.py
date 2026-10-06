@@ -331,6 +331,12 @@ def _blocker(plugin_id: str, service: str | None) -> str | None:
     return None
 
 
+def pin_blocker(plugin_id: str, service: str | None = None) -> str | None:
+    """Why `plugin_id` (hosted by `service`) cannot be pinned, or None. The
+    install flow checks every id of a package with it before pinning any."""
+    return _blocker(plugin_id, service)
+
+
 def _offered_manifest(plugin_id: str, offer: dict) -> tuple[str, Manifest]:
     """The offered manifest as YAML text plus its validated form. The text
     is what is stored and what the broker then uses, never the raw offer."""

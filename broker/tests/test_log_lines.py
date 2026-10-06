@@ -39,7 +39,8 @@ def test_the_boot_line_names_secrets_as_set_or_unset_and_survives_redaction(env,
     [line] = logs("broker.main", "broker starting")
     assert "journal_mode=wal" in line and "public_mode=false" in line
     assert "secrets_set=decision_signing_key,setup_token " in line
-    assert "secrets_unset=broker_secrets_key,origin_secret " in line
+    assert "secrets_unset=broker_secrets_key,installer_token,origin_secret " in line
+    assert "installer=false" in line              # off unless its overlay set INSTALLER_URL
     assert redact(line) == line                   # nothing in it looks like a secret
     assert "boot-line-setup-token-value" not in logs.text() and "ab" * 32 not in logs.text()
     main.log_boot("delete")

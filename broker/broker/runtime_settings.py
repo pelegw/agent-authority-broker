@@ -216,6 +216,21 @@ ENV_ONLY: tuple[dict, ...] = (
     {"name": "PLUGIN_SECRETS_KEY_<SERVICE>, SIDECAR_TOKEN", "field": None, "secret": True,
      "category": "bootstrap",
      "why": "Held by the plugin containers only; the broker never receives them."},
+    {"name": "INSTALLER_URL", "field": "installer_url", "secret": False,
+     "category": "installer",
+     "why": "Where the plugin installer answers. The installer is root on the host, so "
+            "whether it is reachable at all is decided in the files (INSTALLER_ENABLED "
+            "loads its overlay, which sets this), never from a session."},
+    {"name": "INSTALLER_TOKEN", "field": "installer_token", "secret": True,
+     "category": "installer",
+     "why": "The token the broker presents to the installer; generated, and held by "
+            "those two containers only."},
+    {"name": "INSTALLER_ENABLED, INSTALLER_ALLOWED_SOURCES, INSTALLER_GIT_TOKEN, AAB_HOME",
+     "field": None, "secret": False, "category": "installer",
+     "why": "Read by compose and the installer, not by the broker. They bound a container "
+            "that is root on the host (which repositories it may clone, with which "
+            "credential, into which checkout), so a hijacked console session must not be "
+            "able to widen them."},
     {"name": "BROKER_PORT, TZ, DEVICE_NAME, GITHUB_APP_KEY_DIR", "field": None,
      "secret": False, "category": "compose",
      "why": "Read by Docker Compose, the edge or other containers, not by the broker."},

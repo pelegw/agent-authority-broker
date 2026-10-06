@@ -114,6 +114,35 @@ def set(plugin_id: str, manifest_text: str, source: str = "", ref: str = "",
     return m
 
 
+def snapshot(plugin_id: str) -> dict | None:
+    """The stored pin exactly as it is, manifest text included, or None. A
+    step that pins and then fails puts it back with restore()
+    (services/plugin_install.py: a refused upgrade must not leave a running
+    plugin pinned to a version it does not serve)."""
+    if not _valid_id(plugin_id):
+        return None
+    with db.connect() as conn:
+        row = conn.execute(f"SELECT {_COLUMNS}, manifest_yaml FROM plugin_pins"
+                           " WHERE plugin_id = ?", (plugin_id,)).fetchone()
+    return {**_record(row), "manifest_yaml": row["manifest_yaml"]} if row else None
+
+
+def restore(plugin_id: str, snap: dict | None) -> None:
+    """Make the pin exactly what snapshot() returned: that row, or no pin."""
+    if not _valid_id(plugin_id):
+        return
+    if snap is not None and snap.get("plugin_id") != plugin_id:
+        raise ValueError("a snapshot restores only the pin it was taken from")
+    with db.connect() as conn:                  # one transaction: delete, then re-insert
+        conn.execute("DELETE FROM plugin_pins WHERE plugin_id = ?", (plugin_id,))
+        if snap is not None:
+            conn.execute(
+                "INSERT INTO plugin_pins (plugin_id, version, manifest_yaml, source, ref,"
+                " commit_sha, pinned_at, pinned_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (plugin_id, snap["version"], snap["manifest_yaml"], snap["source"],
+                 snap["ref"], snap["commit"], snap["pinned_at"], snap["pinned_by"]))
+
+
 def delete(plugin_id: str) -> bool:
     """Remove the pin. Returns whether there was one."""
     if not _valid_id(plugin_id):
