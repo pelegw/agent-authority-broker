@@ -132,3 +132,27 @@ def test_configured_secrets_are_masked_whatever_their_shape(tmp_path):
     assert planted not in text and "LONGER" not in text
     assert done["log"][0] == "remote said <redacted> and <redacted>"
     assert done["error"] == "failed near <redacted>"
+
+
+def test_a_jobs_own_secret_is_masked_in_its_lines_and_never_kept(tmp_path):
+    """The GitHub token a request carried is that job's mask: masked in its
+    lines and its error, never written to its file, and gone from memory
+    once the job has run (a later job is not masked for it: nothing kept it)."""
+    planted = "Per-Job-Secret-0123456789xyz"           # no redaction row matches this shape
+    store = JobStore(tmp_path / "jobs", mask=("store-wide-secret-value",))
+
+    def work(ctx):
+        ctx.log(f"git said {planted} and store-wide-secret-value")
+        raise RuntimeError(f"failed near {planted}")
+
+    job = store.submit("install", {"source": "github.com/a/b"}, work, mask=(planted, ""))
+    assert store.wait_idle()
+    done = store.get(job["id"])
+    assert done["log"][0] == "git said <redacted> and <redacted>"
+    assert done["error"] == "failed near <redacted>"
+    for f in (tmp_path / "jobs").iterdir():
+        assert planted not in f.read_text(encoding="utf-8"), f
+    assert store._work == {}
+    later = store.submit("install", {}, lambda ctx: ctx.log(f"later {planted}"))
+    assert store.wait_idle()
+    assert store.get(later["id"])["log"] == [f"later {planted}"]

@@ -5,13 +5,21 @@ constant time; an empty configured token refuses to boot, exactly the
 plugin runtime's X-Plugin-Token contract):
 
   GET  /health          liveness, tokenless: {"ok": true}
-  POST /inspect         {source, ref} -> descriptor, manifests and the resolved commit
-                        (synchronous: clone to a temporary directory, read, delete)
-  POST /install         {source, ref, commit} -> 202 job
-  POST /upgrade         {service, source, ref, commit} -> 202 job
+  POST /inspect         {source, ref, git_token?} -> descriptor, manifests and the resolved
+                        commit (synchronous: clone to a temporary directory, read, delete)
+  POST /install         {source, ref, commit, git_token?} -> 202 job
+  POST /upgrade         {service, source, ref, commit, git_token?} -> 202 job
   POST /remove          {service, purge} -> 202 job
   GET  /jobs/{id}       the job: state queued|running|done|failed, log lines
   GET  /installed       {"items": [install records]}
+
+`git_token` is the read-only GitHub token the owner stored in the broker's
+console, sent only when one is stored. It is used for that request's clone
+(inspect) or that job's single clone at its start (install, upgrade), given
+to git through GIT_ASKPASS for github.com sources only (git.py), and kept
+nowhere: not in the job record, install.json, a job log line or a log line
+(the job's lines are masked for it whatever its shape). A malformed one is
+a 400 that does not echo it.
 
 Errors are `{"error": message, "code": code}` like the broker's: 400
 bad_request, 401 unauthorized, 403 source_not_allowed, 404 not_found /
@@ -21,9 +29,9 @@ the job's `error`, never in an HTTP status.
 
 Logging (docs/logging.md): the shared logging_setup and request_log
 (byte-identical copies, kept so by a broker test), as `installer`. Lines
-carry sources, refs, commits, services and job ids; never the token, and
-never INSTALLER_GIT_TOKEN (the ready line says only whether github.com
-clones are authenticated).
+carry sources, refs, commits, services and job ids; never INSTALLER_TOKEN
+and never a GitHub token (the ready line says `git_auth=per_request`: the
+installer holds none of its own).
 """
 
 from __future__ import annotations
@@ -40,7 +48,7 @@ from . import __version__, logging_setup
 from .compose import Compose, Runner
 from .config import Settings
 from .envfile import Runner as EnvRunner
-from .git import Git, GitError
+from .git import Git, GitError, check_token
 from .jobs import Busy, JobStore, public
 from .logging_setup import kv, set_actor
 from .operations import Installer, InstallerError, valid_service
@@ -60,6 +68,9 @@ class _Body(BaseModel):
 class InspectBody(_Body):
     source: str = Field(max_length=300)
     ref: str = Field(max_length=64)
+    # The broker's GitHub token for this request's clone, when the owner stored
+    # one (shape checked by git.check_token). Never in a repr.
+    git_token: str | None = Field(default=None, max_length=255, repr=False)
 
 
 class InstallBody(InspectBody):
@@ -86,10 +97,12 @@ def create_app(settings: Settings | None = None, *, git: Git | None = None,
     logging_setup.configure("installer")
     settings = settings or Settings.from_env()
     settings.check()
-    git = git or Git(token=settings.git_token, askpass_dir=settings.state_dir)
+    git = git or Git(askpass_dir=settings.state_dir)
     installer = Installer(settings, git, Compose(settings.home, runner), env_runner)
-    # Job lines are shown to the owner: neither token may ever be one of them.
-    store = JobStore(settings.state_dir / "jobs", mask=(settings.token, settings.git_token))
+    # Job lines are shown to the owner: INSTALLER_TOKEN may never be one of
+    # them, and neither may the GitHub token a job's request carried (masked
+    # per job, see _submit).
+    store = JobStore(settings.state_dir / "jobs", mask=(settings.token,))
     expected = settings.token.encode()
 
     app = FastAPI(title="aab installer", version=__version__, docs_url=None, redoc_url=None,
@@ -140,16 +153,19 @@ def create_app(settings: Settings | None = None, *, git: Git | None = None,
 
     @app.post("/inspect")
     def inspect(body: InspectBody) -> dict:
-        out = installer.inspect(body.source, body.ref)
+        token = check_token(body.git_token)
+        out = installer.inspect(body.source, body.ref, token)
         log.info("package inspected %s", kv(source=out["source"], ref=out["ref"],
                                             commit=out["commit"],
                                             service=out["descriptor"]["service"],
                                             plugins=out["descriptor"]["plugins"]))
         return out
 
-    def _submit(kind: str, params: dict, work) -> JSONResponse:
+    def _submit(kind: str, params: dict, work, token: str = "") -> JSONResponse:
+        # The token rides with the work (in the closure) and as the job's
+        # mask, never in `params`, which become the stored job record.
         try:
-            job = store.submit(kind, params, work)
+            job = store.submit(kind, params, work, mask=(token,))
         except Busy:
             raise InstallerError(409, "another install, upgrade or remove is in progress",
                                  "busy") from None
@@ -157,14 +173,16 @@ def create_app(settings: Settings | None = None, *, git: Git | None = None,
 
     @app.post("/install")
     def install(body: InstallBody) -> JSONResponse:
+        token = check_token(body.git_token)
         source = installer.check_source(body.source, body.ref)
         commit = installer.check_commit(body.commit)
         ref = body.ref
         return _submit("install", {"source": source, "ref": ref, "commit": commit},
-                       lambda ctx: installer.install(ctx, source, ref, commit))
+                       lambda ctx: installer.install(ctx, source, ref, commit, token), token)
 
     @app.post("/upgrade")
     def upgrade(body: UpgradeBody) -> JSONResponse:
+        token = check_token(body.git_token)
         service = valid_service(body.service)
         source = installer.check_source(body.source, body.ref)
         commit = installer.check_commit(body.commit)
@@ -180,7 +198,8 @@ def create_app(settings: Settings | None = None, *, git: Git | None = None,
         ref = body.ref
         return _submit("upgrade", {"service": service, "source": source, "ref": ref,
                                    "commit": commit},
-                       lambda ctx: installer.upgrade(ctx, service, source, ref, commit))
+                       lambda ctx: installer.upgrade(ctx, service, source, ref, commit, token),
+                       token)
 
     @app.post("/remove")
     def remove(body: RemoveBody) -> JSONResponse:
@@ -205,8 +224,9 @@ def create_app(settings: Settings | None = None, *, git: Git | None = None,
     def installed() -> dict:
         return {"items": installer.installed()}
 
+    # git_auth: the installer holds no GitHub token; the broker sends one with
+    # each request that needs it (named here, never shown anywhere).
     log.info("installer ready %s", kv(version=__version__, home=str(settings.home),
                                       allowed_sources=list(settings.allowed_sources) or None,
-                                      git_auth="askpass" if getattr(git, "authenticated", False)
-                                      else "anonymous"))
+                                      git_auth="per_request"))
     return app

@@ -1,7 +1,9 @@
 """The installer API end to end, without Docker: the token guard, the source
-allowlist and ref rules, inspect against a local bare repository, and the
+allowlist and ref rules, inspect against a local bare repository, the
 install, upgrade and remove jobs (the exact compose commands they run, the
-files they leave, the .env secrets, rollback on failure, one job at a time)."""
+files they leave, the .env secrets, rollback on failure, one job at a time),
+and the GitHub token a request may carry (to git through askpass only, kept
+nowhere, a malformed one refused unseen)."""
 
 import json
 import os
@@ -402,41 +404,99 @@ def test_the_job_log_never_carries_the_installer_token(client, project, echo_rep
         assert secret not in caplog.text
 
 
-def test_a_planted_git_token_never_reaches_a_job_log_a_response_or_a_log_line(
-        project, remote, fake_docker, echo_repo, caplog, tmp_path):
-    """INSTALLER_GIT_TOKEN of a shape no redaction row knows: even if a
-    command printed it, the job log masks it, and nothing the API answers or
-    the installer logs ever carries it."""
+# ---- the GitHub token a request carries --------------------------------------------------
+
+# A fake value with no known token prefix, of a shape no redaction row knows.
+PLANTED = "Planted-0123456789-xyzTOKEN"
+
+
+def test_a_requests_git_token_reaches_git_only_and_is_kept_nowhere(
+        project, remote, fake_docker, echo_repo, caplog):
+    """The broker's GitHub token, sent with inspect, install and upgrade:
+    each clone gets it through the askpass environment only (no argv, no
+    other command); even if a command printed it, the job log masks it; and
+    no response, job record, install.json, rendered file, .env or log line
+    ever carries it. Once a job has run, not even memory holds it."""
     import logging
 
     from aab_installer.compose import Result
-    from aab_installer.git import Git
+    from aab_installer.git import _run
 
-    planted = "Planted-0123456789-xyzTOKEN"
     caplog.set_level(logging.DEBUG)
+    seen = []
+
+    def recording_git(argv, cwd, env, timeout):
+        seen.append((list(argv), dict(env)))
+        return _run(argv, cwd, env, timeout)
+
+    leak = {"on": True}         # only while a job that carried the token runs
 
     def leaky_docker(argv, cwd, timeout):
         result = fake_docker(argv, cwd, timeout)
-        if list(argv)[:1] != ["docker"]:
+        if list(argv)[:1] != ["docker"] or not leak["on"]:
             return result                       # the compose file list stays parseable
-        return Result(result.returncode, f"{result.output}\nusing {planted}")
+        return Result(result.returncode, f"{result.output}\nusing {PLANTED}")
 
-    settings = make_settings(project)
-    settings = type(settings)(token=settings.token, allowed_sources=settings.allowed_sources,
-                              home=settings.home, git_token=planted)
-    git = Git(url_for=lambda s: (remote / f"{s}.git").as_uri(), protocols=("file",),
-              token=planted, askpass_dir=tmp_path / "askpass")
-    c = TestClient(create_app(settings, git=git, runner=leaky_docker),
-                   headers={"X-Installer-Token": TOKEN}, raise_server_exceptions=False)
-    inspected = c.post("/inspect", json={"source": SOURCE, "ref": "v0.1.0"})
-    assert inspected.status_code == 200
-    job = run_job(c, "/install", {"source": SOURCE, "ref": "v0.1.0", "commit": echo_repo.v1})
-    assert job["state"] == "done"
+    app = create_app(make_settings(project), git=local_git(remote, runner=recording_git),
+                     runner=leaky_docker)
+    c = TestClient(app, headers={"X-Installer-Token": TOKEN}, raise_server_exceptions=False)
+    inspected = c.post("/inspect", json={"source": SOURCE, "ref": "v0.1.0",
+                                         "git_token": PLANTED})
+    assert inspected.status_code == 200, inspected.text
+    job = run_job(c, "/install", {"source": SOURCE, "ref": "v0.1.0", "commit": echo_repo.v1,
+                                  "git_token": PLANTED})
+    assert job["state"] == "done", job
     assert any("using <redacted>" in line for line in job["log"])
-    removed = run_job(c, "/remove", {"service": "echo", "purge": True})
-    for text in (inspected.text, json.dumps(job), json.dumps(removed),
+    upgraded = run_job(c, "/upgrade", {"service": "echo", "source": SOURCE, "ref": "v0.2.0",
+                                       "commit": echo_repo.v2, "git_token": PLANTED})
+    assert upgraded["state"] == "done", upgraded
+    assert any("using <redacted>" in line for line in upgraded["log"])
+    assert app.state.store._work == {}                 # the closures holding it are gone
+    leak["on"] = False
+    # Only the network command of each clone carried it, through askpass.
+    carried = [argv[7] for argv, env in seen if env.get("AAB_GIT_TOKEN") == PLANTED]
+    assert carried == ["clone", "clone", "clone"]
+    for argv, env in seen:
+        assert not any(PLANTED in a for a in argv)
+        if "AAB_GIT_TOKEN" in env:
+            assert env["GIT_ASKPASS"].endswith("git-askpass")
+    # An inspect without it is anonymous: nothing remembered the last one.
+    seen.clear()
+    assert c.post("/inspect", json={"source": SOURCE, "ref": "v0.1.0"}).status_code == 200
+    assert seen and not any("AAB_GIT_TOKEN" in env for _, env in seen)
+    removed = run_job(c, "/remove", {"service": "echo", "purge": False})
+    for text in (inspected.text, json.dumps(job), json.dumps(upgraded), json.dumps(removed),
                  c.get("/installed").text, caplog.text):
-        assert planted not in text
-    for f in (project / "plugins.d").rglob("*.json"):
-        assert planted not in f.read_text(encoding="utf-8"), f
-    assert "git_auth=askpass" in caplog.text           # named, never shown
+        assert PLANTED not in text
+    # Nothing on disk: the checkout, plugins.d (jobs, install.json, the
+    # overlay), .env, the askpass script's directory, the remotes.
+    for f in remote.parent.rglob("*"):
+        if f.is_file():
+            assert PLANTED.encode() not in f.read_bytes(), f
+    assert "git_auth=per_request" in caplog.text
+
+
+@pytest.mark.parametrize("bad", ["", "short", "x" * 256, "has space inside it 0123",
+                                 "newline\n0123456789abcdef", "trailing-newline-0123456789\n",
+                                 "non-ascii-é-0123456789", 12345])
+def test_a_malformed_git_token_is_a_400_that_does_not_echo_it(client, fake_docker, echo_repo,
+                                                              bad):
+    install(client, echo_repo)                       # an installed service, for /upgrade
+    fake_docker.calls.clear()
+    jobs_before = len(client.app.state.store.all())
+    bodies = {"/inspect": {"source": SOURCE, "ref": "v0.1.0"},
+              "/install": {"source": SOURCE, "ref": "v0.1.0", "commit": echo_repo.v1},
+              "/upgrade": {"service": "echo", "source": SOURCE, "ref": "v0.2.0",
+                           "commit": echo_repo.v2}}
+    for path, body in bodies.items():
+        r = client.post(path, json={**body, "git_token": bad})
+        assert r.status_code == 400 and r.json()["code"] == "bad_request", (path, r.text)
+        if isinstance(bad, str) and bad:
+            assert bad not in r.text
+    assert len(client.app.state.store.all()) == jobs_before and fake_docker.calls == []
+
+
+def test_a_git_token_is_not_accepted_where_no_clone_happens(client, echo_repo):
+    install(client, echo_repo)
+    r = client.post("/remove", json={"service": "echo", "git_token": PLANTED})
+    assert r.status_code == 400 and PLANTED not in r.text

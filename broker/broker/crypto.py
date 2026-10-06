@@ -2,8 +2,10 @@
 `plugin_secrets` table.
 
 What lives here is only what the owner enters in the console and the broker
-itself must use, e.g. the Telegram bot token (slot `broker`, name
-`telegram_bot_token`). Target credentials never do: each plugin service keeps
+itself must use: the Telegram bot token (slot `broker`, name
+`telegram_bot_token`) and the installer's read-only GitHub token for private
+plugin repositories (slot `broker`, name `installer_git_token`, relayed to
+the installer per request). Target credentials never do: each plugin service keeps
 its own under its own key. This module is the only reader and writer of
 `plugin_secrets`, so "secrets only via crypto.py" is checkable by grep.
 
@@ -12,8 +14,9 @@ Failure modes, all closed:
     `check_boot()` raises and the broker refuses to start, instead of
     quietly behaving as if no secret had ever been entered;
   * the key was rotated or replaced: a row no longer decrypts. `get` raises
-    `SecretsUnreadable`; callers treat the secret as absent (Telegram stays
-    off) and the console shows "re-enter required". Nothing crashes.
+    `SecretsUnreadable`; callers fail closed (Telegram stays off, an install
+    that needs the GitHub token is refused) and the console shows
+    "re-enter required". Nothing crashes.
 
 Each plaintext is bound to its (slot, name) before encryption, so a row
 copied onto another slot or name does not decrypt as that secret. Values

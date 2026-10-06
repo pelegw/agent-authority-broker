@@ -15,9 +15,10 @@
 #   * it renders each plugin's overlay from the plugin's descriptor through a
 #     fixed template and never loads compose YAML or scripts from a plugin
 #     repository; the reviewed commit is pinned;
-#   * INSTALLER_GIT_TOKEN (optional, read-only, for private plugin
-#     repositories) reaches this container only, and git only through
-#     GIT_ASKPASS for github.com: never in a URL, never in a log.
+#   * it holds no git credential: the read-only GitHub token for private
+#     plugin repositories is a console setting the broker keeps encrypted
+#     and sends with each inspect, install or upgrade request; git gets it
+#     only through GIT_ASKPASS for github.com, never in a URL, a file or a log.
 #
 # The checkout is mounted at the SAME path inside (AAB_HOME, default
 # /opt/aab), so compose run in here resolves every relative path in every
@@ -49,7 +50,6 @@ services:
     environment:
       INSTALLER_TOKEN: ${INSTALLER_TOKEN:?run 'python scripts/init_secrets.py --rotate INSTALLER_TOKEN'}
       INSTALLER_ALLOWED_SOURCES: ${INSTALLER_ALLOWED_SOURCES:-}
-      INSTALLER_GIT_TOKEN: ${INSTALLER_GIT_TOKEN:-}
       AAB_HOME: ${AAB_HOME:-/opt/aab}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-text}

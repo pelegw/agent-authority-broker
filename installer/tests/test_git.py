@@ -1,8 +1,9 @@
 """Source normalization, the allowlist (fail closed, `*` is one segment), the
 ref rules, the git client's isolation (no global config, only the allowed
 transport, symlinks checked out as plain files), and the private-repository
-credential: INSTALLER_GIT_TOKEN reaches git only through GIT_ASKPASS, only on
-the commands that talk to github.com, and never in an argument or a URL."""
+credential: the GitHub token a request carries is a per-call argument that
+reaches git only through GIT_ASKPASS, only on the commands that talk to
+github.com, never in an argument or a URL, and never outlives its fetch."""
 
 import os
 import shutil
@@ -12,7 +13,8 @@ import subprocess
 import pytest
 
 from aab_installer.git import (ASKPASS_FILE, ASKPASS_SCRIPT, Git, GitError, allowed,
-                               normalize_source, parse_allowlist, ref_kind, write_askpass)
+                               check_token, normalize_source, parse_allowlist, ref_kind,
+                               write_askpass)
 
 from .conftest import SOURCE, RepoBuilder, echo_package
 
@@ -134,9 +136,14 @@ def test_a_commit_ref_must_come_back_as_that_commit(echo_repo, remote, tmp_path)
     assert not (tmp_path / "b").exists()
 
 
-# ---- private repositories: INSTALLER_GIT_TOKEN through GIT_ASKPASS -----------------------
+# ---- private repositories: a per-request token through GIT_ASKPASS ----------------------
 
-GIT_TOKEN = "github_pat_11TESTONLY0abcdefghijKLMNOPQRSTUVWXYZ0123456789"
+# A fake value with no known token prefix (push protection), of a shape no
+# redaction row matches.
+GIT_TOKEN = "fake-git-token-0123456789-ABCDEFGHIJ"
+# Everything the loose shape allows that a shell would care about: the
+# askpass script must print it back verbatim, never interpret it.
+NASTY_TOKEN = "$(touch${IFS}pwned)`id`'\";|&<>*?%s\\x41{}[]!#~"
 SH = shutil.which("sh")
 
 
@@ -151,11 +158,11 @@ def recording(calls, fail_from=0):
     return runner
 
 
-def test_a_tag_clone_gets_the_askpass_env_when_a_token_is_configured(tmp_path):
+def test_a_tag_clone_gets_the_askpass_env_when_a_token_is_passed(tmp_path):
     calls = []
-    git = Git(runner=recording(calls), token=GIT_TOKEN, askpass_dir=tmp_path / "state")
+    git = Git(runner=recording(calls), askpass_dir=tmp_path / "state")
     with pytest.raises(GitError) as e:
-        git.fetch(SOURCE, "v0.1.0", tmp_path / "dest")
+        git.fetch(SOURCE, "v0.1.0", tmp_path / "dest", token=GIT_TOKEN)
     [(argv, env)] = calls
     assert argv[7] == "clone"
     assert env["GIT_ASKPASS"] == str(tmp_path / "state" / ASKPASS_FILE)
@@ -172,15 +179,32 @@ def test_a_tag_clone_gets_the_askpass_env_when_a_token_is_configured(tmp_path):
 
 def test_a_commit_fetch_gets_it_on_the_fetch_only(tmp_path):
     calls = []
-    git = Git(runner=recording(calls, fail_from=1), token=GIT_TOKEN,
-              askpass_dir=tmp_path / "state")
+    git = Git(runner=recording(calls, fail_from=1), askpass_dir=tmp_path / "state")
     with pytest.raises(GitError):
-        git.fetch(SOURCE, "a" * 40, tmp_path / "dest")
+        git.fetch(SOURCE, "a" * 40, tmp_path / "dest", token=GIT_TOKEN)
     (init_argv, init_env), (fetch_argv, fetch_env) = calls
     assert init_argv[7] == "init" and init_env["GIT_ASKPASS"] == ""
     assert "AAB_GIT_TOKEN" not in init_env
     assert fetch_argv[7] == "fetch" and fetch_env["AAB_GIT_TOKEN"] == GIT_TOKEN
     assert not (tmp_path / "dest").exists()
+
+
+def test_the_local_commands_after_a_clone_never_get_it(echo_repo, remote, tmp_path):
+    """A real clone with a token: only the clone itself carries it; the
+    rev-parse calls that follow run with the plain environment."""
+    from aab_installer.git import _run
+    calls = []
+
+    def runner(argv, cwd, env, timeout):
+        calls.append((list(argv), dict(env)))
+        return _run(argv, cwd, env, timeout)
+
+    git = Git(url_for=lambda s: (remote / f"{s}.git").as_uri(), protocols=("file",),
+              runner=runner, askpass_dir=tmp_path / "state")
+    assert git.fetch(SOURCE, "v0.1.0", tmp_path / "dest", token=GIT_TOKEN) == echo_repo.v1
+    carried = [argv[7] for argv, env in calls if "AAB_GIT_TOKEN" in env]
+    assert carried == ["clone"] and len(calls) == 3
+    assert all(GIT_TOKEN not in a for argv, _ in calls for a in argv)
 
 
 def test_without_a_token_git_is_anonymous(tmp_path):
@@ -190,23 +214,67 @@ def test_without_a_token_git_is_anonymous(tmp_path):
     [(_, env)] = calls
     assert env["GIT_ASKPASS"] == "" and env["SSH_ASKPASS"] == ""
     assert not {k for k in env if k.startswith("AAB_GIT_")}
-    assert not Git().authenticated
+
+
+def test_the_token_lasts_one_fetch_and_the_client_holds_none(tmp_path):
+    """The Git object keeps no credential: the next fetch, without a token,
+    is anonymous, and nothing of the token is left on the object."""
+    calls = []
+    git = Git(runner=recording(calls), askpass_dir=tmp_path / "state")
+    with pytest.raises(GitError):
+        git.fetch(SOURCE, "v0.1.0", tmp_path / "a", token=GIT_TOKEN)
+    with pytest.raises(GitError):
+        git.fetch(SOURCE, "v0.1.0", tmp_path / "b")
+    (_, first), (_, second) = calls
+    assert first["AAB_GIT_TOKEN"] == GIT_TOKEN
+    assert "AAB_GIT_TOKEN" not in second and second["GIT_ASKPASS"] == ""
+    assert GIT_TOKEN not in repr(vars(git))
 
 
 def test_the_token_is_offered_to_github_com_sources_only(tmp_path):
     calls = []
-    git = Git(runner=recording(calls), token=GIT_TOKEN, askpass_dir=tmp_path / "state")
-    assert git.authenticated
+    git = Git(runner=recording(calls), askpass_dir=tmp_path / "state")
     with pytest.raises(GitError):
-        git.fetch("gitlab.com/acme/aab-plugin-echo", "v0.1.0", tmp_path / "dest")
+        git.fetch("gitlab.com/acme/aab-plugin-echo", "v0.1.0", tmp_path / "dest",
+                  token=GIT_TOKEN)
     [(_, env)] = calls
     assert env["GIT_ASKPASS"] == "" and "AAB_GIT_TOKEN" not in env
     assert not (tmp_path / "state" / ASKPASS_FILE).exists()
 
 
-def test_a_token_needs_a_place_for_its_script():
+def test_a_token_needs_a_place_for_its_script(tmp_path):
+    calls = []
     with pytest.raises(ValueError):
-        Git(token=GIT_TOKEN)
+        Git(runner=recording(calls)).fetch(SOURCE, "v0.1.0", tmp_path / "dest",
+                                           token=GIT_TOKEN)
+    assert calls == [] and not (tmp_path / "dest").exists()
+
+
+@pytest.mark.parametrize("token,expected", [(None, ""), (GIT_TOKEN, GIT_TOKEN),
+                                            (NASTY_TOKEN, NASTY_TOKEN), ("x" * 20, "x" * 20),
+                                            ("x" * 255, "x" * 255)])
+def test_the_token_shape_accepted(token, expected):
+    assert check_token(token) == expected
+
+
+@pytest.mark.parametrize("bad", ["", "x" * 19, "x" * 256, "has space inside it 0123",
+                                 "tab\tinside-0123456789", "newline\n0123456789abcdef",
+                                 "trailing-newline-0123456789\n", "\nleading-newline-0123456789",
+                                 "non-ascii-é-0123456789", "nul\x00-0123456789abcdef", 12345,
+                                 ["list"]])
+def test_a_malformed_token_is_refused_without_being_shown(bad, tmp_path):
+    with pytest.raises(GitError) as e:
+        check_token(bad)
+    assert e.value.status == 400 and e.value.code == "bad_request"
+    if isinstance(bad, str) and bad:
+        assert bad not in e.value.message
+    # fetch applies the same rule before git ever runs.
+    calls = []
+    if isinstance(bad, str) and bad:
+        with pytest.raises(GitError):
+            Git(runner=recording(calls), askpass_dir=tmp_path / "state").fetch(
+                SOURCE, "v0.1.0", tmp_path / "dest", token=bad)
+        assert calls == []
 
 
 def test_a_tampered_script_is_rewritten_before_use(tmp_path):
@@ -237,3 +305,16 @@ def test_the_askpass_script_answers_github_com_only(tmp_path, prompt, answer):
         assert r.returncode != 0 and r.stdout == ""
     else:
         assert r.returncode == 0 and r.stdout == answer + "\n"
+
+
+@pytest.mark.skipif(SH is None, reason="no POSIX sh on this machine")
+def test_the_askpass_script_prints_any_allowed_token_verbatim(tmp_path):
+    """The shape rule is loose (any printable ASCII but whitespace), so the
+    script must treat the token as data: quotes, $( ), backticks and %
+    come back exactly, and nothing runs."""
+    script = write_askpass(tmp_path / "state")
+    env = {**os.environ, "AAB_GIT_HOST": "github.com", "AAB_GIT_TOKEN": NASTY_TOKEN}
+    r = subprocess.run([SH, str(script), "Password for 'https://x-access-token@github.com': "],
+                       capture_output=True, text=True, env=env, cwd=tmp_path)
+    assert r.returncode == 0 and r.stdout == NASTY_TOKEN + "\n"
+    assert not (tmp_path / "pwned").exists()

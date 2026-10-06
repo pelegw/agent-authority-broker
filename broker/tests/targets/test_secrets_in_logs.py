@@ -5,9 +5,11 @@ or in the handler's output.
 Flows: owner setup (a wrong setup token first), login (a wrong password
 first, and a password typed as the username), the session, admin token
 create, plugin configure with a secret field, the Telegram bot token and a
-link code, the Google OAuth client and a full connect (code, refresh token,
-access tokens minted per call), the GitHub App private key, install and
-minted installation tokens, agent key create, rotate and use (and a refused
+link code, the installer's GitHub token (stored through its route, then
+relayed to a fake installer with an inspect, next to INSTALLER_TOKEN), the
+Google OAuth client and a full connect (code, refresh token, access tokens
+minted per call), the GitHub App private key, install and minted
+installation tokens, agent key create, rotate and use (and a refused
 key-shaped value), delegation, a password change and logout.
 
 The capture handler sees records BEFORE the redaction backstop (which only
@@ -18,14 +20,18 @@ import base64
 import logging
 
 import pytest
+from fastapi.testclient import TestClient
 
 from broker.config import get_settings
 from broker.identity import ratelimit
 from broker.notify import telegram as tg
 from broker.plugins import registry
 from broker.plugins.registry import TARGETS_DIR
+from broker.services import plugin_install
 
 from ..conftest import CSRF_HEADERS, ECHO_DIR, PLUGIN_TOKEN, cap, register_remote
+from ..test_plugin_install import INSTALLER_TOKEN, INSTALLER_URL, FakeInstaller
+from ..test_plugin_install import SOURCE as PACKAGE_SOURCE
 from .test_github import GH_TOKEN, fakes as gh_fakes, register_github
 from .test_google import GOOGLE_TOKEN, LOCAL_HOST, REDIRECT, fg, register_google
 
@@ -37,6 +43,9 @@ NEW_PASSWORD = "sweep new owner password 24680"
 SIGNING_KEY = "5ee9" * 16
 API_SECRET = "echo-api-secret-value-DO-NOT-LEAK"
 BOT_TOKEN = "987654321:AAsweepBotTokenValueDoNotLeak0123456"
+# No known token prefix, and a shape no redaction row matches: only never
+# being logged keeps it out.
+GIT_TOKEN = "sweep-installer-github-token-DoNotLeak01"
 BOGUS_KEY = "aab_" + "c0de" * 12
 
 
@@ -72,6 +81,7 @@ def sweep(env, client, monkeypatch, tmp_path, secrets_key, echo_impl, caplog, ca
                "signing key": SIGNING_KEY, "broker secrets key": secrets_key,
                "echo api secret": API_SECRET, "bot token": BOT_TOKEN,
                "bot token secret half": BOT_TOKEN.split(":")[1], "bogus key": BOGUS_KEY,
+               "installer git token": GIT_TOKEN, "installer token": INSTALLER_TOKEN,
                "echo plugin token": PLUGIN_TOKEN, "google plugin token": GOOGLE_TOKEN,
                "github plugin token": GH_TOKEN, "google client secret": fg.CLIENT_SECRET,
                "google auth code": fg.AUTH_CODE, "google refresh token": fg.REFRESH_TOKEN,
@@ -153,6 +163,24 @@ def sweep(env, client, monkeypatch, tmp_path, secrets_key, echo_impl, caplog, ca
     secrets["telegram link code"] = ok(client.post("/v1/admin/telegram/link/start",
                                                    headers=admin))["code"]
 
+    # ---- the installer's GitHub token: stored, then relayed with an inspect ----------
+    monkeypatch.setenv("INSTALLER_URL", INSTALLER_URL)
+    monkeypatch.setenv("INSTALLER_TOKEN", INSTALLER_TOKEN)
+    get_settings.cache_clear()
+    installer = FakeInstaller()
+    monkeypatch.setattr(plugin_install, "client_factory",
+                        lambda base, headers, timeout: TestClient(installer.app, base_url=base,
+                                                                  headers=headers))
+    ok(client.post("/v1/admin/plugins/install/git-token", headers=admin,
+                   json={"token": GIT_TOKEN}))
+    ok(client.post("/v1/admin/plugins/install/inspect", headers=admin,
+                   json={"source": PACKAGE_SOURCE, "ref": "v0.1.0"}))
+    ok(client.get("/v1/admin/plugins/install/status", headers=admin))
+    # It really travelled (so the sweep looked at a real relay), in the body only.
+    [inspected] = installer.calls("/inspect")
+    assert inspected["body"]["git_token"] == GIT_TOKEN
+    assert inspected["token"] == INSTALLER_TOKEN
+
     # ---- agent keys: create, use, rotate, delegate, a refused one --------------------
     key = ok(client.post("/v1/admin/keys", headers=admin, json={
         "name": "sweeper", "role": "full", "rate_per_min": 60, "capabilities": [
@@ -220,6 +248,8 @@ def test_the_sweep_is_not_vacuous(sweep):
                      "google access token source=refreshed",
                      "github installation token source=minted", "telegram bot token stored",
                      "telegram link started", "secret stored slot=broker",
+                     "secret stored slot=broker name=installer_git_token",
+                     "installer github token stored", "plugin package inspected",
                      "secret slot written slot=echo", "key created", "decision decision=allow",
                      "perform plugin=gmail", "agent authentication failed reason=unknown_key",
                      "delegation created", "key rotated", "owner password changed",

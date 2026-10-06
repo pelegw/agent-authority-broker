@@ -11,8 +11,9 @@ the key dialogs present the role as a ceiling (label, help line, default
 Telegram bot token field is write-only, and the Plugins view's + Add plugin
 flow (installer off or on, the review card rendered from the broker's real
 review, a job panel that polls through the broker's restart, the offered
-card). Where node exists, the whole script must parse. Plus the manifest
-projection the console's editors are generated from.
+card, the write-only GitHub token for private repositories). Where node
+exists, the whole script must parse. Plus the manifest projection the
+console's editors are generated from.
 """
 
 import json
@@ -450,6 +451,7 @@ def test_every_api_path_in_the_page_exists(env, html):
                  "/v1/admin/plugins/{x}/connect/finish", "/v1/admin/grants/{x}/revoke",
                  # + Add plugin, the job panel, installed provenance, the offered card
                  "/v1/admin/plugins/install/status", "/v1/admin/plugins/install/inspect",
+                 "/v1/admin/plugins/install/git-token",
                  "/v1/admin/plugins/install", "/v1/admin/plugins/install/jobs/{x}",
                  "/v1/admin/plugins/installed", "/v1/admin/plugins/{x}/upgrade",
                  "/v1/admin/plugins/{x}/remove", "/v1/admin/plugins/offered",
@@ -667,3 +669,111 @@ const text = (n) => (n instanceof Text ? n.text : n.children.map(text).join(" ")
                  "echo_data at /data", "ECHO_DB=/data/echo.db", "From the host's .env TZ",
                  "invalid actions: too short"):
         assert want in card, want
+
+
+# ---- the GitHub token for private repositories: write-only --------------------------
+
+def _function(script: str, name: str) -> str:
+    return re.search(rf"^(?:async )?function {name}\(.*?^\}}\n", script, re.S | re.M).group(0)
+
+
+def test_the_git_token_field_is_write_only(html):
+    script = _script(html)
+    fn = _function(script, "gitTokenSection")
+    # A password field with no autofill, in its own small form inside the dialog.
+    assert re.search(r'const input = h\("input", \{ type: "password", '
+                     r'autocomplete: "new-password",', fn)
+    assert 'h("form", { class: "secretrow", autocomplete: "off" }, input, set, clear)' in fn
+    # The only writes to the field empty it, and the submit handler does so
+    # before it sends anything.
+    writes = re.findall(r"\binput\.value\s*=(?!=)\s*([^;]+);", fn)
+    assert writes == ['""']
+    assert not re.search(r"input[^;\n]*setAttribute", fn)
+    handler = re.search(r"form\.onsubmit = async \(e\) => \{(.*?)\n  \};", fn, re.S).group(1)
+    assert handler.index('input.value = "";') < handler.index("api(")
+    assert ('api("/v1/admin/plugins/install/git-token", { method: "POST", '
+            'body: { token: value } })') in handler
+    assert 'api("/v1/admin/plugins/install/git-token", { method: "DELETE" })' in fn
+    # The broker answers with a state word; code only ever compares it.
+    uses = re.findall(r"\.git_token\b(.{0,6})", _strip_comments(script))
+    assert uses and all(re.match(r'\s*[!=]==\s*"', u) for u in uses), uses
+    # The help line says what the owner is trusting it with.
+    for words in ("read-only", "stores it encrypted", "never shows it again",
+                  "installer's allowlist"):
+        assert words in fn, words
+
+
+def test_the_add_plugin_dialog_carries_the_git_token_section(html):
+    script = _script(html)
+    opener = _function(script, "openAddPlugin")
+    assert "const body = h(\"div\", null, form, gitTokenSection(st));" in opener
+    assert "openModal({ title, body, wide: true, sticky: true, buttons: formButtons });" in opener
+    # Back from the review restores the form and the token section together.
+    assert "mm.setBody(f.body);" in _function(script, "inspectPackage")
+    # The installer-off dialog says where the token goes instead of .env.
+    assert "It is not a line in .env" in _function(script, "openInstallerOff")
+    assert "INSTALLER_GIT_TOKEN" not in html
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run the page's JS")
+def test_the_git_token_section_shows_each_state_and_the_brokers_shape_rule(html, tmp_path):
+    """Run the page's own section under node with a minimal DOM for each
+    state the broker reports, and its shape check against the broker's."""
+    from broker.services.install_git_token import TOKEN_RE
+
+    script = _script(html)
+    parts = [re.search(r"const BIDI_CONTROLS = [^\n]*\n", script).group(0),
+             re.search(r"const GIT_TOKEN_SHAPE = [^\n]*\n", script).group(0)]
+    parts += [_function(script, n) for n in ("showControls", "isSafeUrl", "badge", "h",
+                                              "gitTokenSection")]
+    states = [{"git_token": "unset", "secrets_key_configured": True},
+              {"git_token": "set", "secrets_key_configured": True},
+              {"git_token": "unreadable", "secrets_key_configured": True},
+              {"git_token": "unset", "secrets_key_configured": False}]
+    samples = ["x" * 20, "x" * 19, "x" * 255, "x" * 256, "has space 0123456789abcdef",
+               "tab\t0123456789abcdefghij", "é" + "x" * 20, "x" * 20 + "\n",
+               "$(a)`b`'\";|&<>*?%s\\{}[]!#~0123"]
+    dom = """
+class Node { constructor() { this.children = []; } append(...k) { this.children.push(...k); }
+  replaceChildren(...k) { this.children = k.map((c) => (typeof c === "string" ? new Text(c) : c)); } }
+class Text extends Node { constructor(t) { super(); this.text = t; } }
+class El extends Node { constructor(tag) { super(); this.tag = tag; this.attrs = {}; }
+  setAttribute(k, v) { this.attrs[k] = v; } set textContent(t) { this.children = [new Text(t)]; } }
+const document = { createElement: (t) => new El(t), createTextNode: (t) => new Text(t) };
+const location = { href: "http://console.invalid/", origin: "http://console.invalid" };
+const text = (n) => (n instanceof Text ? n.text : n.children.map(text).join(" "));
+const all = (n, pred, out = []) => { if (n instanceof El && pred(n)) out.push(n);
+  for (const c of n.children) all(c, pred, out); return out; };
+"""
+    run = f"""
+const out = [];
+for (const st of {json.dumps(states)}) {{
+  const sec = gitTokenSection(st);
+  const [set, clear] = all(sec, (n) => n.tag === "button");
+  const [warn] = all(sec, (n) => n.className === "warnbox");
+  const [input] = all(sec, (n) => n.tag === "input");
+  out.push({{ text: text(sec), set: text(set), setDisabled: Boolean(set.disabled),
+             clearHidden: Boolean(clear.hidden), warnHidden: Boolean(warn.hidden),
+             type: input.attrs.type, value: input.value === undefined ? null : input.value }});
+}}
+out.push({json.dumps(samples)}.map((s) => GIT_TOKEN_SHAPE.test(s)));
+console.log(JSON.stringify(out));
+"""
+    js = tmp_path / "gittoken.js"
+    js.write_text(dom + "\n".join(parts) + run, encoding="utf-8")
+    proc = subprocess.run(["node", str(js)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    *views, shapes = json.loads(proc.stdout)
+    unset, stored, unreadable, nokey = views
+    assert "not set" in unset["text"] and unset["set"] == "Set" and unset["clearHidden"]
+    assert stored["text"].startswith("GitHub token for private plugin repositories set")
+    assert stored["set"] == "Replace" and not stored["clearHidden"]
+    assert "re-enter required" in unreadable["text"] and "BROKER_SECRETS_KEY changed" in (
+        unreadable["text"])
+    assert unreadable["set"] == "Replace" and not unreadable["clearHidden"]
+    for v in (unset, stored, unreadable):
+        assert v["warnHidden"] and not v["setDisabled"]
+    assert nokey["setDisabled"] and not nokey["warnHidden"]
+    assert all(v["type"] == "password" and v["value"] is None for v in views)
+    # The page refuses exactly what the broker refuses.
+    assert shapes == [bool(TOKEN_RE.fullmatch(s)) for s in samples]

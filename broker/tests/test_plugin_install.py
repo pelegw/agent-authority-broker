@@ -7,15 +7,21 @@ asked to install or upgrade (the fake checks it at the moment it is called)
 and put back when it refuses; unpins AFTER a remove was accepted; every
 mutation audited under the owner; an installer that is off or down answers
 503 saying so; installer refusals relayed with their status and code; job
-and installed passthrough; and INSTALLER_TOKEN, sent as a header, in no
-response, audit row or log line."""
+and installed passthrough; INSTALLER_TOKEN, sent as a header, in no
+response, audit row or log line; and the GitHub token for private
+repositories: a write-only console setting stored encrypted (set, clear,
+state, audited, shape-checked, refused without BROKER_SECRETS_KEY), relayed
+in the body of inspect, install and upgrade only, and fail closed (409)
+when it no longer decrypts."""
 
 import json
 import logging
+from pathlib import Path
 
 import httpx
 import pytest
 import yaml
+from cryptography.fernet import Fernet
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
@@ -23,9 +29,9 @@ from fastapi.testclient import TestClient
 from broker import db
 from broker.plugins import pins, registry
 from broker.plugins.registry import get_registry
-from broker.services import plugin_install
+from broker.services import install_git_token, plugin_install
 
-from .conftest import ECHO_DIR, PLUGIN_TOKEN, cap, enable_plugin, runtime_factory
+from .conftest import CSRF_HEADERS, ECHO_DIR, PLUGIN_TOKEN, cap, enable_plugin, runtime_factory
 
 INSTALLER_URL = "http://aab-installer:8070"
 INSTALLER_TOKEN = "installer-test-token-feedfacecafebeef0123456789abcdef"
@@ -201,6 +207,9 @@ def test_status_when_the_installer_is_off(client, admin_headers, external):
     assert any(line.startswith("INSTALLER_ALLOWED_SOURCES=") for line in body["enable_lines"])
     assert body["manual_command"] == "docker compose $(scripts/compose-files.sh) up -d"
     assert "INSTALLER_ALLOWED_SOURCES" in body["allowlist_hint"]
+    # The GitHub token is a console setting now, never a line in .env.
+    assert not any("GIT" in line for line in body["enable_lines"])
+    assert body["git_token"] == "unset" and body["secrets_key_configured"] is False
 
 
 @pytest.mark.parametrize("method,path,body", [
@@ -634,6 +643,8 @@ def test_installed_is_not_taken_for_a_plugin_named_installed(client, admin_heade
 
 @pytest.mark.parametrize("method,path", [
     ("GET", "/v1/admin/plugins/install/status"),
+    ("POST", "/v1/admin/plugins/install/git-token"),
+    ("DELETE", "/v1/admin/plugins/install/git-token"),
     ("POST", "/v1/admin/plugins/install/inspect"), ("POST", "/v1/admin/plugins/install"),
     ("GET", f"/v1/admin/plugins/install/jobs/{JOB_ID}"), ("GET", "/v1/admin/plugins/installed"),
     ("POST", "/v1/admin/plugins/echo/upgrade"), ("POST", "/v1/admin/plugins/echo/remove"),
@@ -726,4 +737,208 @@ def test_an_unexpected_failure_after_pinning_puts_the_pins_back(admin_ctx, fake,
     assert row["result"] == "error"
     assert json.loads(row["detail"])["code"] == "internal"
     assert json.loads(row["detail"])["pins_restored"] == ["echo"]
+
+
+# ---- the GitHub token for private repositories ----------------------------------------------
+
+# A fake value with no known token prefix, of a shape no redaction row knows.
+GIT_TOKEN = "fake-github-token-for-tests-0123456789"
+GIT_TOKEN_URL = "/v1/admin/plugins/install/git-token"
+
+
+def set_git_token(client, headers, token=GIT_TOKEN):
+    return client.post(GIT_TOKEN_URL, headers=headers, json={"token": token})
+
+
+def status_of(client, headers):
+    return client.get("/v1/admin/plugins/install/status", headers=headers)
+
+
+def db_bytes() -> bytes:
+    """Every file of the test database (main, WAL, journal): where a
+    plaintext would land if the token were ever stored unencrypted."""
+    from broker.config import get_settings
+    path = Path(get_settings().broker_db)
+    return b"".join(p.read_bytes() for p in path.parent.glob(path.name + "*") if p.is_file())
+
+
+def test_the_git_token_is_set_replaced_and_cleared_write_only_and_audited(
+        client, admin_headers, owner, secrets_key, external, caplog):
+    caplog.set_level(logging.DEBUG)
+    before = status_of(client, admin_headers).json()
+    assert before["git_token"] == "unset" and before["secrets_key_configured"] is True
+    texts = []
+    r = set_git_token(client, admin_headers, f"  {GIT_TOKEN}\n")     # a paste's whitespace
+    assert r.status_code == 200, r.text
+    assert r.json() == {"git_token": "set", "secrets_key_configured": True}
+    texts.append(r.text)
+    assert install_git_token.request_fields() == {"git_token": GIT_TOKEN}
+    texts.append(status_of(client, admin_headers).text)
+    assert status_of(client, admin_headers).json()["git_token"] == "set"
+    r = set_git_token(client, admin_headers, GIT_TOKEN[::-1])      # replaced
+    assert r.json()["git_token"] == "set"
+    texts.append(r.text)
+    assert GIT_TOKEN.encode() not in db_bytes() and GIT_TOKEN[::-1].encode() not in db_bytes()
+    r = client.delete(GIT_TOKEN_URL, headers=admin_headers)
+    assert r.status_code == 200 and r.json()["git_token"] == "unset"
+    texts.append(r.text)
+    assert install_git_token.request_fields() == {}
+    rows = [row for row in audit_rows() if row["action"].startswith("installer.")]
+    assert [row["action"] for row in rows] == ["installer.git_token.set",
+                                               "installer.git_token.set",
+                                               "installer.git_token.clear"]
+    assert [json.loads(row["detail"]) for row in rows] == [
+        {"replaced": False}, {"replaced": True}, {"removed": True}]
+    for row in rows:
+        assert (row["actor"], row["actor_principal"], row["actor_via"], row["resource"],
+                row["result"]) == (owner.username, owner.id, "token", "installer", "ok")
+    for text in (*texts, json.dumps(audit_rows()), caplog.text):
+        assert GIT_TOKEN not in text and GIT_TOKEN[::-1] not in text
+    assert "installer github token stored" in caplog.text
+    assert "installer github token cleared" in caplog.text
+
+
+@pytest.mark.parametrize("bad", ["short-token", "x" * 19, "x" * 256,
+                                 "has space inside it 0123456789", "tab\tinside-0123456789abc",
+                                 "non-ascii-é-0123456789abc", "nul\x00-0123456789abcdefg"])
+def test_a_malformed_git_token_is_refused_without_being_shown(client, admin_headers,
+                                                              secrets_key, external, bad):
+    r = set_git_token(client, admin_headers, bad)
+    assert r.status_code == 400 and r.json()["code"] == "invalid_token"
+    assert bad not in r.text
+    assert install_git_token.state() == "unset" and audit_rows("installer.git_token.set") == []
+
+
+def test_git_token_bodies_are_strict(client, admin_headers, secrets_key, external):
+    huge = "y" * 1001
+    for body in ({}, {"token": ""}, {"token": huge}, {"token": GIT_TOKEN, "extra": 1}):
+        r = client.post(GIT_TOKEN_URL, headers=admin_headers, json=body)
+        assert r.status_code == 422, body
+        assert huge not in r.text and GIT_TOKEN not in r.text
+    assert install_git_token.state() == "unset"
+
+
+def test_the_git_token_needs_the_secrets_key(client, admin_headers, external):
+    r = set_git_token(client, admin_headers)
+    assert r.status_code == 409 and r.json()["code"] == "secrets_key_missing"
+    assert GIT_TOKEN not in r.text
+    body = status_of(client, admin_headers).json()
+    assert body["git_token"] == "unset" and body["secrets_key_configured"] is False
+
+
+def test_session_writes_of_the_git_token_need_the_csrf_header(session_client, secrets_key,
+                                                              external):
+    r = session_client.post(GIT_TOKEN_URL, json={"token": GIT_TOKEN})
+    assert r.status_code == 403 and install_git_token.state() == "unset"
+    assert session_client.delete(GIT_TOKEN_URL).status_code == 403
+    r = session_client.post(GIT_TOKEN_URL, json={"token": GIT_TOKEN}, headers=CSRF_HEADERS)
+    assert r.status_code == 200 and install_git_token.state() == "set"
+    r = session_client.delete(GIT_TOKEN_URL, headers=CSRF_HEADERS)
+    assert r.json()["git_token"] == "unset"
+
+
+def test_the_git_token_is_relayed_in_the_bodies_that_clone_and_nowhere_else(
+        client, admin_headers, owner, secrets_key, fake, caplog):
+    caplog.set_level(logging.DEBUG)
+    assert set_git_token(client, admin_headers).status_code == 200
+    texts = [inspect(client, admin_headers).text, install(client, admin_headers).text]
+    fake.record()
+    texts.append(upgrade(client, admin_headers).text)
+    # The fake's /upgrade echoes every request field into its job, git_token
+    # included: the broker's job projection (JOB_KEYS) drops it on the way back.
+    assert fake.jobs[JOB_ID]["git_token"] == GIT_TOKEN and GIT_TOKEN not in texts[-1]
+    texts.append(client.post("/v1/admin/plugins/echo/remove", headers=admin_headers,
+                             json={}).text)
+    texts += [status_of(client, admin_headers).text,
+              client.get(f"/v1/admin/plugins/install/jobs/{JOB_ID}", headers=admin_headers).text,
+              client.get("/v1/admin/plugins/installed", headers=admin_headers).text]
+    inspects = fake.calls("/inspect")
+    assert len(inspects) == 3                          # inspect, and again by install, upgrade
+    assert all(c["body"]["git_token"] == GIT_TOKEN for c in inspects)
+    [inst] = fake.calls("/install")
+    assert inst["body"] == {"source": SOURCE, "ref": "v0.1.0", "commit": V1,
+                            "git_token": GIT_TOKEN}
+    [up] = fake.calls("/upgrade")
+    assert up["body"] == {"service": "echo", "source": SOURCE, "ref": "v0.2.0", "commit": V2,
+                          "git_token": GIT_TOKEN}
+    [rm] = fake.calls("/remove")
+    assert rm["body"] == {"service": "echo", "purge": False}
+    for call in fake.calls():
+        if call["path"] not in ("/inspect", "/install", "/upgrade"):
+            assert GIT_TOKEN not in json.dumps(call["body"]), call["path"]
+        assert call["token"] == INSTALLER_TOKEN        # never the GitHub token as a header
+    for text in (*texts, json.dumps(audit_rows()), caplog.text):
+        assert GIT_TOKEN not in text
+
+
+def test_without_a_stored_git_token_nothing_is_sent(client, admin_headers, secrets_key, fake):
+    assert inspect(client, admin_headers).status_code == 200
+    assert install(client, admin_headers).status_code == 202
+    for call in fake.calls():
+        assert "git_token" not in (call["body"] or {}), call["path"]
+
+
+def test_a_git_token_under_an_old_key_refuses_before_anything_is_asked(
+        client, admin_headers, owner, secrets_key, fake, monkeypatch):
+    """BROKER_SECRETS_KEY replaced: the stored token no longer decrypts, so
+    inspect, install and upgrade answer 409 saying to re-enter it, before the
+    installer is asked anything and before anything is pinned. Remove needs
+    no clone and still works; clearing needs no key; a new token works."""
+    from broker.config import get_settings
+    assert set_git_token(client, admin_headers).status_code == 200
+    monkeypatch.setenv("BROKER_SECRETS_KEY", Fernet.generate_key().decode())
+    get_settings.cache_clear()
+    assert status_of(client, admin_headers).json()["git_token"] == "unreadable"
+    fake.record()
+    for r in (inspect(client, admin_headers), install(client, admin_headers),
+              upgrade(client, admin_headers)):
+        assert r.status_code == 409 and r.json()["code"] == "git_token_unreadable", r.text
+        assert "enter it again" in r.json()["error"]
+        assert "BROKER_SECRETS_KEY" in r.json()["error"]
+    assert fake.calls("/inspect") == fake.calls("/install") == fake.calls("/upgrade") == []
+    assert pins.all() == []
+    for action in ("plugin.install", "plugin.upgrade"):
+        row = audit_rows(action)[-1]
+        assert row["result"] == "error" and row["actor"] == owner.username
+        assert json.loads(row["detail"])["code"] == "git_token_unreadable"
+    r = client.post("/v1/admin/plugins/echo/remove", headers=admin_headers, json={})
+    assert r.status_code == 202, r.text
+    r = client.delete(GIT_TOKEN_URL, headers=admin_headers)
+    assert r.status_code == 200 and r.json()["git_token"] == "unset"
+    assert inspect(client, admin_headers).status_code == 200
+    assert "git_token" not in fake.calls("/inspect")[-1]["body"]
+    assert set_git_token(client, admin_headers).json()["git_token"] == "set"
+    assert inspect(client, admin_headers).status_code == 200
+    assert fake.calls("/inspect")[-1]["body"]["git_token"] == GIT_TOKEN
+
+
+def test_the_token_shape_has_no_trailing_newline_loophole():
+    # `$` in a Python pattern matches before a final newline; the rule is a fullmatch.
+    assert install_git_token.TOKEN_RE.fullmatch(GIT_TOKEN)
+    assert not install_git_token.TOKEN_RE.fullmatch(GIT_TOKEN + "\n")
+
+
+def test_a_malformed_stored_token_fails_closed(secrets_key, external):
+    """Defence in depth: whatever reads back from the store is checked again
+    before it is sent anywhere (a row written by another version)."""
+    from broker import crypto
+    from broker.errors import PolicyError
+    crypto.put(crypto.BROKER_SLOT, install_git_token.TOKEN_NAME, "has space 0123456789abc")
+    with pytest.raises(PolicyError) as e:
+        install_git_token.request_fields()
+    assert (e.value.status, e.value.code) == (409, "git_token_unreadable")
+    assert "0123456789abc" not in str(e.value)
+
+
+def test_a_stored_token_without_any_key_is_unreadable_too(client, admin_headers, secrets_key,
+                                                          fake, monkeypatch):
+    from broker.config import get_settings
+    assert set_git_token(client, admin_headers).status_code == 200
+    monkeypatch.delenv("BROKER_SECRETS_KEY")
+    get_settings.cache_clear()
+    body = status_of(client, admin_headers).json()
+    assert body["git_token"] == "unreadable" and body["secrets_key_configured"] is False
+    r = inspect(client, admin_headers)
+    assert r.status_code == 409 and r.json()["code"] == "git_token_unreadable"
+    assert fake.calls("/inspect") == []
 

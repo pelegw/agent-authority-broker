@@ -32,14 +32,14 @@ GENERATED = ["SETUP_TOKEN", *HEX_TOKENS, *FERNET_KEYS]
 PLACEHOLDERS = ["CF_ACCESS_TEAM_DOMAIN", "CF_ACCESS_AUD", "SITE_DOMAIN"]
 # Third-party credentials that moved to the console (docs/configuration.md).
 CONSOLE_ONLY = ["GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GOOGLE_OAUTH_CLIENT_ID",
-                "GOOGLE_OAUTH_CLIENT_SECRET", "TELEGRAM_BOT_TOKEN"]
+                "GOOGLE_OAUTH_CLIENT_SECRET", "TELEGRAM_BOT_TOKEN", "INSTALLER_GIT_TOKEN"]
 # Every key the file carries, in order. A new key must be a conscious choice
 # (docs/configuration.md: files hold only what cannot live in the database).
 EXPECTED_KEYS = ["SETUP_TOKEN", "ORIGIN_SECRET", "BROKER_SECRETS_KEY", "DECISION_SIGNING_KEY",
                  "PLUGIN_TOKEN_WHATSAPP", "PLUGIN_SECRETS_KEY_WHATSAPP", "SIDECAR_TOKEN",
                  "PLUGIN_TOKEN_GITHUB", "PLUGIN_SECRETS_KEY_GITHUB", "PLUGIN_TOKEN_GOOGLE",
                  "PLUGIN_SECRETS_KEY_GOOGLE", "INSTALLER_ENABLED", "INSTALLER_TOKEN",
-                 "INSTALLER_ALLOWED_SOURCES", "AAB_HOME", "INSTALLER_GIT_TOKEN",
+                 "INSTALLER_ALLOWED_SOURCES", "AAB_HOME",
                  *PLACEHOLDERS, "BROKER_PORT", "DEVICE_NAME", "TZ",
                  "LOG_LEVEL", "LOG_FORMAT",
                  "GITHUB_APP_KEY_DIR", "MCP_ALLOWED_HOSTS", "CF_ACCESS_ENABLED",
@@ -204,9 +204,11 @@ def test_third_party_credentials_are_not_in_the_file_but_in_the_checklist(out):
         assert f"{name}=" not in text, name
     # The checklist says where each one goes instead.
     assert "Entered in the console" in r.stdout
-    for where in ("Channels > Telegram", "Plugins > GitHub", "Plugins > Google"):
+    for where in ("Channels > Telegram", "Plugins > GitHub", "Plugins > Google",
+                  "Plugins > + Add plugin"):
         assert where in r.stdout, where
     assert "BotFather" in r.stdout
+    assert "GitHub token for private plugin repositories" in r.stdout
 
 
 def test_broker_secrets_key_describes_what_it_protects(out):
@@ -214,8 +216,10 @@ def test_broker_secrets_key_describes_what_it_protects(out):
     lines = out.read_text(encoding="utf-8").splitlines()
     comment = lines[lines.index(next(l for l in lines if l.startswith("BROKER_SECRETS_KEY="))) - 1]
     assert "Telegram bot token" in comment and "Reserved" not in comment
+    assert "installer's GitHub token" in comment
     r = run("--out", out, "--rotate", "BROKER_SECRETS_KEY")
     assert "re-enter" in r.stdout
+    assert "Plugins > + Add plugin" in r.stdout          # the installer's GitHub token too
 
 
 def test_rotate_preserves_hand_edits_byte_for_byte(out):
@@ -296,17 +300,15 @@ def test_installer_entries_fail_closed(out):
     assert "root on this host" in comment
 
 
-def test_the_git_token_is_optional_and_says_where_it_goes(out):
-    """INSTALLER_GIT_TOKEN: empty by default (public repositories only), a
-    read-only token, for the installer alone, and handed to git through
-    GIT_ASKPASS. It is no public-mode placeholder: the checklist skips it."""
+def test_the_installers_git_token_is_no_longer_in_the_file(out):
+    """The read-only GitHub token for private plugin repositories is a
+    console setting the broker keeps encrypted: neither the file, nor the
+    example, nor --rotate know an INSTALLER_GIT_TOKEN any more."""
     r = run("--out", out)
-    assert parse(out)["INSTALLER_GIT_TOKEN"] == ""
-    lines = out.read_text(encoding="utf-8").splitlines()
-    comment = lines[lines.index("INSTALLER_GIT_TOKEN=") - 1]
-    for word in ("Optional", "read-only", "aab-installer only", "GIT_ASKPASS", "never in a URL"):
-        assert word in comment, word
+    assert "INSTALLER_GIT_TOKEN" not in out.read_text(encoding="utf-8")
+    assert "INSTALLER_GIT_TOKEN" not in run("--example").stdout
     assert "INSTALLER_GIT_TOKEN" not in r.stdout
+    assert run("--out", out, "--rotate", "INSTALLER_GIT_TOKEN").returncode != 0
 
 
 @pytest.mark.parametrize("name,shape", [("PLUGIN_TOKEN_FINANCE", "hex"),

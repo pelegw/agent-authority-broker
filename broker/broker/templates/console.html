@@ -2724,6 +2724,63 @@ function inspectReview(r, problems) {
   return wrap;
 }
 
+// ---- the installer's GitHub token, for private plugin repositories.
+// Write-only, like the Telegram bot token: the field is read once and emptied
+// before the request is even sent, and nothing ever writes a token back. The
+// broker keeps it encrypted and answers with a state word only (git_token:
+// unset | set | unreadable), which this code only ever compares (tested). It
+// sends the token to the installer with inspect, install and upgrade, and the
+// installer offers it to git for allowlisted github.com repositories only.
+const GIT_TOKEN_SHAPE = /^[\x21-\x7e]{20,255}$/;
+function gitTokenSection(st) {
+  const input = h("input", { type: "password", autocomplete: "new-password", spellcheck: "false", maxlength: "255",
+                             "aria-label": "GitHub token for private plugin repositories",
+                             placeholder: "paste a read-only GitHub token" });
+  const set = h("button", { class: "primary", type: "submit" }, "Set");
+  const clear = h("button", { class: "ghost", type: "button" }, "Clear");
+  const form = h("form", { class: "secretrow", autocomplete: "off" }, input, set, clear);
+  const stateLine = h("p", { class: "hint" });
+  const keyWarn = h("div", { class: "warnbox" }, "BROKER_SECRETS_KEY is not set on the broker, so a token cannot be stored. Run scripts/init_secrets.py, then restart the broker.");
+  const paint = (v) => {
+    const stored = v.git_token === "set", unreadable = v.git_token === "unreadable";
+    stateLine.replaceChildren(
+      stored ? badge("set", "ok") : unreadable ? badge("re-enter required", "bad") : badge("not set", ""), " ",
+      stored ? "A token is stored. Inspect, install and upgrade use it for private repositories."
+        : unreadable ? "A token is stored but can no longer be decrypted (BROKER_SECRETS_KEY changed). Inspect, install and upgrade are refused until you enter it again or clear it."
+          : "None stored: only public repositories can be cloned.");
+    set.textContent = stored || unreadable ? "Replace" : "Set";
+    set.disabled = v.secrets_key_configured === false;
+    clear.hidden = v.git_token === "unset";
+    keyWarn.hidden = v.secrets_key_configured !== false;
+  };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const value = input.value.trim();
+    input.value = "";          // write-only: gone from the page before anything else
+    if (!value) { toast("Paste the GitHub token first.", "info"); return; }
+    if (!GIT_TOKEN_SHAPE.test(value)) { toast("That is not a GitHub token (20 to 255 characters, no spaces).", "err"); return; }
+    try {
+      paint(await withBusy(set, () => api("/v1/admin/plugins/install/git-token", { method: "POST", body: { token: value } })));
+      toast("GitHub token stored.");
+    } catch (err) { showErr(err); }
+  };
+  clear.onclick = async () => {
+    const ok = await confirmBox({ title: "Clear the GitHub token?",
+      text: "Private plugin repositories cannot be inspected, installed or upgraded until you set a token again. Public ones are not affected.",
+      ok: "Clear token", danger: true });
+    if (!ok) return;
+    try {
+      paint(await withBusy(clear, () => api("/v1/admin/plugins/install/git-token", { method: "DELETE" })));
+      toast("GitHub token cleared.");
+    } catch (e) { showErr(e); }
+  };
+  paint(st);
+  return h("div", { class: "psec" },
+    h("h4", null, "GitHub token for private plugin repositories"),
+    stateLine, keyWarn, form,
+    h("div", { class: "sub" }, "Optional. Use a read-only token: fine-grained, with access to the plugin repositories only and Contents: read-only. Write-only: the broker stores it encrypted under BROKER_SECRETS_KEY and never shows it again. It is sent to the installer only for clones of github.com repositories on the installer's allowlist."));
+}
+
 // ---- the dialogs.
 $("addPluginBtn").onclick = () => openAddPlugin({});
 async function openAddPlugin(prefill) {
@@ -2745,13 +2802,16 @@ async function openAddPlugin(prefill) {
     h("div", { class: "formhelp" }, st.allowlist_hint || ""),
     st.reachable ? null : h("div", { class: "warnbox wide" }, "The installer is not answering: " + (st.error || "unknown error") + ". Inspect fails until it does."));
   form.onsubmit = (e) => e.preventDefault();
+  // The token has its own small form beside this one, so Enter in either
+  // field does what that field's button says.
+  const body = h("div", null, form, gitTokenSection(st));
   const title = upgrading ? `Upgrade ${prefill.service}` : "Add a plugin";
   const formButtons = [
     { label: "Cancel", cls: "ghost", onClick: (m) => m.close() },
     { label: "Inspect", cls: "primary", onClick: (m, btn) => inspectPackage(m, btn, f) },
   ];
-  const f = { source, ref, prefill, form, title, formButtons };
-  openModal({ title, body: form, wide: true, sticky: true, buttons: formButtons });
+  const f = { source, ref, prefill, body, title, formButtons };
+  openModal({ title, body, wide: true, sticky: true, buttons: formButtons });
 }
 async function inspectPackage(m, btn, f) {
   m.setError("");
@@ -2767,7 +2827,7 @@ async function inspectPackage(m, btn, f) {
   if (!upgrading && r.upgrade) problems.push(`${r.service} is already installed: use Upgrade on its card`);
   m.setTitle(upgrading ? `Review: upgrade ${r.service} to ${r.ref}` : `Review: ${r.source}@${r.ref}`);
   m.setBody(inspectReview(r, problems));
-  const back = { label: "Back", cls: "ghost", onClick: (mm) => { mm.setError(""); mm.setTitle(f.title); mm.setBody(f.form); mm.setButtons(f.formButtons); } };
+  const back = { label: "Back", cls: "ghost", onClick: (mm) => { mm.setError(""); mm.setTitle(f.title); mm.setBody(f.body); mm.setButtons(f.formButtons); } };
   const go = { label: upgrading ? "Upgrade" : "Install", cls: "primary", onClick: (mm, b) => submitInstall(mm, b, r, upgrading) };
   m.setButtons(problems.length ? [back] : [back, go]);
 }
@@ -2800,6 +2860,7 @@ function openInstallerOff(st) {
       h("p", null, "3. Load the installer's compose overlay and recreate the broker, from the checkout:"),
       h("pre", { class: "cmdbox" }, cmd),
       h("p", { class: "hint" }, "Then come back here and choose + Add plugin. The steps, and how to install a plugin by hand without the installer, are in docs/deployment.md and docs/plugin-packaging.md."),
+      h("p", { class: "sub" }, "Private plugin repositories need a read-only GitHub token. It is not a line in .env: once the installer is on, set it in the + Add plugin dialog, where the broker stores it encrypted."),
       st && st.error ? h("div", { class: "sub" }, "Broker says: " + st.error) : null),
     buttons: [{ label: "Close", cls: "primary", onClick: (m) => m.close() }],
   });

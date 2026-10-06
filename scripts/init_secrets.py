@@ -24,16 +24,14 @@ gets the same pair under its own name: `--rotate PLUGIN_TOKEN_<SERVICE>` and
 `--rotate PLUGIN_SECRETS_KEY_<SERVICE>` accept any service name the installer
 accepts and append the entry when it is missing. The opt-in installer itself
 has INSTALLER_TOKEN (generated), INSTALLER_ENABLED, INSTALLER_ALLOWED_SOURCES
-(empty: refuse every install), AAB_HOME and INSTALLER_GIT_TOKEN (empty: public
-plugin repositories only). INSTALLER_GIT_TOKEN is the one third-party
-credential in the file, because the installer has no console of its own and
-must clone before any plugin exists; it is optional, read-only, and reaches
-the installer container alone.
+(empty: refuse every install) and AAB_HOME.
 
-Third-party credentials (GitHub App, Google OAuth client, Telegram bot token)
-are NOT in this file: the owner enters them in the console, which relays
-plugin credentials to the plugin that owns them and encrypts the Telegram
-token under BROKER_SECRETS_KEY (docs/configuration.md). The file keeps only
+Third-party credentials (GitHub App, Google OAuth client, Telegram bot token,
+the installer's read-only GitHub token for private plugin repositories) are
+NOT in this file: the owner enters them in the console, which relays plugin
+credentials to the plugin that owns them and encrypts the Telegram token and
+the installer's GitHub token under BROKER_SECRETS_KEY (docs/configuration.md).
+The file keeps only
 what must exist before the database is readable, plus the public-mode
 exposure values (Cloudflare Access, SITE_DOMAIN), which are written as empty,
 labelled placeholders; a checklist of where to obtain each is printed.
@@ -93,7 +91,7 @@ SECTIONS: list[tuple[str, list[Entry]]] = [
               "Edge secret a Cloudflare Transform Rule adds as X-AAB-Origin. Used only by the public overlay.",
               generate=_hex32),
         Entry("BROKER_SECRETS_KEY",
-              "Fernet key for secrets entered in the console and kept by the broker (the Telegram bot token). Never target credentials.",
+              "Fernet key for secrets entered in the console and kept by the broker (the Telegram bot token, the installer's GitHub token). Never target credentials.",
               generate=_fernet_key),
         Entry("DECISION_SIGNING_KEY",
               "HMAC key for the hash-chained decision record. Keep it stable: old rows verify under it.",
@@ -139,12 +137,6 @@ SECTIONS: list[tuple[str, list[Entry]]] = [
               "Absolute path of this checkout on the host (deploy/push.sh REMOTE_DIR). The "
               "installer mounts it at the same path, so compose resolves paths as the host does.",
               default="/opt/aab"),
-        Entry("INSTALLER_GIT_TOKEN",
-              "Optional read-only GitHub token for private plugin repositories (fine-grained: "
-              "Contents read-only on those repositories; or classic with repo scope). Empty: "
-              "public repositories only. aab-installer only; git gets it through GIT_ASKPASS "
-              "for github.com, never in a URL or a log.",
-              default=""),
     ]),
     ("Public-mode values (fill in for an internet deploy; see the checklist the script prints)", [
         Entry("CF_ACCESS_TEAM_DOMAIN",
@@ -205,6 +197,10 @@ CONSOLE_ENTERED = [
     ("Google OAuth client id and secret", "Plugins > Google",
      "Google Cloud Console > APIs & Services > Credentials > Create credentials > "
      "OAuth client ID (Web application)"),
+    ("GitHub token for private plugin repositories (optional, installer only)",
+     "Plugins > + Add plugin",
+     "GitHub > Settings > Developer settings > Personal access tokens > Fine-grained "
+     "tokens: only the plugin repositories, Contents read-only"),
 ]
 GENERATED = [e.name for e in ENTRIES.values() if e.generate]
 
@@ -225,7 +221,8 @@ ROTATE_HINTS = {
                      "docker compose -f docker-compose.yml -f docker-compose.public.yml up -d.",
     "BROKER_SECRETS_KEY": "Restart the broker: docker compose up -d broker. Secrets entered in "
                           "the console no longer decrypt: re-enter the Telegram bot token "
-                          "(Channels > Telegram).",
+                          "(Channels > Telegram) and, if you set one, the installer's GitHub "
+                          "token (Plugins > + Add plugin).",
     "DECISION_SIGNING_KEY": "Existing decision rows will no longer verify under the new key.",
     "PLUGIN_TOKEN_WHATSAPP": "Restart both ends: docker compose up -d broker plugin-whatsapp.",
     "PLUGIN_SECRETS_KEY_WHATSAPP": "Restart plugin-whatsapp; its stored config no longer "

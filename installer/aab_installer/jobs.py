@@ -16,7 +16,12 @@ Log lines are for the owner: steps, commands (argv carries no secret), exit
 codes and a short, redacted tail of command output. Never a token: every line
 passes the shared redaction backstop, 64-hex runs (the shape of every
 plugin token) are masked, at the cost of image digests, and so is every
-value the store was told is secret (INSTALLER_GIT_TOKEN, whatever its shape).
+value the store was told is secret, whatever its shape: INSTALLER_TOKEN for
+every job, and a job's own secrets (the GitHub token its request carried,
+`submit(..., mask=...)`) for that job. A job's secrets live in memory only,
+beside its work, and are dropped when it finishes: the job record never
+holds them, and a job is never re-run after a restart, so nothing needs them
+later.
 """
 
 from __future__ import annotations
@@ -59,15 +64,22 @@ def clean_line(text: str, mask: tuple[str, ...] = ()) -> str:
     return line[:MAX_LINE]
 
 
-class JobContext:
-    """What a running job uses to report: `log(line)` and `update(**fields)`."""
+def _masks(values) -> tuple[str, ...]:
+    """Distinct non-empty secrets, longest first, so a secret containing
+    another is masked whole."""
+    return tuple(sorted({m for m in values if m}, key=len, reverse=True))
 
-    def __init__(self, store: "JobStore", job: dict):
-        self._store, self.job = store, job
+
+class JobContext:
+    """What a running job uses to report: `log(line)` and `update(**fields)`.
+    `mask` is the job's own secrets (memory only; never saved)."""
+
+    def __init__(self, store: "JobStore", job: dict, mask: tuple[str, ...] = ()):
+        self._store, self.job, self._mask = store, job, mask
 
     def log(self, text: str) -> None:
         lines = self.job["log"]
-        lines.append(self._store.clean(text))
+        lines.append(self._store.clean(text, self._mask))
         if len(lines) > MAX_LOG_LINES:
             # Keep the beginning (what was asked) and the end (how it ended).
             del lines[20:len(lines) - (MAX_LOG_LINES - 20)]
@@ -81,11 +93,11 @@ class JobContext:
 
 class JobStore:
     """Job files plus the single worker. `mask`: secret values that must never
-    reach a stored line, whatever their shape (empty strings are ignored)."""
+    reach a stored line of any job, whatever their shape (empty strings are
+    ignored); `submit(..., mask=...)` adds one job's own."""
 
     def __init__(self, directory: Path, mask: tuple[str, ...] = ()):
-        # Longest first, so a secret containing another is masked whole.
-        self._mask = tuple(sorted({m for m in mask if m}, key=len, reverse=True))
+        self._mask = _masks(mask)
         self.dir = Path(directory)
         self.dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -94,12 +106,14 @@ class JobStore:
             pass
         self._lock = threading.Lock()
         self._queue: queue.Queue = queue.Queue()
-        self._work: dict[str, Callable[[JobContext], None]] = {}
+        # job id -> (work, the job's own secrets). Memory only: popped when
+        # the job runs, so a secret lives exactly as long as its job.
+        self._work: dict[str, tuple[Callable[[JobContext], None], tuple[str, ...]]] = {}
         self._worker: threading.Thread | None = None
         self._recover()
 
-    def clean(self, text: str) -> str:
-        return clean_line(text, self._mask)
+    def clean(self, text: str, extra: tuple[str, ...] = ()) -> str:
+        return clean_line(text, _masks((*self._mask, *extra)) if extra else self._mask)
 
     # ---- persistence -------------------------------------------------------------
 
@@ -147,8 +161,11 @@ class JobStore:
     def active(self) -> dict | None:
         return next((j for j in self.all() if j.get("state") in ("queued", "running")), None)
 
-    def submit(self, kind: str, params: dict, work: Callable[[JobContext], None]) -> dict:
-        """Queue a job; raises Busy while another one is queued or running."""
+    def submit(self, kind: str, params: dict, work: Callable[[JobContext], None],
+               mask: tuple[str, ...] = ()) -> dict:
+        """Queue a job; raises Busy while another one is queued or running.
+        `params` become the job record (never put a secret there); `mask` is
+        the job's own secrets, masked in its lines and never saved."""
         if kind not in KINDS:
             raise ValueError(f"unknown job kind {kind!r}")
         with self._lock:
@@ -161,7 +178,7 @@ class JobStore:
                    "created_at": int(time.time()), "started_at": None, "finished_at": None,
                    "error": None, "log": [], "log_truncated": False}
             self.save(job)
-            self._work[job["id"]] = work
+            self._work[job["id"]] = (work, _masks(mask))
             self._queue.put(job["id"])
             self._ensure_worker()
         log.info("job queued %s", kv(job=job["id"], kind=kind, service=job["service"],
@@ -185,17 +202,18 @@ class JobStore:
     def run(self, job_id: str) -> dict:
         """Run one queued job to completion (the worker calls this)."""
         job = self.get(job_id)
-        work = self._work.pop(job_id, None)
-        if job is None or work is None:
+        entry = self._work.pop(job_id, None)
+        if job is None or entry is None:
             return job or {}
-        ctx = JobContext(self, job)
+        work, mask = entry
+        ctx = JobContext(self, job, mask)
         with bind(f"job-{job_id}"):
             ctx.update(state="running", started_at=int(time.time()))
             started = time.monotonic()
             try:
                 work(ctx)
             except Exception as exc:                  # the job fails; the worker lives on
-                message = self.clean(str(exc) or type(exc).__name__)
+                message = self.clean(str(exc) or type(exc).__name__, mask)
                 ctx.log(f"failed: {message}")
                 ctx.update(state="failed", error=message, finished_at=int(time.time()))
                 log.warning("job failed %s", kv(job=job_id, kind=job["kind"],

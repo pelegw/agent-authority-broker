@@ -220,9 +220,12 @@ def make_settings(project: Path, allowed=("github.com/acme/*",), token=TOKEN):
     return Settings(token=token, allowed_sources=tuple(allowed), home=project)
 
 
-def local_git(remote: Path):
+def local_git(remote: Path, runner=None):
+    """Git against the bare repositories under `remote`, with a place for
+    the askpass script as in production (a request may carry a token)."""
     from aab_installer.git import Git
-    return Git(url_for=lambda source: (remote / f"{source}.git").as_uri(), protocols=("file",))
+    return Git(url_for=lambda source: (remote / f"{source}.git").as_uri(), protocols=("file",),
+               runner=runner, askpass_dir=remote.parent / "askpass")
 
 
 @pytest.fixture()

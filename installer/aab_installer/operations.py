@@ -122,11 +122,12 @@ class Installer:
         self.tmp_root.mkdir(parents=True, exist_ok=True)
         return Path(tempfile.mkdtemp(dir=self.tmp_root, prefix=prefix))
 
-    def inspect(self, source: object, ref: object) -> dict:
+    def inspect(self, source: object, ref: object, token: str = "") -> dict:
+        """`token`: the broker's GitHub token for this clone only ("" for none)."""
         src = self.check_source(source, ref)
         tmp = self._tmp("i-")
         try:
-            commit = self.git.fetch(src, ref, tmp / "src")
+            commit = self.git.fetch(src, ref, tmp / "src", token=token)
             pkg = read_package(tmp / "src")
         finally:
             rmtree(tmp)
@@ -154,9 +155,12 @@ class Installer:
         self._step(ctx, *self.compose.compose("up", "-d", "broker"),
                    label="recreating the broker")
 
-    def _fetch(self, ctx: JobContext, tmp: Path, source: str, ref: str, commit: str):
+    def _fetch(self, ctx: JobContext, tmp: Path, source: str, ref: str, commit: str,
+               token: str = ""):
+        # The job's one network fetch, at its start: the token is needed here
+        # and nowhere after, so nothing keeps it beyond this job.
         ctx.log(f"fetching {source} at {ref}")
-        got = self.git.fetch(source, ref, tmp / "src")
+        got = self.git.fetch(source, ref, tmp / "src", token=token)
         ctx.log(f"resolved commit {got}")
         if got != commit:
             raise InstallerError(409, f"{ref} is now commit {got}, not the reviewed {commit}; "
@@ -189,10 +193,11 @@ class Installer:
         except ComposeError as exc:                  # the file list itself failed
             ctx.log(f"skipped: {exc}")
 
-    def install(self, ctx: JobContext, source: str, ref: str, commit: str) -> None:
+    def install(self, ctx: JobContext, source: str, ref: str, commit: str,
+                token: str = "") -> None:
         tmp = self._tmp("j-")
         try:
-            pkg = self._fetch(ctx, tmp, source, ref, commit)
+            pkg = self._fetch(ctx, tmp, source, ref, commit, token)
             service = pkg.descriptor.service
             ctx.update(service=service)
             svc_dir = self.settings.plugins_dir / service
@@ -215,14 +220,15 @@ class Installer:
         finally:
             rmtree(tmp)
 
-    def upgrade(self, ctx: JobContext, service: str, source: str, ref: str, commit: str) -> None:
+    def upgrade(self, ctx: JobContext, service: str, source: str, ref: str, commit: str,
+                token: str = "") -> None:
         previous = self.record(service)
         if previous is None:
             raise InstallerError(404, f"{service} is not installed", "not_installed")
         svc_dir = self.settings.plugins_dir / service
         tmp = self._tmp("j-")
         try:
-            pkg = self._fetch(ctx, tmp, source, ref, commit)
+            pkg = self._fetch(ctx, tmp, source, ref, commit, token)
             if pkg.descriptor.service != service:
                 raise InstallerError(409, f"the package at {ref} is service "
                                           f"{pkg.descriptor.service}, not {service}",

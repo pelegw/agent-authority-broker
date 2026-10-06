@@ -1,6 +1,8 @@
 """The installer's settings come from its environment only, refuse to boot
-open (empty token) or confused (relative AAB_HOME), and never show the token."""
+open (empty token) or confused (relative AAB_HOME), never show the token, and
+hold no git credential: the GitHub token arrives per request from the broker."""
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -35,19 +37,13 @@ def test_the_token_never_shows_in_a_repr():
     assert "very-secret-token" not in repr(s) and "very-secret-token" not in str(s)
 
 
-def test_the_git_token_is_optional_read_from_env_and_never_shown(tmp_path):
-    assert Settings.from_env({}).git_token == ""
+def test_no_git_credential_is_read_from_the_environment(tmp_path):
+    """A leftover INSTALLER_GIT_TOKEN in an old environment is ignored: the
+    settings have no place for a git credential at all."""
+    leftover = "leftover-git-token-0123456789abcdef"
     s = Settings.from_env({"INSTALLER_TOKEN": "x", "AAB_HOME": str(tmp_path),
-                           "INSTALLER_GIT_TOKEN": " ghp_" + "a" * 36 + "\n"})
-    assert s.git_token == "ghp_" + "a" * 36                    # a pasted newline is dropped
+                           "INSTALLER_GIT_TOKEN": leftover})
     s.check()
-    assert s.git_token not in repr(s) and s.git_token not in str(s)
-
-
-@pytest.mark.parametrize("bad", ["short", "has space inside it", "quote'inside0123",
-                                 "semi;colon0123456", "dollar$ign0123456", "x" * 256])
-def test_a_malformed_git_token_refuses_to_boot_without_showing_it(bad, tmp_path):
-    s = Settings(token="x", allowed_sources=(), home=tmp_path, git_token=bad)
-    with pytest.raises(RuntimeError, match="INSTALLER_GIT_TOKEN is malformed") as e:
-        s.check()
-    assert bad not in str(e.value)
+    assert {f.name for f in dataclasses.fields(Settings)} == {"token", "allowed_sources",
+                                                              "home"}
+    assert leftover not in repr(s) and leftover not in str(vars(s))

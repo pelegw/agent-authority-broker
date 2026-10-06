@@ -15,13 +15,17 @@ Fail closed throughout:
     plain file and can never point a read at the host's files;
   * a `vN.N.N` that resolves to a branch rather than a tag is refused.
 
-Private repositories (INSTALLER_GIT_TOKEN, a read-only GitHub token): the
-token reaches git only through GIT_ASKPASS, a fixed script that prints it
-from the environment of the one clone or fetch that needs it. It is never
-part of a URL or an argument, so it can appear in no git error message,
-process listing or job log. The script answers only github.com's prompts
-(a redirect to another host gets no answer and the fetch fails), and the
-token is offered only when the source itself is on github.com.
+Private repositories: the broker sends the read-only GitHub token the owner
+stored in its console with the one inspect, install or upgrade request that
+needs it, and `fetch(..., token=...)` takes it per call. The installer has
+no token of its own and keeps none: not in its environment, not in a file,
+not in a job record. The token reaches git only through GIT_ASKPASS, a
+fixed script that prints it from the environment of the one clone or fetch
+that talks to the remote. It is never part of a URL or an argument, so it
+can appear in no git error message, process listing or job log. The script
+answers only github.com's prompts (a redirect to another host gets no
+answer and the fetch fails), and the token is offered only when the source
+itself is on github.com.
 """
 
 from __future__ import annotations
@@ -42,8 +46,13 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 MIN_SEGMENTS, MAX_SEGMENTS = 2, 4         # owner/repo, or a group path (GitLab)
 CLONE_TIMEOUT = 180
 
-# The one host INSTALLER_GIT_TOKEN is ever offered to.
+# The one host a GitHub token is ever offered to.
 TOKEN_HOST = "github.com"
+# The token's shape, loose on purpose (every GitHub token format fits) and the
+# broker's rule too (broker/broker/services/install_git_token.py): printable
+# ASCII with no whitespace, so the askpass script's answer is one line.
+# Always used with fullmatch: `$` would let a trailing newline through.
+GIT_TOKEN_RE = re.compile(r"[\x21-\x7e]{20,255}")
 ASKPASS_FILE = "git-askpass"
 # git runs GIT_ASKPASS with its prompt as $1: "Username for 'https://github.com': "
 # then "Password for 'https://x-access-token@github.com': " (credential.c).
@@ -130,6 +139,18 @@ def ref_kind(ref: object) -> str:
     raise GitError(400, "ref must be a release tag vN.N.N or a full 40-hex commit", "bad_request")
 
 
+def check_token(token: object) -> str:
+    """A request's `git_token`: "" when absent (None), else the token itself
+    if it has the shape GIT_TOKEN_RE describes. Raises GitError(400) for
+    anything else, an empty string included, without ever echoing it."""
+    if token is None:
+        return ""
+    if not isinstance(token, str) or not GIT_TOKEN_RE.fullmatch(token):
+        raise GitError(400, "git_token must be 20 to 255 printable characters with no "
+                            "whitespace", "bad_request")
+    return token
+
+
 # (argv, cwd, env, timeout) -> CompletedProcess
 GitRunner = Callable[[Sequence[str], Path | None, dict, float], subprocess.CompletedProcess]
 
@@ -159,28 +180,20 @@ def write_askpass(directory: Path) -> Path:
 class Git:
     """Clones a source at a ref into a directory. `url_for` and `protocols`
     are the test seam (a local bare repository over file://); production
-    is https only. `token` (INSTALLER_GIT_TOKEN) is offered through the
-    askpass script in `askpass_dir` to github.com sources only."""
+    is https only. A token passed to `fetch` is offered through the askpass
+    script in `askpass_dir` to github.com sources only, for that one fetch.
+    The object holds no token: there is nothing to leak between requests."""
 
     def __init__(self, url_for: Callable[[str], str] | None = None,
                  protocols: Sequence[str] = ("https",), runner: GitRunner | None = None,
-                 timeout: float = CLONE_TIMEOUT, token: str = "",
-                 askpass_dir: Path | None = None):
+                 timeout: float = CLONE_TIMEOUT, askpass_dir: Path | None = None):
         self._url_for = url_for or (lambda source: f"https://{source}.git")
         self._protocols = ":".join(protocols)
         self._run = runner or _run
         self._timeout = timeout
-        if token and askpass_dir is None:
-            raise ValueError("a git token needs an askpass_dir for its script")
-        self._token = token or ""               # never in a repr, a log line or an argv
         self._askpass_dir = Path(askpass_dir) if askpass_dir is not None else None
 
-    @property
-    def authenticated(self) -> bool:
-        """Whether private github.com repositories can be fetched."""
-        return bool(self._token)
-
-    def _env(self, source: str | None = None) -> dict:
+    def _env(self, source: str | None = None, token: str = "") -> dict:
         env = {k: v for k, v in os.environ.items()
                if k in ("PATH", "SYSTEMROOT", "TEMP", "TMP", "HOME", "USERPROFILE", "LANG")}
         env.update({
@@ -191,38 +204,46 @@ class Git:
             "GIT_ASKPASS": "",
             "SSH_ASKPASS": "",
         })
-        if (source is not None and self._token and self._askpass_dir is not None
-                and source.split("/", 1)[0] == TOKEN_HOST):
+        if token and source is not None and source.split("/", 1)[0] == TOKEN_HOST:
             # Only the network commands of a github.com source get this; the
             # script answers github.com's prompts and nothing else.
             env.update({"GIT_ASKPASS": str(write_askpass(self._askpass_dir)),
-                        "AAB_GIT_HOST": TOKEN_HOST, "AAB_GIT_TOKEN": self._token})
+                        "AAB_GIT_HOST": TOKEN_HOST, "AAB_GIT_TOKEN": token})
         return env
 
     def _git(self, *args: str, cwd: Path | None = None,
-             source: str | None = None) -> subprocess.CompletedProcess:
-        """Run git. `source` marks a command that talks to the remote, the
-        only kind that may receive the credential."""
+             env: dict | None = None) -> subprocess.CompletedProcess:
+        """Run git. `env` is given only to a command that talks to the
+        remote, the only kind that may receive the credential; every other
+        command runs with the plain, credential-free environment."""
         argv = ["git", "-c", "core.symlinks=false", "-c", "advice.detachedHead=false",
                 "-c", "core.hooksPath=" + os.devnull, *args]
         try:
-            return self._run(argv, cwd, self._env(source), self._timeout)
+            return self._run(argv, cwd, env if env is not None else self._env(), self._timeout)
         except subprocess.TimeoutExpired as exc:
             raise GitError(502, "git timed out", "clone_failed") from exc
         except OSError as exc:
             raise GitError(503, "git is not available in the installer", "unavailable") from exc
 
-    def fetch(self, source: str, ref: str, dest: Path) -> str:
+    def fetch(self, source: str, ref: str, dest: Path, token: str = "") -> str:
         """Check out `source` at `ref` into `dest` (which must not exist) and
-        return the resolved commit. Raises GitError; `dest` is removed on
-        failure."""
+        return the resolved commit. `token` (the broker's GitHub token, for
+        this fetch only; "" for none) is offered to a github.com source's
+        network command through GIT_ASKPASS. Raises GitError; `dest` is
+        removed on failure."""
         kind = ref_kind(ref)
+        token = check_token(token or None)
+        if token and self._askpass_dir is None:
+            # A wiring mistake, not a request error: never fall back to
+            # anything that would put the token anywhere else.
+            raise ValueError("a git token needs an askpass_dir for its script")
         dest = Path(dest)
         url = self._url_for(source)
+        remote = self._env(source, token)
         try:
             if kind == "tag":
                 r = self._git("clone", "--quiet", "--depth", "1", "--branch", ref,
-                              "--single-branch", url, str(dest), source=source)
+                              "--single-branch", url, str(dest), env=remote)
                 self._check(r, f"could not fetch {source} at {ref}")
                 tag = self._git("rev-parse", "--verify", "--quiet", f"refs/tags/{ref}^{{commit}}",
                                 cwd=dest)
@@ -232,7 +253,7 @@ class Git:
                 dest.mkdir(parents=True)
                 self._check(self._git("init", "--quiet", cwd=dest), "git init failed")
                 r = self._git("fetch", "--quiet", "--depth", "1", url, ref, cwd=dest,
-                              source=source)
+                              env=remote)
                 self._check(r, f"could not fetch {source} at {ref}")
                 self._check(self._git("checkout", "--quiet", "--detach", "FETCH_HEAD", cwd=dest),
                             "checkout failed")

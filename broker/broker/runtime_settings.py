@@ -225,12 +225,13 @@ ENV_ONLY: tuple[dict, ...] = (
      "category": "installer",
      "why": "The token the broker presents to the installer; generated, and held by "
             "those two containers only."},
-    {"name": "INSTALLER_ENABLED, INSTALLER_ALLOWED_SOURCES, INSTALLER_GIT_TOKEN, AAB_HOME",
+    {"name": "INSTALLER_ENABLED, INSTALLER_ALLOWED_SOURCES, AAB_HOME",
      "field": None, "secret": False, "category": "installer",
      "why": "Read by compose and the installer, not by the broker. They bound a container "
-            "that is root on the host (which repositories it may clone, with which "
-            "credential, into which checkout), so a hijacked console session must not be "
-            "able to widen them."},
+            "that is root on the host (whether it runs, which repositories it may clone, "
+            "into which checkout), so a hijacked console session must not be able to "
+            "widen them. (The GitHub token for private repositories is a console setting "
+            "under Plugins, + Add plugin: a credential, not a bound.)"},
     {"name": "BROKER_PORT, TZ, DEVICE_NAME, GITHUB_APP_KEY_DIR", "field": None,
      "secret": False, "category": "compose",
      "why": "Read by Docker Compose, the edge or other containers, not by the broker."},

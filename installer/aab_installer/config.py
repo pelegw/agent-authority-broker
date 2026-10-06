@@ -10,25 +10,22 @@ sources and the token cannot be widened or swapped over the network.
                              `github.com/you/*`; empty refuses every inspect and install
   AAB_HOME                   the gateway checkout, mounted at the same path as on the
                              host (default /opt/aab): the compose project directory
-  INSTALLER_GIT_TOKEN        optional read-only GitHub token for private plugin
-                             repositories; handed to git through GIT_ASKPASS for
-                             github.com only (git.py), never put in a URL, never logged
+
+The GitHub token for private repositories is not a setting: it is a
+credential the owner stores in the broker's console, and it arrives with the
+one request that needs it (git.py, app.py). It bounds nothing, so it does
+not belong here, and the installer keeps no copy of it.
 """
 
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .git import parse_allowlist
 
 DEFAULT_HOME = "/opt/aab"
-# What a GitHub token looks like closely enough: printable, no whitespace, no
-# quote or shell metacharacter (the askpass script prints it verbatim, and a
-# stray newline would end the answer early).
-GIT_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.~+/=-]{8,255}$")
 
 
 @dataclass(frozen=True)
@@ -36,9 +33,6 @@ class Settings:
     token: str = field(repr=False)            # never in a repr, a log line or a traceback
     allowed_sources: tuple[str, ...]
     home: Path
-    # Empty = clone anonymously (public repositories only). Same rules as the
-    # token: never in a repr, a log line, a job log or a URL.
-    git_token: str = field(default="", repr=False)
 
     @classmethod
     def from_env(cls, environ: dict | None = None) -> "Settings":
@@ -46,7 +40,7 @@ class Settings:
         home = (env.get("AAB_HOME") or DEFAULT_HOME).strip()
         return cls(token=env.get("INSTALLER_TOKEN", ""),
                    allowed_sources=parse_allowlist(env.get("INSTALLER_ALLOWED_SOURCES", "")),
-                   home=Path(home), git_token=(env.get("INSTALLER_GIT_TOKEN") or "").strip())
+                   home=Path(home))
 
     def check(self) -> None:
         """Refuse to boot on an unsafe configuration."""
@@ -56,10 +50,6 @@ class Settings:
             # Compose resolves the overlays' relative paths against it, and the
             # host must see the same path: a relative one means neither.
             raise RuntimeError("AAB_HOME must be an absolute path")
-        if self.git_token and not GIT_TOKEN_RE.match(self.git_token):
-            # Named, never shown: the value is the secret.
-            raise RuntimeError("INSTALLER_GIT_TOKEN is malformed (expected a GitHub token: "
-                               "letters, digits and _ . ~ + / = - only)")
 
     @property
     def plugins_dir(self) -> Path:
@@ -67,6 +57,6 @@ class Settings:
 
     @property
     def state_dir(self) -> Path:
-        """Installer-only state (jobs, temporary clones). The leading `_`
-        keeps it out of every `plugins.d/<service>` listing."""
+        """Installer-only state (jobs, temporary clones, the askpass script).
+        The leading `_` keeps it out of every `plugins.d/<service>` listing."""
         return self.plugins_dir / "_installer"

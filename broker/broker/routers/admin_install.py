@@ -4,13 +4,20 @@ Guarded router-wide by `require_admin` like every admin router (a test walks
 main.ADMIN_ROUTERS). The work and the rules are in services/plugin_install.py;
 the installer itself is a separate container (docker-compose.installer.yml).
 
-  GET  /v1/admin/plugins/install/status        configured and reachable? plus the hints
-  POST /v1/admin/plugins/install/inspect       {source, ref} -> the review card
-  POST /v1/admin/plugins/install               {source, ref, commit} -> pins, then a job
-  GET  /v1/admin/plugins/install/jobs/{id}     the job, polled through the broker's restart
-  GET  /v1/admin/plugins/installed             {"items": [install record]}
-  POST /v1/admin/plugins/{service}/upgrade     {source, ref, commit} -> re-pins, then a job
-  POST /v1/admin/plugins/{service}/remove      {purge} -> a job, then unpins
+  GET    /v1/admin/plugins/install/status      configured and reachable? the hints, and
+                                               git_token: unset | set | unreadable
+  POST   /v1/admin/plugins/install/git-token   {token} -> stores the GitHub token for private
+                                               repositories (write-only, encrypted)
+  DELETE /v1/admin/plugins/install/git-token   removes it
+  POST   /v1/admin/plugins/install/inspect     {source, ref} -> the review card
+  POST   /v1/admin/plugins/install             {source, ref, commit} -> pins, then a job
+  GET    /v1/admin/plugins/install/jobs/{id}   the job, polled through the broker's restart
+  GET    /v1/admin/plugins/installed           {"items": [install record]}
+  POST   /v1/admin/plugins/{service}/upgrade   {source, ref, commit} -> re-pins, then a job
+  POST   /v1/admin/plugins/{service}/remove    {purge} -> a job, then unpins
+
+The GitHub token is never in any response: the two git-token routes answer
+with its state word, like the Telegram bot token's (routers/admin_telegram.py).
 
 This router is included BEFORE admin_plugins (main.ADMIN_ROUTERS): routes
 match in order, and `GET /v1/admin/plugins/installed` must not be taken for
@@ -23,7 +30,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..deps import AdminContext, require_admin
-from ..services import plugin_install
+from ..services import install_git_token, plugin_install
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -46,9 +53,25 @@ class RemoveBody(_Body):
     purge: bool = False
 
 
+class GitTokenBody(_Body):
+    # The shape is checked by the service, which never echoes the value; the
+    # length bound here only refuses an absurd body early.
+    token: str = Field(min_length=1, max_length=1000)
+
+
 @router.get("/v1/admin/plugins/install/status")
 def status() -> dict:
     return plugin_install.status()
+
+
+@router.post("/v1/admin/plugins/install/git-token")
+def set_git_token(body: GitTokenBody, ctx: AdminContext = Depends(require_admin)) -> dict:
+    return install_git_token.set_token(ctx, body.token)
+
+
+@router.delete("/v1/admin/plugins/install/git-token")
+def clear_git_token(ctx: AdminContext = Depends(require_admin)) -> dict:
+    return install_git_token.clear_token(ctx)
 
 
 @router.post("/v1/admin/plugins/install/inspect")

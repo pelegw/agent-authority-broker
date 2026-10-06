@@ -34,6 +34,14 @@ at the commit the owner reviewed. The request carries only source, ref and
 commit; a commit that no longer matches is refused (409) before anything is
 pinned, and the installer checks the same commit again when its job fetches.
 
+Private repositories: the read-only GitHub token the owner stored in the
+console (services/install_git_token.py) travels in the body of inspect,
+install and upgrade requests as `git_token`, and only there; the installer
+uses it for that request's or that job's clone and never stores it. Nothing
+is sent when none is stored; one stored under an older BROKER_SECRETS_KEY
+refuses the request (409 git_token_unreadable) before anything is asked or
+pinned.
+
 Errors: installer refusals are relayed with their status and code (400, 403
 source_not_allowed, 404, 409, 422 invalid_package, 502 clone_failed, 503); an
 installer that is off or down answers 503 saying which; a mutation whose
@@ -42,7 +50,8 @@ A 401 from the installer means the two containers disagree on the token and
 becomes a 503: a 401 here would sign the owner out of the console.
 
 Logging (docs/logging.md): sources, refs, commits, services, plugin ids and
-job ids. INSTALLER_TOKEN is sent as a header and never logged; its name is.
+job ids. INSTALLER_TOKEN is sent as a header and the GitHub token in a body;
+neither is ever logged, audited or returned.
 """
 
 from __future__ import annotations
@@ -61,7 +70,7 @@ from ..logging_setup import current_request_id, kv
 from ..plugins import pins
 from ..plugins.manifest import ManifestError, load_manifest_text
 from ..plugins.registry import get_registry
-from . import plugins_admin
+from . import install_git_token, plugins_admin
 
 log = logging.getLogger(__name__)
 
@@ -76,15 +85,22 @@ CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 # Installer refusals relayed with their own status; any other status is an
 # answer the broker cannot vouch for (502).
 _RELAYED = frozenset({400, 403, 404, 409, 422, 502, 503})
+# The fields of a job the console sees (installer/aab_installer/jobs.py
+# public()). Anything else in the installer's answer is dropped, so no field
+# the broker did not expect (an echoed request field above all: the GitHub
+# token travels in those requests) can reach a response.
+JOB_KEYS = ("id", "kind", "state", "service", "source", "ref", "commit", "purge",
+            "created_at", "started_at", "finished_at", "error", "log", "log_truncated")
 
 OFF_MESSAGE = ("the plugin installer is off: set INSTALLER_ENABLED=true and "
                "INSTALLER_ALLOWED_SOURCES in the host's .env, then run "
                "docker compose $(scripts/compose-files.sh) up -d (docs/deployment.md)")
 # What the console shows when the installer is off, and next to the source field.
+# (The GitHub token for private repositories is not here: it is a console
+# setting, services/install_git_token.py.)
 ENABLE_LINES = (
     "INSTALLER_ENABLED=true",
     "INSTALLER_ALLOWED_SOURCES=github.com/<you>/*",
-    "INSTALLER_GIT_TOKEN=<optional: a read-only GitHub token, for private repositories>",
 )
 ALLOWLIST_HINT = ("Only repositories matching INSTALLER_ALLOWED_SOURCES in the host's .env can "
                   "be installed (for example github.com/you/*). It is read from that file "
@@ -194,13 +210,14 @@ def _service(service: object) -> str:
 
 def status() -> dict:
     """Whether the installer is configured and answers the broker's token,
-    plus what the console shows around the Add plugin dialog. Never the
-    token or the installer's address."""
+    plus what the console shows around the Add plugin dialog: the hints, and
+    whether a GitHub token is stored (a state word). Never a token or the
+    installer's address."""
     s = get_settings()
     configured = bool((s.installer_url or "").strip() and (s.installer_token or "").strip())
     out = {"configured": configured, "reachable": False, "installed": None, "error": None,
            "allowlist_hint": ALLOWLIST_HINT, "enable_lines": list(ENABLE_LINES),
-           "manual_command": MANUAL_COMMAND}
+           "manual_command": MANUAL_COMMAND, **install_git_token.view()}
     if not configured:
         out["error"] = OFF_MESSAGE if not (s.installer_url or "").strip() else (
             "INSTALLER_URL is set but INSTALLER_TOKEN is empty")
@@ -220,11 +237,16 @@ def installed() -> dict:
     return {"items": [r for r in items if isinstance(r, dict)] if isinstance(items, list) else []}
 
 
+def _job_view(data: dict) -> dict:
+    """A job answer projected to JOB_KEYS (see there)."""
+    return {k: data.get(k) for k in JOB_KEYS}
+
+
 def job(job_id: str) -> dict:
     """A job, for the console's panel (polled through the broker's restart)."""
     if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
         raise PolicyError(404, "no such job", "not_found")      # never a path built from junk
-    return _call("GET", f"/jobs/{job_id}")
+    return _job_view(_call("GET", f"/jobs/{job_id}"))
 
 
 # ---- inspect: the review card ------------------------------------------------------------
@@ -236,10 +258,13 @@ def _current_pin(plugin_id: str):
         return None                        # an unreadable pin diffs as a first pin
 
 
-def _inspected(source: str, ref: str) -> tuple[dict, dict[str, str]]:
+def _inspected(source: str, ref: str, git: dict) -> tuple[dict, dict[str, str]]:
     """Ask the installer to inspect, validate what it returned, and build the
-    review. Returns (review, {plugin id: manifest text} for the valid ones)."""
-    raw = _call("POST", "/inspect", {"source": source, "ref": ref}, timeout=INSPECT_TIMEOUT)
+    review. `git` is install_git_token.request_fields(): the GitHub token's
+    field when one is stored. Returns (review, {plugin id: manifest text}
+    for the valid ones)."""
+    raw = _call("POST", "/inspect", {"source": source, "ref": ref, **git},
+                timeout=INSPECT_TIMEOUT)
     desc, entries = raw.get("descriptor"), raw.get("manifests")
     commit, src = raw.get("commit"), raw.get("source")
     if (not isinstance(desc, dict) or not isinstance(entries, list) or not isinstance(src, str)
@@ -288,7 +313,7 @@ def _inspected(source: str, ref: str) -> tuple[dict, dict[str, str]]:
 
 
 def inspect(source: str, ref: str) -> dict:
-    review, _ = _inspected(source, ref)
+    review, _ = _inspected(source, ref, install_git_token.request_fields())
     log.info("plugin package inspected %s", kv(
         source=review["source"], ref=review["ref"], commit=review["commit"],
         service=review["service"], plugins=[i["id"] for i in review["plugins"]],
@@ -345,7 +370,7 @@ def _pin_then_call(ctx, action: str, review: dict, texts: dict[str, str], path: 
                                              service=service)
             if out.get("registered"):
                 registered.append(pid)
-        submitted = _call("POST", path, body, mutation=True)
+        submitted = _job_view(_call("POST", path, body, mutation=True))
     except PolicyError as exc:
         # A lost answer may still have queued the job: keep the pins it needs.
         restored = [] if exc.code == "unknown_outcome" else _restore(snapshots, registered)
@@ -370,7 +395,8 @@ def install(ctx, source: str, ref: str, commit: str) -> dict:
     """Pin the reviewed package's manifests, then ask the installer to install it."""
     detail, resource = {"source": source, "ref": ref, "commit": commit}, source
     try:
-        review, texts = _inspected(source, ref)
+        git = install_git_token.request_fields()
+        review, texts = _inspected(source, ref, git)
         resource = review["service"]
         detail.update(source=review["source"], ref=review["ref"])
         if review["installed"] is not None:
@@ -382,7 +408,7 @@ def install(ctx, source: str, ref: str, commit: str) -> dict:
         raise
     submitted = _pin_then_call(ctx, "plugin.install", review, texts, "/install",
                                {"source": review["source"], "ref": review["ref"],
-                                "commit": commit}, detail)
+                                "commit": commit, **git}, detail)
     return {"job": submitted, "service": review["service"], "pinned": sorted(texts)}
 
 
@@ -392,7 +418,8 @@ def upgrade(ctx, service: str, source: str, ref: str, commit: str) -> dict:
     service = _service(service)
     detail = {"source": source, "ref": ref, "commit": commit}
     try:
-        review, texts = _inspected(source, ref)
+        git = install_git_token.request_fields()
+        review, texts = _inspected(source, ref, git)
         detail.update(source=review["source"], ref=review["ref"])
         record = review["installed"]
         if review["service"] != service:
@@ -411,7 +438,7 @@ def upgrade(ctx, service: str, source: str, ref: str, commit: str) -> dict:
     detail["from"] = {"ref": record.get("ref"), "commit": record.get("commit")}
     submitted = _pin_then_call(ctx, "plugin.upgrade", review, texts, "/upgrade",
                                {"service": service, "source": review["source"],
-                                "ref": review["ref"], "commit": commit}, detail)
+                                "ref": review["ref"], "commit": commit, **git}, detail)
     dropped = [pid for pid in record.get("plugins") or []
                if isinstance(pid, str) and pid not in texts and pins.record(pid) is not None]
     for pid in dropped:
@@ -430,8 +457,8 @@ def remove(ctx, service: str, purge: bool = False) -> dict:
             raise PolicyError(404, f"{service} is not installed", "not_installed")
         detail.update(source=record.get("source"), ref=record.get("ref"),
                       commit=record.get("commit"))
-        submitted = _call("POST", "/remove", {"service": service, "purge": bool(purge)},
-                          mutation=True)
+        submitted = _job_view(_call("POST", "/remove", {"service": service,
+                                                        "purge": bool(purge)}, mutation=True))
     except PolicyError as exc:
         _refused(ctx, "plugin.remove", service, detail, exc)
         raise

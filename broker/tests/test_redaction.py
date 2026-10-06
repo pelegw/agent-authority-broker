@@ -73,13 +73,17 @@ def test_every_service_token_header_is_a_secret_field():
         assert out == f"{header}: {REDACTED}", out
 
 
-def test_the_installer_git_token_is_redacted_by_name_and_inside_urls():
-    # INSTALLER_GIT_TOKEN may be any token shape (a GitLab token matches no
-    # row above): a dump of the setting or a URL carrying it still loses it.
-    for text, secret in (("INSTALLER_GIT_TOKEN=glpat-Xy12abcdEFGH5678", "glpat-Xy12abcdEFGH5678"),
+def test_a_git_token_is_redacted_by_name_and_inside_urls():
+    # The installer's GitHub token may be any token shape (this fake one
+    # matches no row above): the request field the broker sends (git_token,
+    # in a form or a JSON dump), an old .env line, or a URL carrying it
+    # still loses it.
+    fake = "Fake-Git-Token-0123456789abcdef"
+    for text, secret in ((f"git_token={fake}", fake),
+                         (f'{{"source": "github.com/a/b", "git_token": "{fake}"}}', fake),
+                         (f"INSTALLER_GIT_TOKEN={fake}", fake),
                          ("installer_token='feedbeef0123'", "feedbeef0123"),
-                         ("https://glpat-Xy12abcdEFGH5678@gitlab.com/g/r.git",
-                          "glpat-Xy12abcdEFGH5678")):
+                         (f"https://{fake}@gitlab.com/g/r.git", fake)):
         out = redact(text)
         assert secret not in out and REDACTED in out, out
     assert redact("https://u:p4ss@h.example/x") == f"https://{REDACTED}@h.example/x"
@@ -111,7 +115,8 @@ NEGATIVES = [
     # URLs without credentials, and the names of secrets as values.
     "http://plugin-github:8090/perform", "https://github.com/acme/aab-plugin-echo.git",
     "http://aab-installer:8070/jobs/5f0c1e2d3c4b5a69788796a5b4c3d2e1",
-    kv(secrets_set=["installer_token", "setup_token"], git_auth="askpass"),
+    kv(secrets_set=["installer_token", "setup_token"], git_auth="per_request"),
+    "installer github token stored replaced=false by=owner via=token",
 ]
 
 
