@@ -1,12 +1,18 @@
 """Source normalization, the allowlist (fail closed, `*` is one segment), the
-ref rules, and the git client's isolation (no global config, only the
-allowed transport, symlinks checked out as plain files)."""
+ref rules, the git client's isolation (no global config, only the allowed
+transport, symlinks checked out as plain files), and the private-repository
+credential: INSTALLER_GIT_TOKEN reaches git only through GIT_ASKPASS, only on
+the commands that talk to github.com, and never in an argument or a URL."""
 
 import os
+import shutil
+import stat
+import subprocess
 
 import pytest
 
-from aab_installer.git import Git, GitError, allowed, normalize_source, parse_allowlist, ref_kind
+from aab_installer.git import (ASKPASS_FILE, ASKPASS_SCRIPT, Git, GitError, allowed,
+                               normalize_source, parse_allowlist, ref_kind, write_askpass)
 
 from .conftest import SOURCE, RepoBuilder, echo_package
 
@@ -126,3 +132,108 @@ def test_a_commit_ref_must_come_back_as_that_commit(echo_repo, remote, tmp_path)
     with pytest.raises(GitError):
         git.fetch(SOURCE, "f" * 40, tmp_path / "b")                    # not in the repo
     assert not (tmp_path / "b").exists()
+
+
+# ---- private repositories: INSTALLER_GIT_TOKEN through GIT_ASKPASS -----------------------
+
+GIT_TOKEN = "github_pat_11TESTONLY0abcdefghijKLMNOPQRSTUVWXYZ0123456789"
+SH = shutil.which("sh")
+
+
+def recording(calls, fail_from=0):
+    """A git runner that records (argv, env) and fails every command after the
+    first `fail_from` ones, with the token in its stderr as a careless git
+    might print it."""
+    def runner(argv, cwd, env, timeout):
+        calls.append((list(argv), dict(env)))
+        code = 0 if len(calls) <= fail_from else 128
+        return subprocess.CompletedProcess(argv, code, "", f"fatal: auth {GIT_TOKEN} refused")
+    return runner
+
+
+def test_a_tag_clone_gets_the_askpass_env_when_a_token_is_configured(tmp_path):
+    calls = []
+    git = Git(runner=recording(calls), token=GIT_TOKEN, askpass_dir=tmp_path / "state")
+    with pytest.raises(GitError) as e:
+        git.fetch(SOURCE, "v0.1.0", tmp_path / "dest")
+    [(argv, env)] = calls
+    assert argv[7] == "clone"
+    assert env["GIT_ASKPASS"] == str(tmp_path / "state" / ASKPASS_FILE)
+    assert env["AAB_GIT_TOKEN"] == GIT_TOKEN and env["AAB_GIT_HOST"] == "github.com"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"                 # askpass or nothing
+    script = tmp_path / "state" / ASKPASS_FILE
+    assert script.read_bytes() == ASKPASS_SCRIPT.encode("ascii")
+    assert GIT_TOKEN not in script.read_text()
+    # Never in an argument or the URL; git's words never reach the error.
+    assert not any(GIT_TOKEN in a for a in argv)
+    assert "https://github.com/acme/aab-plugin-echo.git" in argv and not any("@" in a for a in argv)
+    assert GIT_TOKEN not in e.value.message and GIT_TOKEN not in str(e.value)
+
+
+def test_a_commit_fetch_gets_it_on_the_fetch_only(tmp_path):
+    calls = []
+    git = Git(runner=recording(calls, fail_from=1), token=GIT_TOKEN,
+              askpass_dir=tmp_path / "state")
+    with pytest.raises(GitError):
+        git.fetch(SOURCE, "a" * 40, tmp_path / "dest")
+    (init_argv, init_env), (fetch_argv, fetch_env) = calls
+    assert init_argv[7] == "init" and init_env["GIT_ASKPASS"] == ""
+    assert "AAB_GIT_TOKEN" not in init_env
+    assert fetch_argv[7] == "fetch" and fetch_env["AAB_GIT_TOKEN"] == GIT_TOKEN
+    assert not (tmp_path / "dest").exists()
+
+
+def test_without_a_token_git_is_anonymous(tmp_path):
+    calls = []
+    with pytest.raises(GitError):
+        Git(runner=recording(calls)).fetch(SOURCE, "v0.1.0", tmp_path / "dest")
+    [(_, env)] = calls
+    assert env["GIT_ASKPASS"] == "" and env["SSH_ASKPASS"] == ""
+    assert not {k for k in env if k.startswith("AAB_GIT_")}
+    assert not Git().authenticated
+
+
+def test_the_token_is_offered_to_github_com_sources_only(tmp_path):
+    calls = []
+    git = Git(runner=recording(calls), token=GIT_TOKEN, askpass_dir=tmp_path / "state")
+    assert git.authenticated
+    with pytest.raises(GitError):
+        git.fetch("gitlab.com/acme/aab-plugin-echo", "v0.1.0", tmp_path / "dest")
+    [(_, env)] = calls
+    assert env["GIT_ASKPASS"] == "" and "AAB_GIT_TOKEN" not in env
+    assert not (tmp_path / "state" / ASKPASS_FILE).exists()
+
+
+def test_a_token_needs_a_place_for_its_script():
+    with pytest.raises(ValueError):
+        Git(token=GIT_TOKEN)
+
+
+def test_a_tampered_script_is_rewritten_before_use(tmp_path):
+    path = write_askpass(tmp_path)
+    path.write_text("#!/bin/sh\necho stolen > /tmp/x\n")
+    assert write_askpass(tmp_path).read_bytes() == ASKPASS_SCRIPT.encode("ascii")
+    if os.name == "posix":
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o700
+
+
+@pytest.mark.skipif(SH is None, reason="no POSIX sh on this machine")
+@pytest.mark.parametrize("prompt,answer", [
+    ("Username for 'https://github.com': ", "x-access-token"),
+    ("Password for 'https://x-access-token@github.com': ", GIT_TOKEN),
+    # Another host (a redirect), another user, or a prompt nobody expected:
+    # nothing, and a failing exit, so git gives up instead of sending it.
+    ("Username for 'https://evil.example': ", None),
+    ("Password for 'https://x-access-token@evil.example': ", None),
+    ("Password for 'https://x-access-token@github.com.evil.example': ", None),
+    ("Password for 'https://someone@github.com': ", None),
+    ("Enter passphrase for key '/root/.ssh/id_rsa': ", None),
+])
+def test_the_askpass_script_answers_github_com_only(tmp_path, prompt, answer):
+    script = write_askpass(tmp_path)
+    env = {**os.environ, "AAB_GIT_HOST": "github.com", "AAB_GIT_TOKEN": GIT_TOKEN}
+    r = subprocess.run([SH, str(script), prompt], capture_output=True, text=True, env=env)
+    if answer is None:
+        assert r.returncode != 0 and r.stdout == ""
+    else:
+        assert r.returncode == 0 and r.stdout == answer + "\n"

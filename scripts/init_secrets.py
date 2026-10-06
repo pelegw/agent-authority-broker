@@ -24,7 +24,11 @@ gets the same pair under its own name: `--rotate PLUGIN_TOKEN_<SERVICE>` and
 `--rotate PLUGIN_SECRETS_KEY_<SERVICE>` accept any service name the installer
 accepts and append the entry when it is missing. The opt-in installer itself
 has INSTALLER_TOKEN (generated), INSTALLER_ENABLED, INSTALLER_ALLOWED_SOURCES
-(empty: refuse every install) and AAB_HOME.
+(empty: refuse every install), AAB_HOME and INSTALLER_GIT_TOKEN (empty: public
+plugin repositories only). INSTALLER_GIT_TOKEN is the one third-party
+credential in the file, because the installer has no console of its own and
+must clone before any plugin exists; it is optional, read-only, and reaches
+the installer container alone.
 
 Third-party credentials (GitHub App, Google OAuth client, Telegram bot token)
 are NOT in this file: the owner enters them in the console, which relays
@@ -135,6 +139,12 @@ SECTIONS: list[tuple[str, list[Entry]]] = [
               "Absolute path of this checkout on the host (deploy/push.sh REMOTE_DIR). The "
               "installer mounts it at the same path, so compose resolves paths as the host does.",
               default="/opt/aab"),
+        Entry("INSTALLER_GIT_TOKEN",
+              "Optional read-only GitHub token for private plugin repositories (fine-grained: "
+              "Contents read-only on those repositories; or classic with repo scope). Empty: "
+              "public repositories only. aab-installer only; git gets it through GIT_ASKPASS "
+              "for github.com, never in a URL or a log.",
+              default=""),
     ]),
     ("Public-mode values (fill in for an internet deploy; see the checklist the script prints)", [
         Entry("CF_ACCESS_TEAM_DOMAIN",

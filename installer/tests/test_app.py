@@ -400,3 +400,43 @@ def test_the_job_log_never_carries_the_installer_token(client, project, echo_rep
     assert TOKEN not in caplog.text
     for secret in secrets_of(project):
         assert secret not in caplog.text
+
+
+def test_a_planted_git_token_never_reaches_a_job_log_a_response_or_a_log_line(
+        project, remote, fake_docker, echo_repo, caplog, tmp_path):
+    """INSTALLER_GIT_TOKEN of a shape no redaction row knows: even if a
+    command printed it, the job log masks it, and nothing the API answers or
+    the installer logs ever carries it."""
+    import logging
+
+    from aab_installer.compose import Result
+    from aab_installer.git import Git
+
+    planted = "Planted-0123456789-xyzTOKEN"
+    caplog.set_level(logging.DEBUG)
+
+    def leaky_docker(argv, cwd, timeout):
+        result = fake_docker(argv, cwd, timeout)
+        if list(argv)[:1] != ["docker"]:
+            return result                       # the compose file list stays parseable
+        return Result(result.returncode, f"{result.output}\nusing {planted}")
+
+    settings = make_settings(project)
+    settings = type(settings)(token=settings.token, allowed_sources=settings.allowed_sources,
+                              home=settings.home, git_token=planted)
+    git = Git(url_for=lambda s: (remote / f"{s}.git").as_uri(), protocols=("file",),
+              token=planted, askpass_dir=tmp_path / "askpass")
+    c = TestClient(create_app(settings, git=git, runner=leaky_docker),
+                   headers={"X-Installer-Token": TOKEN}, raise_server_exceptions=False)
+    inspected = c.post("/inspect", json={"source": SOURCE, "ref": "v0.1.0"})
+    assert inspected.status_code == 200
+    job = run_job(c, "/install", {"source": SOURCE, "ref": "v0.1.0", "commit": echo_repo.v1})
+    assert job["state"] == "done"
+    assert any("using <redacted>" in line for line in job["log"])
+    removed = run_job(c, "/remove", {"service": "echo", "purge": True})
+    for text in (inspected.text, json.dumps(job), json.dumps(removed),
+                 c.get("/installed").text, caplog.text):
+        assert planted not in text
+    for f in (project / "plugins.d").rglob("*.json"):
+        assert planted not in f.read_text(encoding="utf-8"), f
+    assert "git_auth=askpass" in caplog.text           # named, never shown

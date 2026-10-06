@@ -14,8 +14,9 @@ queued or running: two compose runs against one project never interleave.
 
 Log lines are for the owner: steps, commands (argv carries no secret), exit
 codes and a short, redacted tail of command output. Never a token: every line
-passes the shared redaction backstop and 64-hex runs (the shape of every
-plugin token) are masked, at the cost of image digests.
+passes the shared redaction backstop, 64-hex runs (the shape of every
+plugin token) are masked, at the cost of image digests, and so is every
+value the store was told is secret (INSTALLER_GIT_TOKEN, whatever its shape).
 """
 
 from __future__ import annotations
@@ -48,9 +49,12 @@ class Busy(Exception):
     """Another job is queued or running."""
 
 
-def clean_line(text: str) -> str:
-    """A log line safe to store and show: one line, capped, redacted."""
+def clean_line(text: str, mask: tuple[str, ...] = ()) -> str:
+    """A log line safe to store and show: one line, capped, redacted, and
+    with every literal in `mask` replaced."""
     line = " ".join(str(text).split())                  # no newlines or control runs
+    for secret in mask:
+        line = line.replace(secret, "<redacted>")
     line = _HEX64.sub("<hex64>", redact(line))
     return line[:MAX_LINE]
 
@@ -63,7 +67,7 @@ class JobContext:
 
     def log(self, text: str) -> None:
         lines = self.job["log"]
-        lines.append(clean_line(text))
+        lines.append(self._store.clean(text))
         if len(lines) > MAX_LOG_LINES:
             # Keep the beginning (what was asked) and the end (how it ended).
             del lines[20:len(lines) - (MAX_LOG_LINES - 20)]
@@ -76,9 +80,12 @@ class JobContext:
 
 
 class JobStore:
-    """Job files plus the single worker."""
+    """Job files plus the single worker. `mask`: secret values that must never
+    reach a stored line, whatever their shape (empty strings are ignored)."""
 
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, mask: tuple[str, ...] = ()):
+        # Longest first, so a secret containing another is masked whole.
+        self._mask = tuple(sorted({m for m in mask if m}, key=len, reverse=True))
         self.dir = Path(directory)
         self.dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -90,6 +97,9 @@ class JobStore:
         self._work: dict[str, Callable[[JobContext], None]] = {}
         self._worker: threading.Thread | None = None
         self._recover()
+
+    def clean(self, text: str) -> str:
+        return clean_line(text, self._mask)
 
     # ---- persistence -------------------------------------------------------------
 
@@ -185,7 +195,7 @@ class JobStore:
             try:
                 work(ctx)
             except Exception as exc:                  # the job fails; the worker lives on
-                message = clean_line(str(exc) or type(exc).__name__)
+                message = self.clean(str(exc) or type(exc).__name__)
                 ctx.log(f"failed: {message}")
                 ctx.update(state="failed", error=message, finished_at=int(time.time()))
                 log.warning("job failed %s", kv(job=job_id, kind=job["kind"],

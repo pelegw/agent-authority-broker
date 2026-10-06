@@ -39,7 +39,7 @@ EXPECTED_KEYS = ["SETUP_TOKEN", "ORIGIN_SECRET", "BROKER_SECRETS_KEY", "DECISION
                  "PLUGIN_TOKEN_WHATSAPP", "PLUGIN_SECRETS_KEY_WHATSAPP", "SIDECAR_TOKEN",
                  "PLUGIN_TOKEN_GITHUB", "PLUGIN_SECRETS_KEY_GITHUB", "PLUGIN_TOKEN_GOOGLE",
                  "PLUGIN_SECRETS_KEY_GOOGLE", "INSTALLER_ENABLED", "INSTALLER_TOKEN",
-                 "INSTALLER_ALLOWED_SOURCES", "AAB_HOME",
+                 "INSTALLER_ALLOWED_SOURCES", "AAB_HOME", "INSTALLER_GIT_TOKEN",
                  *PLACEHOLDERS, "BROKER_PORT", "DEVICE_NAME", "TZ",
                  "LOG_LEVEL", "LOG_FORMAT",
                  "GITHUB_APP_KEY_DIR", "MCP_ALLOWED_HOSTS", "CF_ACCESS_ENABLED",
@@ -236,6 +236,8 @@ def test_rotate_rejects_non_generated_names(out):
     before = out.read_bytes()
     assert run("--out", out, "--rotate", "SITE_DOMAIN").returncode != 0
     assert run("--out", out, "--rotate", "NOPE").returncode != 0
+    # A third-party token is pasted by the owner, never generated.
+    assert run("--out", out, "--rotate", "INSTALLER_GIT_TOKEN").returncode != 0
     assert out.read_bytes() == before
 
 
@@ -292,6 +294,19 @@ def test_installer_entries_fail_closed(out):
     assert "Empty refuses every install" in comment and "console" in comment
     comment = lines[lines.index("INSTALLER_ENABLED=false") - 1]
     assert "root on this host" in comment
+
+
+def test_the_git_token_is_optional_and_says_where_it_goes(out):
+    """INSTALLER_GIT_TOKEN: empty by default (public repositories only), a
+    read-only token, for the installer alone, and handed to git through
+    GIT_ASKPASS. It is no public-mode placeholder: the checklist skips it."""
+    r = run("--out", out)
+    assert parse(out)["INSTALLER_GIT_TOKEN"] == ""
+    lines = out.read_text(encoding="utf-8").splitlines()
+    comment = lines[lines.index("INSTALLER_GIT_TOKEN=") - 1]
+    for word in ("Optional", "read-only", "aab-installer only", "GIT_ASKPASS", "never in a URL"):
+        assert word in comment, word
+    assert "INSTALLER_GIT_TOKEN" not in r.stdout
 
 
 @pytest.mark.parametrize("name,shape", [("PLUGIN_TOKEN_FINANCE", "hex"),

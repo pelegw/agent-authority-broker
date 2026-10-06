@@ -193,11 +193,17 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern, str], ...] = (
     # A Fernet key: urlsafe base64 of 32 bytes, exactly 43 chars and one "=".
     ("fernet_key", re.compile(r"(?<![\w-])[A-Za-z0-9_-]{43}=(?![\w=-])"), REDACTED),
     ("session_cookie", re.compile(r"(aab_session=)[^;\s]+"), r"\1" + REDACTED),
+    # Credentials inside a URL (https://user:token@host, https://token@host):
+    # the installer never builds one (git gets its token through GIT_ASKPASS),
+    # but git, curl or a pasted source would print it back verbatim.
+    ("url_credentials", re.compile(r"(\b[A-Za-z][A-Za-z0-9+.-]*://)[^/\s@]+@"),
+     r"\1" + REDACTED + "@"),
     # A header or field dump: the value after a secret-bearing name.
     ("secret_field", re.compile(
         r"(?i)\b((?:x-plugin-token|x-installer-token|x-internal-token|x-aab-origin|password|"
         r"passwd|client_secret|refresh_token|access_token|id_token|setup_token|private_key_pem|"
-        r"private_key|api_key|secret|pat)['\"]?\s*[:=]\s*['\"]?)[^\s'\",;}&]+"),
+        r"private_key|api_key|installer_git_token|installer_token|git_token|secret|pat)"
+        r"['\"]?\s*[:=]\s*['\"]?)[^\s'\",;}&]+"),
      r"\1" + REDACTED),
 )
 

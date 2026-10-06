@@ -191,9 +191,12 @@ def test_the_installer_sees_the_checkout_at_the_hosts_path_and_only_its_own_env(
     home = "${AAB_HOME:-/opt/aab}"
     assert (home, home, False) in _mounts(svc)
     assert {s for s, _, _ in _mounts(svc)} == {DOCKER_SOCKET, home}
-    # Its own token and allowlist, nothing of the broker's or any plugin's.
+    # Its own token, allowlist and git credential, nothing of the broker's or
+    # any plugin's.
     assert set(svc["environment"]) == {"INSTALLER_TOKEN", "INSTALLER_ALLOWED_SOURCES",
-                                       "AAB_HOME", "LOG_LEVEL", "LOG_FORMAT"}
+                                       "INSTALLER_GIT_TOKEN", "AAB_HOME", "LOG_LEVEL",
+                                       "LOG_FORMAT"}
+    assert svc["environment"]["INSTALLER_GIT_TOKEN"] == "${INSTALLER_GIT_TOKEN:-}"
     assert svc["environment"]["AAB_HOME"] == home
     broker = _compose(INSTALLER)["services"]["broker"]["environment"]
     assert broker == {"INSTALLER_URL": "http://aab-installer:8070",
@@ -203,6 +206,15 @@ def test_the_installer_sees_the_checkout_at_the_hosts_path_and_only_its_own_env(
         for name, s in _compose(rel)["services"].items():
             if "INSTALLER_TOKEN" in str(s.get("environment", {})):
                 assert name in ("broker", "aab-installer"), (rel, name)
+    # The private-repository credential is the installer's alone: not even the
+    # broker holds it (and a rendered plugin overlay never does).
+    for rel in (*COMPOSE_FILES, RENDERED_OVERLAY):
+        for name, s in _compose(rel)["services"].items():
+            if "INSTALLER_GIT_TOKEN" in str(s.get("environment", {})):
+                assert (rel, name) == (INSTALLER, "aab-installer")
+    for rel in ("docker-compose.yml", "docker-compose.public.yml", RENDERED_OVERLAY,
+                "installer/aab_installer/overlay.py"):
+        assert "INSTALLER_GIT_TOKEN" not in _read(rel), rel
 
 
 PYTHON_SERVICES = ("broker", "plugin-whatsapp", "plugin-github", "plugin-google")

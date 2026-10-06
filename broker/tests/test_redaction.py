@@ -31,6 +31,8 @@ SAMPLES = {
     "github_fine_grained_pat": ("pat github_pat_11ABCDEFG0abcdefghijklmnop", "11ABCDEFG0abc"),
     "fernet_key": (f"PLUGIN_SECRETS_KEY {FERNET_KEY} set", FERNET_KEY),
     "session_cookie": ("Cookie: aab_session=Zm9vYmFyYmF6cXV4; theme=dark", "Zm9vYmFyYmF6cXV4"),
+    "url_credentials": ("fatal: unable to access 'https://x-access-token:q9Zsecretvalue7@"
+                        "github.com/acme/repo.git/'", "q9Zsecretvalue7"),
     "secret_field": ("{'X-Plugin-Token': 'c0ffee0123456789c0ffee0123456789', "
                      "'password': 'correct horse'}", "c0ffee0123456789c0ffee0123456789"),
 }
@@ -71,6 +73,18 @@ def test_every_service_token_header_is_a_secret_field():
         assert out == f"{header}: {REDACTED}", out
 
 
+def test_the_installer_git_token_is_redacted_by_name_and_inside_urls():
+    # INSTALLER_GIT_TOKEN may be any token shape (a GitLab token matches no
+    # row above): a dump of the setting or a URL carrying it still loses it.
+    for text, secret in (("INSTALLER_GIT_TOKEN=glpat-Xy12abcdEFGH5678", "glpat-Xy12abcdEFGH5678"),
+                         ("installer_token='feedbeef0123'", "feedbeef0123"),
+                         ("https://glpat-Xy12abcdEFGH5678@gitlab.com/g/r.git",
+                          "glpat-Xy12abcdEFGH5678")):
+        out = redact(text)
+        assert secret not in out and REDACTED in out, out
+    assert redact("https://u:p4ss@h.example/x") == f"https://{REDACTED}@h.example/x"
+
+
 def test_bearer_keeps_the_scheme():
     assert redact("Bearer abcdefghijkl") == f"Bearer {REDACTED}"
 
@@ -94,6 +108,10 @@ NEGATIVES = [
        secret_fields=["private_key_pem", "pat", "client_secret"]),
     "the Bearer scheme", "password_change refused", "decision=allow reason=covered chain=2",
     "request_id=5f0c1e2d3c4b5a69788796a5b4c3d2e1 row=42", "setup token is now inert",
+    # URLs without credentials, and the names of secrets as values.
+    "http://plugin-github:8090/perform", "https://github.com/acme/aab-plugin-echo.git",
+    "http://aab-installer:8070/jobs/5f0c1e2d3c4b5a69788796a5b4c3d2e1",
+    kv(secrets_set=["installer_token", "setup_token"], git_auth="askpass"),
 ]
 
 

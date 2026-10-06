@@ -21,7 +21,9 @@ the job's `error`, never in an HTTP status.
 
 Logging (docs/logging.md): the shared logging_setup and request_log
 (byte-identical copies, kept so by a broker test), as `installer`. Lines
-carry sources, refs, commits, services and job ids; never the token.
+carry sources, refs, commits, services and job ids; never the token, and
+never INSTALLER_GIT_TOKEN (the ready line says only whether github.com
+clones are authenticated).
 """
 
 from __future__ import annotations
@@ -84,8 +86,10 @@ def create_app(settings: Settings | None = None, *, git: Git | None = None,
     logging_setup.configure("installer")
     settings = settings or Settings.from_env()
     settings.check()
-    installer = Installer(settings, git or Git(), Compose(settings.home, runner), env_runner)
-    store = JobStore(settings.state_dir / "jobs")
+    git = git or Git(token=settings.git_token, askpass_dir=settings.state_dir)
+    installer = Installer(settings, git, Compose(settings.home, runner), env_runner)
+    # Job lines are shown to the owner: neither token may ever be one of them.
+    store = JobStore(settings.state_dir / "jobs", mask=(settings.token, settings.git_token))
     expected = settings.token.encode()
 
     app = FastAPI(title="aab installer", version=__version__, docs_url=None, redoc_url=None,
@@ -202,5 +206,7 @@ def create_app(settings: Settings | None = None, *, git: Git | None = None,
         return {"items": installer.installed()}
 
     log.info("installer ready %s", kv(version=__version__, home=str(settings.home),
-                                      allowed_sources=list(settings.allowed_sources) or None))
+                                      allowed_sources=list(settings.allowed_sources) or None,
+                                      git_auth="askpass" if getattr(git, "authenticated", False)
+                                      else "anonymous"))
     return app

@@ -114,3 +114,21 @@ def test_log_lines_are_redacted(text, absent):
 def test_log_lines_are_one_capped_line():
     assert clean_line("a\nb\tc") == "a b c"
     assert len(clean_line("x" * 5000)) == MAX_LINE
+
+
+def test_configured_secrets_are_masked_whatever_their_shape(tmp_path):
+    planted = "Planted-0123456789-xyzTOKEN"          # no redaction row matches this shape
+    assert planted in clean_line(f"output {planted}")
+    store = JobStore(tmp_path / "jobs", mask=(planted, "", planted + "LONGER"))
+
+    def work(ctx):
+        ctx.log(f"remote said {planted}LONGER and {planted}")
+        raise RuntimeError(f"failed near {planted}")
+
+    job = store.submit("install", {}, work)
+    assert store.wait_idle()
+    done = store.get(job["id"])
+    text = json.dumps(done)
+    assert planted not in text and "LONGER" not in text
+    assert done["log"][0] == "remote said <redacted> and <redacted>"
+    assert done["error"] == "failed near <redacted>"
