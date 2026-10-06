@@ -11,6 +11,12 @@ Cloudflare, with the admin/management plane gated by Cloudflare Access SSO.
 > and run, so do the checks in `docs/deployment.md` > "Verify after
 > `docker compose up`" on the host after the first deploy. The topology,
 > env split and volumes are explained in `docs/deployment.md`.
+>
+> External plugins (unreleased, 0.3.0): the opt-in plugin installer is in
+> step 10. Its images (`installer/`, `plugins/base/`) and the install path
+> have been tested without Docker only (fake Docker, local git
+> repositories); run the acceptance test in `docs/deployment.md` > "External
+> plugins: the installer" before relying on it.
 
 **Threat model recap.** The origin is locked down three ways so nobody who
 learns the EC2 IP can bypass Cloudflare: (1) the **security group** only accepts
@@ -187,8 +193,12 @@ From your laptop:
 ```bash
 HOST=ec2-user@<host> SSH_KEY=key.pem deploy/push.sh
 ```
-This syncs the code (never your secrets) and runs
-`docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build`.
+This syncs the code (never your secrets, never `data/`, never the installed
+plugins in `plugins.d/`) and runs `docker compose $(scripts/compose-files.sh)
+up -d --build`: `scripts/compose-files.sh` prints the compose file set
+(`-f docker-compose.yml -f docker-compose.public.yml` once `SITE_DOMAIN` is
+set, plus the installer overlay and every installed plugin's overlay when the
+installer is on), so nobody hand-lists files.
 Only Caddy (:443) is exposed; the broker is reachable only from Caddy
 (`edge_net`), and no plugin or sidecar port is ever published. The public
 overlay is also what turns on origin lockdown (`ORIGIN_SECRET`); the base
@@ -218,19 +228,82 @@ curl -u uptimerobot:$AAB_MONITOR_TOKEN https://aab.example.com/v1/health   # the
 `https://aab.example.com/v1/admin/*` should require Access; a request without the
 Cloudflare secret header (i.e. straight to the origin) should get 403.
 
-Then, on the host (`cd /opt/aab`, with `-f docker-compose.yml -f
-docker-compose.public.yml` on every compose command), run the checklist in
+Then, on the host (`cd /opt/aab`, with `C="docker compose
+$(scripts/compose-files.sh)"` and `$C` for every compose command), run the
+checklist in
 `docs/deployment.md` > "Verify after `docker compose up`": container health,
 published ports (only `edge` on 443), the plugin cards in the console, the
 read-only `wa_data` mount once WhatsApp is paired, and the decision-chain
 verification.
 
+## 10. External plugins (optional): the plugin installer
+
+Plugins that live in their own repositories (the finance plugin,
+`github.com/pelegw/aab-plugin-finance`) are installed from the console by
+`aab-installer`, an opt-in container. It holds the Docker socket, so it is
+**root on this host**; what bounds it is that only the broker can reach it
+(`net_installer`), only with `INSTALLER_TOKEN`, only for repositories in
+`INSTALLER_ALLOWED_SOURCES`, at the commit you reviewed, with an overlay it
+renders itself (`docs/plugin-packaging.md`).
+
+1. **The plugin base image (once per gateway version).** Plugin images
+   build `FROM ghcr.io/pelegw/aab-plugin-base:<version>`, a private GHCR
+   package of the gateway repository. Create a GitHub token with
+   `read:packages` (classic; or fine-grained with Packages: read), then on
+   the host:
+
+   ```bash
+   echo <token> | docker login ghcr.io -u <github user> --password-stdin
+   docker pull ghcr.io/pelegw/aab-plugin-base:0.3.0     # the version the plugins name in FROM
+   ```
+
+   The pull matters: the installer drives the host's Docker daemon but has
+   no registry credentials of its own (the login is stored in the deploying
+   user's `~/.docker/config.json`, which the installer does not mount), so
+   its builds use the base image from the daemon's image store. Pull again
+   when a plugin moves to a newer base version.
+2. **`.env` on the host** (`/opt/aab/.env`):
+
+   ```bash
+   INSTALLER_ENABLED=true
+   INSTALLER_ALLOWED_SOURCES=github.com/pelegw/*     # env-only; empty refuses every install
+   AAB_HOME=/opt/aab                                 # this checkout's path (REMOTE_DIR)
+   ```
+
+   `INSTALLER_TOKEN` is generated (`deploy/push.sh` appends it to an older
+   `.env`, as it does `AAB_HOME`). The GitHub token for private plugin
+   repositories is **not** a `.env` line: it is a console setting (step 4).
+   An `INSTALLER_GIT_TOKEN=` line left in an older `.env` is ignored;
+   delete it.
+3. **Deploy**: `deploy/push.sh`. The compose file set now includes
+   `docker-compose.installer.yml`: `aab-installer` starts, and the broker is
+   recreated on `net_installer` with `INSTALLER_URL` and `INSTALLER_TOKEN`.
+4. **Install**: console, Plugins, **+ Add plugin**. For a private
+   repository, first paste a read-only GitHub token into "GitHub token for
+   private plugin repositories" and choose Set: a fine-grained token whose
+   repository access is only the plugin repositories, with Contents:
+   read-only (or a classic token with `repo`, which reads everything the
+   account can: prefer fine-grained). The broker stores it encrypted under
+   `BROKER_SECRETS_KEY` and sends it to the installer only with inspect,
+   install and upgrade; git gets it only through `GIT_ASKPASS`, for
+   `github.com` only. Then `github.com/pelegw/aab-plugin-finance` and
+   `v0.1.0`, Inspect, read the review, Install. The job panel follows the
+   build and the broker's restart; the card appears disabled; enable it.
+
+Upgrade and remove are on the plugin's card (`docs/console.md`). Installed
+plugins live in `/opt/aab/plugins.d/` (the installer's; `deploy/push.sh`
+never syncs or deletes it) and each adds `PLUGIN_TOKEN_<SERVICE>` and
+`PLUGIN_SECRETS_KEY_<SERVICE>` to `.env`. To turn the installer off, set
+`INSTALLER_ENABLED=false` and redeploy: installed plugins keep running (their
+overlays stay in the file set), only installing, upgrading and removing stop.
+
 ## Operations
 
 - **Update**: re-run `deploy/push.sh`; it rebuilds and restarts in place.
-- **Logs**: `ssh ... 'cd /opt/aab && docker compose -f docker-compose.yml -f docker-compose.public.yml logs -f broker'`
+- **Logs**: `ssh ... 'cd /opt/aab && docker compose $(scripts/compose-files.sh) logs -f broker'`
   (services: `edge`, `broker`, `plugin-whatsapp`, `whatsapp-sidecar`,
-  `plugin-github`, `plugin-google`). The WhatsApp pairing QR is shown in the
+  `plugin-github`, `plugin-google`, and with the installer on `aab-installer`
+  and each installed `plugin-<service>`). The WhatsApp pairing QR is shown in the
   console (Plugins > WhatsApp > Connect), printed in the `whatsapp-sidecar`
   log, and served as a PNG at `/v1/admin/plugins/whatsapp/connect/qr.png`.
   Add `--since 1h` to bound the output and `--no-log-prefix | grep <request-id>`
@@ -239,7 +312,7 @@ verification.
   (docs/logging.md).
 - **Extra MCP hosts**: a console change to `mcp_allowed_hosts_extra`
   (Settings) takes effect at the next broker start:
-  `docker compose -f docker-compose.yml -f docker-compose.public.yml restart broker`.
+  `docker compose $(scripts/compose-files.sh) restart broker`.
   Every other console setting applies on the next request.
 - **Reboots**: `restart: unless-stopped` + `systemctl enable docker` (provision
   does this) bring the stack back automatically.
@@ -247,12 +320,15 @@ verification.
 
   | What | Holds | Needs, to be useful |
   |---|---|---|
-  | `broker_data` volume | owner account, keys, grants, decision record, console settings, Telegram bot token (encrypted) | `DECISION_SIGNING_KEY` (old rows verify only under it), `BROKER_SECRETS_KEY` (else re-enter the Telegram token) |
+  | `broker_data` volume | owner account, keys, grants, decision record, console settings, Telegram bot token and the installer's GitHub token (encrypted) | `DECISION_SIGNING_KEY` (old rows verify only under it), `BROKER_SECRETS_KEY` (else re-enter both tokens) |
   | `wa_session` volume | WhatsApp session (**plaintext**: a backup is the live account) | nothing: treat the backup itself as a credential |
   | `wa_data` volume | WhatsApp message archive | nothing (message content: keep it as private as the account) |
   | `whatsapp_secrets` volume | nothing today (plugin-whatsapp has no config to store) | `PLUGIN_SECRETS_KEY_WHATSAPP` |
   | `github_secrets` volume | GitHub plugin config (App id and slug, the key if pasted, the PAT if used) and the installation (encrypted) | `PLUGIN_SECRETS_KEY_GITHUB` |
   | `google_secrets` volume | Google OAuth client id and secret, refresh token (encrypted) | `PLUGIN_SECRETS_KEY_GOOGLE` |
+  | `<service>_secrets` volume, per installed plugin | that plugin's own secret store (encrypted) | `PLUGIN_SECRETS_KEY_<SERVICE>` |
+  | `<service>_*` volumes an installed plugin declares (e.g. `finance_data`) | that plugin's data (the finance database) | whatever the plugin documents; `finance_data` is plain SQLite |
+  | `/opt/aab/plugins.d/` | each installed plugin's checkout at its pinned commit, rendered overlay and install record | nothing (rebuildable from the repository at the recorded commit, but restoring it avoids a reinstall); the pins themselves are in `broker_data` |
   | `/opt/aab/data/github-app/app.pem` | the GitHub App key, only if you use the file alternative | nothing: treat it as a credential |
   | `/opt/aab/.env` | every key above, plus tokens and the Cloudflare Access values | host-only, mode 0600 |
 
@@ -262,14 +338,16 @@ verification.
 
   ```bash
   cd /opt/aab
-  C="docker compose -f docker-compose.yml -f docker-compose.public.yml"
+  C="docker compose $(scripts/compose-files.sh)"
   mkdir -p ~/aab-backup && chmod 700 ~/aab-backup
   $C stop
-  for v in broker_data wa_session wa_data whatsapp_secrets github_secrets google_secrets; do
-    docker run --rm -v aab_$v:/v:ro -v ~/aab-backup:/b alpine tar czf /b/$v.tgz -C /v .
+  # Every volume of the project: the fixed ones and each installed plugin's.
+  for v in $(docker volume ls -q | grep '^aab_'); do
+    docker run --rm -v $v:/v:ro -v ~/aab-backup:/b alpine tar czf /b/$v.tgz -C /v .
   done
   $C start
   cp .env ~/aab-backup/env && chmod 600 ~/aab-backup/env
+  tar czf ~/aab-backup/plugins.d.tgz --exclude=plugins.d/_installer plugins.d   # installed plugins, if any
   ```
 
   Then encrypt `~/aab-backup` before it leaves the host: it holds the live
@@ -277,10 +355,14 @@ verification.
   rest. Restore the volumes together with the `.env` they were taken with.
 
   Docker prefixes the volume names with the project name (`aab_broker_data`,
-  ...). Losing a `PLUGIN_SECRETS_KEY_<SERVICE>` means that plugin's old
+  ...). Removing an installed plugin keeps its volumes and comments its two
+  `.env` secrets out (`#aab-retired# ...`), so a reinstall finds its data;
+  removing it with purge deletes both for good, so back up first. Losing a
+  `PLUGIN_SECRETS_KEY_<SERVICE>` means that plugin's old
   store must be cleared, its secret config re-entered and the plugin
   reconnected (`docs/deployment.md` > Rotating secrets); nothing else is
   lost. Losing `BROKER_SECRETS_KEY` means re-entering the Telegram bot
-  token. Losing `DECISION_SIGNING_KEY` means the existing decision record
+  token and, if you use one, the installer's GitHub token. Losing
+  `DECISION_SIGNING_KEY` means the existing decision record
   no longer verifies. **Never** commit `.env`, `data/` or
   `edge/certs/*` (already gitignored).

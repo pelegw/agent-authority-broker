@@ -6,6 +6,7 @@ Run once per deployment, before the first `docker compose up`:
     python scripts/init_secrets.py                  # writes <repo>/.env
     python scripts/init_secrets.py --out /opt/aab/.env
     python scripts/init_secrets.py --rotate SETUP_TOKEN
+    python scripts/init_secrets.py --rotate PLUGIN_TOKEN_FINANCE   # an installed plugin's token
     python scripts/init_secrets.py --example        # prints the .env.example template
 
 Why a script instead of "openssl rand" instructions: every secret gets the
@@ -18,12 +19,19 @@ The generated values are the broker's own secrets plus, per plugin service
 (PLUGIN_TOKEN_<SERVICE>) and the key that encrypts that service's own secret
 volume (PLUGIN_SECRETS_KEY_<SERVICE>). One .env holds them all, but
 docker-compose.yml hands each container only its own values: no service gets
-the whole file.
+the whole file. An external plugin service installed later (aab-installer)
+gets the same pair under its own name: `--rotate PLUGIN_TOKEN_<SERVICE>` and
+`--rotate PLUGIN_SECRETS_KEY_<SERVICE>` accept any service name the installer
+accepts and append the entry when it is missing. The opt-in installer itself
+has INSTALLER_TOKEN (generated), INSTALLER_ENABLED, INSTALLER_ALLOWED_SOURCES
+(empty: refuse every install) and AAB_HOME.
 
-Third-party credentials (GitHub App, Google OAuth client, Telegram bot token)
-are NOT in this file: the owner enters them in the console, which relays
-plugin credentials to the plugin that owns them and encrypts the Telegram
-token under BROKER_SECRETS_KEY (docs/configuration.md). The file keeps only
+Third-party credentials (GitHub App, Google OAuth client, Telegram bot token,
+the installer's read-only GitHub token for private plugin repositories) are
+NOT in this file: the owner enters them in the console, which relays plugin
+credentials to the plugin that owns them and encrypts the Telegram token and
+the installer's GitHub token under BROKER_SECRETS_KEY (docs/configuration.md).
+The file keeps only
 what must exist before the database is readable, plus the public-mode
 exposure values (Cloudflare Access, SITE_DOMAIN), which are written as empty,
 labelled placeholders; a checklist of where to obtain each is printed.
@@ -37,6 +45,7 @@ from __future__ import annotations
 import argparse
 import base64
 import os
+import re
 import secrets
 import stat
 import sys
@@ -82,7 +91,7 @@ SECTIONS: list[tuple[str, list[Entry]]] = [
               "Edge secret a Cloudflare Transform Rule adds as X-AAB-Origin. Used only by the public overlay.",
               generate=_hex32),
         Entry("BROKER_SECRETS_KEY",
-              "Fernet key for secrets entered in the console and kept by the broker (the Telegram bot token). Never target credentials.",
+              "Fernet key for secrets entered in the console and kept by the broker (the Telegram bot token, the installer's GitHub token). Never target credentials.",
               generate=_fernet_key),
         Entry("DECISION_SIGNING_KEY",
               "HMAC key for the hash-chained decision record. Keep it stable: old rows verify under it.",
@@ -110,6 +119,24 @@ SECTIONS: list[tuple[str, list[Entry]]] = [
         Entry("PLUGIN_SECRETS_KEY_GOOGLE",
               "Fernet key for plugin-google's own secret volume (OAuth refresh token). plugin-google only.",
               generate=_fernet_key),
+    ]),
+    ("Plugin installer (opt-in: docker-compose.installer.yml; see docs/deployment.md)", [
+        Entry("INSTALLER_ENABLED",
+              "Load the plugin installer overlay (scripts/compose-files.sh reads this). The "
+              "installer holds the Docker socket: it is root on this host.",
+              default="false"),
+        Entry("INSTALLER_TOKEN",
+              "Broker <-> aab-installer token (X-Installer-Token, net_installer). Broker and "
+              "aab-installer only.",
+              generate=_hex32),
+        Entry("INSTALLER_ALLOWED_SOURCES",
+              "Comma-separated repositories the installer may clone, e.g. github.com/you/*. "
+              "Empty refuses every install. Set here only: the console can never widen it.",
+              default=""),
+        Entry("AAB_HOME",
+              "Absolute path of this checkout on the host (deploy/push.sh REMOTE_DIR). The "
+              "installer mounts it at the same path, so compose resolves paths as the host does.",
+              default="/opt/aab"),
     ]),
     ("Public-mode values (fill in for an internet deploy; see the checklist the script prints)", [
         Entry("CF_ACCESS_TEAM_DOMAIN",
@@ -170,6 +197,10 @@ CONSOLE_ENTERED = [
     ("Google OAuth client id and secret", "Plugins > Google",
      "Google Cloud Console > APIs & Services > Credentials > Create credentials > "
      "OAuth client ID (Web application)"),
+    ("GitHub token for private plugin repositories (optional, installer only)",
+     "Plugins > + Add plugin",
+     "GitHub > Settings > Developer settings > Personal access tokens > Fine-grained "
+     "tokens: only the plugin repositories, Contents read-only"),
 ]
 GENERATED = [e.name for e in ENTRIES.values() if e.generate]
 
@@ -190,7 +221,8 @@ ROTATE_HINTS = {
                      "docker compose -f docker-compose.yml -f docker-compose.public.yml up -d.",
     "BROKER_SECRETS_KEY": "Restart the broker: docker compose up -d broker. Secrets entered in "
                           "the console no longer decrypt: re-enter the Telegram bot token "
-                          "(Channels > Telegram).",
+                          "(Channels > Telegram) and, if you set one, the installer's GitHub "
+                          "token (Plugins > + Add plugin).",
     "DECISION_SIGNING_KEY": "Existing decision rows will no longer verify under the new key.",
     "PLUGIN_TOKEN_WHATSAPP": "Restart both ends: docker compose up -d broker plugin-whatsapp.",
     "PLUGIN_SECRETS_KEY_WHATSAPP": "Restart plugin-whatsapp; its stored config no longer "
@@ -202,7 +234,45 @@ ROTATE_HINTS = {
     "PLUGIN_TOKEN_GOOGLE": "Restart both ends: docker compose up -d broker plugin-google.",
     "PLUGIN_SECRETS_KEY_GOOGLE": "Restart plugin-google, then reconnect Google from the console "
                                  "(its stored refresh token no longer decrypts).",
+    "INSTALLER_TOKEN": "Restart both ends: docker compose $(scripts/compose-files.sh) up -d "
+                       "broker aab-installer.",
 }
+
+# An installed (external) plugin service's pair, for any service name the
+# installer accepts (installer/aab_installer/descriptor.py SERVICE_RE).
+PLUGIN_SECRET_RE = re.compile(r"^(PLUGIN_TOKEN|PLUGIN_SECRETS_KEY)_([A-Z][A-Z0-9]{1,31})$")
+
+
+def plugin_entry(name: str) -> Entry | None:
+    """The entry for an installed plugin service's token or key, or None."""
+    m = PLUGIN_SECRET_RE.match(name)
+    if m is None:
+        return None
+    kind, svc = m.group(1), m.group(2).lower()
+    if kind == "PLUGIN_TOKEN":
+        return Entry(name, f"Broker <-> plugin-{svc} token (X-Plugin-Token). Broker and "
+                           f"plugin-{svc} only.", generate=_hex32)
+    return Entry(name, f"Fernet key for plugin-{svc}'s own secret volume. plugin-{svc} only.",
+                 generate=_fernet_key)
+
+
+def rotatable(name: str) -> Entry | None:
+    """The generated entry `--rotate NAME` regenerates (or appends), or None."""
+    if name in GENERATED:
+        return ENTRIES[name]
+    return plugin_entry(name)
+
+
+def rotate_hint(name: str) -> str:
+    if name in ROTATE_HINTS:
+        return ROTATE_HINTS[name]
+    m = PLUGIN_SECRET_RE.match(name)
+    svc = m.group(2).lower()
+    if m.group(1) == "PLUGIN_TOKEN":
+        return (f"Restart both ends: docker compose $(scripts/compose-files.sh) up -d "
+                f"broker plugin-{svc}.")
+    return (f"Restart plugin-{svc}; what it stored encrypted no longer decrypts, so re-save "
+            f"its settings (or reconnect it) from the console.")
 
 
 def render(values: dict[str, str], header: list[str]) -> str:
@@ -224,14 +294,26 @@ def _write_private(path: Path, data: bytes) -> None:
     """Atomically write `data` with mode 0600 (best effort on Windows).
 
     The temp file is created 0600 by mkstemp, so the secret is never briefly
-    world-readable; os.replace then swaps it in over any existing file.
+    world-readable; os.replace then swaps it in over any existing file. An
+    existing file keeps its owner: aab-installer runs this as root on the
+    host's .env, which must stay readable by the user who deploys.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        st = os.stat(path)
+        owner = (st.st_uid, st.st_gid)
+    except FileNotFoundError:
+        owner = None
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".env.tmp-")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         os.chmod(tmp, 0o600)
+        if owner is not None and hasattr(os, "chown"):
+            try:
+                os.chown(tmp, *owner)
+            except PermissionError:
+                pass            # an unprivileged writer can only own the file itself
         os.replace(tmp, path)
     except BaseException:
         if os.path.exists(tmp):
@@ -274,9 +356,12 @@ def cmd_create(path: Path, force: bool) -> int:
 
 
 def cmd_rotate(path: Path, name: str) -> int:
-    if name not in GENERATED:
+    entry = rotatable(name)
+    if entry is None:
         print(f"error: {name} is not a generated secret; choose one of: "
-              f"{', '.join(GENERATED)}", file=sys.stderr)
+              f"{', '.join(GENERATED)}, or PLUGIN_TOKEN_<SERVICE> / "
+              f"PLUGIN_SECRETS_KEY_<SERVICE> for an installed plugin service",
+              file=sys.stderr)
         return 2
     if not path.exists():
         print(f"error: {path} does not exist; run without --rotate first", file=sys.stderr)
@@ -290,7 +375,7 @@ def cmd_rotate(path: Path, name: str) -> int:
         print(f"error: {name} appears {len(hits)} times in {path}; fix it by hand first",
               file=sys.stderr)
         return 1
-    new_value = ENTRIES[name].generate().encode("ascii")
+    new_value = entry.generate().encode("ascii")
     if hits:
         i = hits[0]
         old = lines[i]
@@ -300,10 +385,10 @@ def cmd_rotate(path: Path, name: str) -> int:
         # Older file without this key: append it (with its comment) at the end.
         if lines and not lines[-1].endswith(b"\n"):
             lines[-1] += b"\n"
-        lines += [f"# {ENTRIES[name].comment}\n".encode("utf-8"), prefix + new_value + b"\n"]
+        lines += [f"# {entry.comment}\n".encode("utf-8"), prefix + new_value + b"\n"]
     _write_private(path, b"".join(lines))
     print(f"rotated {name} in {path}")
-    print(f"next: {ROTATE_HINTS[name]}")
+    print(f"next: {rotate_hint(name)}")
     return 0
 
 

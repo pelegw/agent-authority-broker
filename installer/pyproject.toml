@@ -1,0 +1,30 @@
+[project]
+name = "aab-installer"
+dynamic = ["version"]   # single source: ../VERSION, read by aab_installer/__init__.py
+description = "Installs external Agent Authority Broker plugins from their own repositories"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
+    "pydantic>=2.6,<3",      # the strict descriptor schema
+    "pyyaml>=6,<7",          # descriptors, manifests, rendered overlays
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27,<1"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# hatch runs aab_installer/__init__.py (source = "code") and takes
+# __version__, which reads ../VERSION: the number lives in one file.
+[tool.hatch.version]
+source = "code"
+path = "aab_installer/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["aab_installer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -104,6 +104,10 @@
 
   main { flex: 1; min-width: 0; padding: 1.3rem 1.5rem 3rem; }
   .view > h2 { font-size: 1.15rem; margin: 0 0 .2rem; }
+  /* A view title with its main action beside it (Plugins: + Add plugin). */
+  .viewhead { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin: 0 0 .2rem; }
+  .viewhead h2 { font-size: 1.15rem; margin: 0; }
+  .viewhead button { margin-left: auto; }
   .view > .viewsub { color: var(--muted); font-size: .88rem; margin: 0 0 1.1rem; }
   .content { max-width: 1020px; }
 
@@ -283,6 +287,24 @@
   details.health { margin-top: .8rem; font-size: .82rem; }
   details.health summary { cursor: pointer; color: var(--muted); }
   details.health pre { margin: .4rem 0 0; overflow: auto; max-height: 16rem; }
+  /* external plugins: provenance line, review card, job panel */
+  .installedfrom { display: flex; align-items: center; gap: .45rem; flex-wrap: wrap; font-size: .84rem;
+    color: var(--muted); margin-top: .35rem; }
+  .installedfrom .mono { color: var(--ink); overflow-wrap: anywhere; unicode-bidi: isolate; }
+  .installedfrom button { padding: .2rem .6rem; font-size: .8rem; }
+  .pushright { margin-left: auto; display: inline-flex; gap: .4rem; }
+  .review .rplugin { border: 1px solid var(--line); border-radius: 10px; padding: .7rem .85rem; margin-top: .8rem; }
+  .review .rhead { display: flex; align-items: center; gap: .45rem; flex-wrap: wrap; }
+  .review .rhead h4 { margin: 0; font-size: .95rem; unicode-bidi: isolate; }
+  .review .acts { display: grid; grid-template-columns: max-content max-content 1fr; gap: .25rem .7rem;
+    font-size: .85rem; align-items: center; margin-top: .3rem; }
+  .review .acts .mono { overflow-wrap: anywhere; }
+  .cmdbox { font-family: var(--mono); font-size: .85rem; white-space: pre-wrap; overflow-wrap: anywhere; user-select: all;
+    border: 1px dashed var(--line); border-radius: 8px; background: var(--panel-2); padding: .5rem .8rem; margin: .3rem 0 .8rem; }
+  .joblog { margin: .6rem 0 0; max-height: 20rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+    font-family: var(--mono); font-size: .8rem; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 8px; padding: .5rem .7rem; }
+  .jobline { margin-top: .4rem; }
 
   /* one-time secret display */
   .keybanner {
@@ -493,10 +515,12 @@
 
     <!-- ================= Plugins ================= -->
     <section class="view" data-view="plugins" hidden>
-      <h2>Plugins</h2>
-      <p class="viewsub">Each target system is a plugin running in its own container. Configure it, enable it, connect it. Disabling a plugin removes its tools on the next request and holds its queued actions; its credentials stay inside the plugin.</p>
+      <div class="viewhead"><h2>Plugins</h2><button class="primary" type="button" id="addPluginBtn">+ Add plugin</button></div>
+      <p class="viewsub">Each target system is a plugin running in its own container. Configure it, enable it, connect it. Disabling a plugin removes its tools on the next request and holds its queued actions; its credentials stay inside the plugin. Add plugin installs one from its own repository, after you review what it can do.</p>
+      <div id="pluginJob"></div>
       <div id="pluginList"></div>
-      <div id="pluginRefused"></div>
+      <div id="pluginInstalled"></div>
+      <div id="pluginOffered"></div>
     </section>
 
     <!-- ================= Agent keys ================= -->
@@ -916,6 +940,8 @@ function secretBox(value, what) {
 const state = {
   me: null,
   plugins: [], pluginsById: new Map(), refused: [],
+  // The installer's view: its status, the install records, plugin id -> record.
+  installer: { status: null, installed: [], byPlugin: new Map() },
   keys: [], keysById: new Map(),
   pending: [], grants: [], scheduled: [],
 };
@@ -1020,6 +1046,7 @@ function stopBackground() {
 function showGate(which, msg) {
   stopPolling();
   stopBackground();
+  stopJob();
   closeAllModals();
   document.querySelectorAll("[data-ephemeral]").forEach((n) => n.replaceChildren());
   $("app").hidden = true;
@@ -2330,7 +2357,7 @@ function slotView(slot) {
 
 async function refreshPlugins() {
   stopAllQr();
-  await loadPlugins();
+  const [, , offered] = await Promise.all([loadPlugins(), loadInstaller(), loadOffered()]);
   const list = $("pluginList");
   list.replaceChildren();
   pluginUI.clear();
@@ -2347,14 +2374,8 @@ async function refreshPlugins() {
     list.append(slotCard(slot));
     for (const m of slotMembers(slot)) list.append(pluginCard(m));
   }
-  const ref = $("pluginRefused");
-  ref.replaceChildren();
-  if (state.refused.length) {
-    const card = h("div", { class: "card" }, h("div", { class: "subhead" }, h("h3", null, "Refused plugins")),
-      h("p", { class: "hint" }, "These services answered, but their manifests did not match the broker's vendored copy, so nothing from them is used."));
-    for (const r of state.refused) card.append(h("div", { class: "hrow" }, h("span", { class: "lbl" }, r.id), h("span", { class: "sub" }, r.reason)));
-    ref.append(card);
-  }
+  paintInstalledPackages();
+  paintOffered(offered);
 }
 function slotCard(slot) {
   const members = slotMembers(slot);
@@ -2397,6 +2418,8 @@ function pluginCard(p) {
   card.append(h("div", { class: "phead" },
     h("div", null, h("h3", null, p.display_name), h("div", { class: "sub" }, `${p.id} · v${p.version} · service ${p.service}`)),
     h("span", { class: "spacer" }), status, healthBtn, toggle), healthLine);
+  const provenance = installedFrom(p);
+  if (provenance) card.append(provenance);
   if (p.description) card.append(h("p", { class: "hint" }, p.description));
   const configEl = h("div");
   const connEl = h("div");
@@ -2472,6 +2495,479 @@ async function togglePlugin(ui) {
     updatePlugin(v);
     toast(v.enabled ? `${v.display_name} enabled.` : `${v.display_name} disabled.`);
   } catch (e) { showErr(e); }
+}
+
+// ---- external plugins: + Add plugin, the review card, the job panel.
+// A plugin from its own repository is installed by aab-installer, an opt-in
+// container behind its own boundary (docs/plugin-packaging.md). The broker
+// does the authority part: it validates every manifest, builds the review
+// shown here, and pins what the owner approved before the installer builds
+// anything. Everything a repository supplies (names, descriptions, paths,
+// environment values) is plugin-written text and goes through h() as text.
+// Install and upgrade recreate the broker, so the job panel keeps polling
+// through its restart.
+const JOB_POLL_MS = 2000;
+// About five minutes of a broker that does not answer before the panel stops
+// waiting (the job itself runs on in the installer).
+const JOB_MAX_MISSES = 150;
+// Answers that mean "the broker is being recreated": no connection at all, or
+// the edge reporting that nothing answers behind it.
+const RESTART_STATUSES = [0, 502, 503, 504];
+const JOB_STATE_KIND = { queued: "", running: "accent", done: "ok", failed: "bad" };
+let jobRun = null;                 // the job the panel follows: {id, what, last, timer, ...}
+
+function shortCommit(c) { return typeof c === "string" ? c.slice(0, 12) : ""; }
+function objectOr(x) { return x && typeof x === "object" && !Array.isArray(x) ? x : {}; }
+function objectsOf(x) { return Array.isArray(x) ? x.filter((v) => v && typeof v === "object" && !Array.isArray(v)) : []; }
+
+async function loadInstaller() {
+  const inst = state.installer;
+  inst.installed = [];
+  inst.byPlugin = new Map();
+  try { inst.status = await api("/v1/admin/plugins/install/status"); }
+  catch (e) { if (e instanceof AuthLost) throw e; inst.status = null; return inst; }
+  if (inst.status && inst.status.configured && inst.status.reachable) {
+    try { inst.installed = objectsOf((await api("/v1/admin/plugins/installed")).items); }
+    catch (e) { if (e instanceof AuthLost) throw e; }
+  }
+  for (const r of inst.installed) for (const pid of listOf(r.plugins)) inst.byPlugin.set(pid, r);
+  return inst;
+}
+// Null when the list cannot be read: the card falls back to the refused list.
+async function loadOffered() {
+  try { return objectsOf((await api("/v1/admin/plugins/offered")).items); }
+  catch (e) { if (e instanceof AuthLost) throw e; return null; }
+}
+
+// "installed from <source>@<ref>" under a plugin's title, with its package's buttons.
+function installedFrom(p) {
+  const r = state.installer.byPlugin.get(p.id);
+  if (!r) return null;
+  return h("div", { class: "installedfrom" }, "installed from ",
+    h("span", { class: "mono" }, `${r.source}@${r.ref}`),
+    r.commit ? h("span", { class: "sub", title: String(r.commit) }, "commit " + shortCommit(r.commit)) : null,
+    ...packageButtons(r));
+}
+function packageButtons(r) {
+  const up = h("button", { type: "button", class: "ghost" }, "Upgrade");
+  up.onclick = () => openAddPlugin({ service: r.service, source: r.source, ref: r.ref });
+  const rm = h("button", { type: "button", class: "ghost" }, "Remove");
+  rm.onclick = () => openRemovePlugin(r);
+  return [up, rm];
+}
+// Installed packages none of whose plugins is registered (still starting, or
+// awaiting review below): their buttons must stay reachable somewhere.
+function paintInstalledPackages() {
+  const el = $("pluginInstalled");
+  el.replaceChildren();
+  const orphans = state.installer.installed.filter((r) => !listOf(r.plugins).some((pid) => state.pluginsById.has(pid)));
+  if (!orphans.length) return;
+  const card = h("div", { class: "card" },
+    h("div", { class: "subhead" }, h("h3", null, "Installed, not serving"), h("span", { class: "count" }, String(orphans.length))),
+    h("p", { class: "hint" }, "Installed from their repositories, but no plugin of theirs is registered: the container may still be starting (the broker looks again within 30 seconds), or its manifest is awaiting your review below."));
+  for (const r of orphans) {
+    card.append(h("div", { class: "hrow" }, h("span", { class: "lbl" }, r.service),
+      h("span", { class: "rid" }, `${r.source}@${r.ref}`), h("span", { class: "sub" }, listOf(r.plugins).join(", ")),
+      h("span", { class: "pushright" }, ...packageButtons(r))));
+  }
+  el.append(card);
+}
+function paintOffered(offered) {
+  const el = $("pluginOffered");
+  el.replaceChildren();
+  const items = offered || state.refused.map((r) => ({ id: r.id, reason: r.reason, pinnable: false }));
+  if (!items.length) return;
+  const card = h("div", { class: "card" },
+    h("div", { class: "subhead" }, h("h3", null, "Offered, awaiting review"), h("span", { class: "count" }, String(items.length))),
+    h("p", { class: "hint" }, "These services answered, but the broker has no approved copy of what they offer, or theirs differs from it, so nothing from them is used. Review what a plugin can do and pin it to register it; it stays disabled until you enable it."));
+  for (const it of items) {
+    const why = it.pinnable ? it.reason : (it.blocked || it.error || it.reason);
+    const row = h("div", { class: "hrow" }, h("span", { class: "lbl" }, it.id),
+      it.service ? h("span", { class: "sub" }, "service " + it.service) : null,
+      it.summary ? badge("v" + it.summary.version) : null,
+      why ? h("span", { class: "sub" }, why) : null);
+    if (it.pinnable) {
+      const b = h("button", { type: "button", class: "primary" }, "Review and pin");
+      b.onclick = () => openPinReview(it);
+      row.append(h("span", { class: "pushright" }, b));
+    }
+    card.append(row);
+  }
+  el.append(card);
+}
+function openPinReview(it) {
+  const name = it.summary ? it.summary.display_name : it.id;
+  openModal({
+    title: `Review ${name} before pinning`, wide: true,
+    body: h("div", { class: "review" },
+      h("p", { class: "hint" }, `Offered by service ${it.service}. Pinning approves exactly this manifest: the broker uses its own copy from now on, and the service can never widen it. The plugin stays disabled until you enable it.`),
+      reviewPlugin(it)),
+    buttons: [
+      { label: "Cancel", cls: "ghost", onClick: (m) => m.close() },
+      { label: "Pin", cls: "primary", onClick: async (m, btn) => {
+        m.setError("");
+        try { await withBusy(btn, () => api(`/v1/admin/plugins/${enc(it.id)}/pin`, { method: "POST" })); }
+        catch (e) { if (!(e instanceof AuthLost)) m.setError(errText(e)); return; }
+        m.close();
+        toast(`${name} pinned. Enable it in its card when you are ready.`);
+        refreshPlugins().catch(showErr);
+      } },
+    ],
+  });
+}
+
+// ---- the review: what a plugin can do, and what changes on an upgrade.
+function chipsOr(list, none) { return list.length ? idChips(list) : h("span", { class: "sub" }, none); }
+function reviewPlugin(it) {
+  const s = it.summary;
+  const box = h("div", { class: "rplugin" });
+  box.append(h("div", { class: "rhead" }, h("h4", null, s ? s.display_name : it.id),
+    h("span", { class: "mono sub" }, it.id), badge("v" + ((s && s.version) || it.version || "?")),
+    it.valid === false ? badge("invalid", "bad") : null,
+    it.pinned ? badge("pinned now: v" + it.pinned.version, "accent") : null));
+  if (it.error) box.append(h("div", { class: "formerr" }, it.error));
+  if (it.blocked) box.append(h("div", { class: "warnbox" }, it.blocked));
+  if (!s) return box;
+  if (s.description) box.append(h("p", { class: "hint" }, s.description));
+  const acts = h("div", { class: "acts" });
+  for (const a of objectsOf(s.actions)) {
+    const notes = ["modes: " + listOf(a.modes).join(", ")];
+    if (a.resource) notes.push("resource " + a.resource);
+    if (a.schedulable) notes.push("schedulable");
+    acts.append(h("span", { class: "mono" }, a.name), badge(a.side_effect, "eff-" + a.side_effect),
+      h("span", { class: "sub" }, notes.join(" · ")));
+  }
+  const conn = objectOr(s.connection);
+  const config = objectsOf(s.config);
+  const facts = h("div", { class: "facts" });
+  facts.append(
+    ...fact("Connection", conn.kind ? `${conn.kind} (enforced: ${conn.enforcement})` : "none"),
+    ...fact("Resources", chipsOr(listOf(s.resources), "none")),
+    ...fact("Narrowings", chipsOr(objectsOf(s.narrowings).map((n) => `${n.dimension}: ${n.form}`), "none")),
+    ...fact("Constraints", chipsOr(objectsOf(s.constraints).map((c) => `${c.name}: ${c.form}`), "none")),
+    ...fact("Settings", config.length
+      ? h("span", { class: "ids" }, config.map((f) => h("span", { class: "idchip" }, f.name + (f.required ? " *" : ""),
+          f.secret ? [" ", badge("secret", "accent")] : null)))
+      : h("span", { class: "sub" }, "none")));
+  box.append(h("div", { class: "quote-label" }, "What it can do"), acts, facts);
+  if (listOf(s.secret_config).length) {
+    box.append(h("div", { class: "sub" }, "Secret settings are entered later in the plugin's card: relayed to the plugin once, never kept by the broker."));
+  }
+  if (it.diff && it.diff.from_version) box.append(diffView(it.diff));
+  return box;
+}
+function changeList(x) {
+  const out = [];
+  if (!x) return out;
+  if (listOf(x.added).length) out.push(h("div", null, badge("added", "ok"), " ", idChips(listOf(x.added))));
+  if (listOf(x.removed).length) out.push(h("div", null, badge("removed", "bad"), " ", idChips(listOf(x.removed))));
+  const changed = Array.isArray(x.changed) ? x.changed : [];
+  const names = changed.filter((c) => typeof c === "string");
+  if (names.length) out.push(h("div", null, badge("changed", "warn"), " ", idChips(names)));
+  for (const c of objectsOf(changed)) {
+    const se = objectOr(c.side_effect), md = objectOr(c.modes);
+    out.push(h("div", null, badge("changed", "warn"), " ", h("span", { class: "mono" }, c.name),
+      h("span", { class: "sub" }, ` ${se.from} to ${se.to}; modes ${listOf(md.from).join(", ")} to ${listOf(md.to).join(", ")}`)));
+  }
+  return out;
+}
+function diffView(d) {
+  const wrap = h("div", null, h("div", { class: "quote-label" }, `What changes from the pinned v${d.from_version} to v${d.to_version}`));
+  if (!d.changed) { wrap.append(h("div", { class: "hint" }, "Nothing: the same manifest.")); return wrap; }
+  const facts = h("div", { class: "facts" });
+  for (const [label, key] of [["Actions", "actions"], ["Narrowings", "narrowings"], ["Constraints", "constraints"], ["Settings", "config"]]) {
+    const rows = changeList(d[key]);
+    if (rows.length) facts.append(...fact(label, rows));
+  }
+  const newSecrets = listOf(objectOr(d.config).secret_added);
+  if (newSecrets.length) facts.append(...fact("New secrets", idChips(newSecrets)));
+  if (d.connection) {
+    const c = objectOr(d.connection), from = objectOr(c.from), to = objectOr(c.to);
+    facts.append(...fact("Connection", `${from.kind} (${from.enforcement}) to ${to.kind} (${to.enforcement})`));
+  }
+  wrap.append(facts.childElementCount ? facts : h("div", { class: "hint" }, "Only the version number changes."));
+  return wrap;
+}
+function packageReview(r) {
+  const d = objectOr(r.descriptor);
+  const env = Object.entries(objectOr(d.environment)).map(([k, v]) => `${k}=${v}`);
+  const vols = Object.entries(objectOr(d.volumes)).map(([k, v]) => `${k} at ${v}`);
+  const facts = h("div", { class: "facts" });
+  facts.append(
+    ...fact("Volumes", idChips([`${r.service}_secrets at /secrets (its encrypted secret store, added by the installer)`, ...vols])),
+    ...fact("Environment", chipsOr(env, "none")),
+    ...fact("From the host's .env", chipsOr(listOf(d.env_passthrough), "nothing")),
+    ...fact("Built from", h("span", { class: "mono" }, objectOr(d.build).dockerfile || "Dockerfile")),
+    ...fact("Runtime line", String(d.runtime || "?")));
+  return [h("div", { class: "quote-label" }, "What the container gets"), facts,
+    h("p", { class: "sub" }, "No published port, no host directory, no other network, and only its own token and key: the installer renders its compose service from this descriptor through a fixed template.")];
+}
+function inspectReview(r, problems) {
+  const wrap = h("div", { class: "review" });
+  const facts = h("div", { class: "facts" });
+  const inst = objectOr(r.installed);
+  facts.append(
+    ...fact("Repository", h("span", { class: "mono" }, `${r.source}@${r.ref}`)),
+    ...fact("Commit", h("span", { class: "mono" }, r.commit)),
+    ...fact("Service", h("span", null, h("span", { class: "mono" }, "plugin-" + r.service),
+      h("span", { class: "sub" }, ` on its own network net_${r.service}, shared with the broker only`))),
+    ...fact("This is", r.upgrade ? `an upgrade of ${r.service} from ${inst.ref} (commit ${shortCommit(inst.commit)})` : "a new install"));
+  wrap.append(facts);
+  if (problems.length) wrap.append(h("div", { class: "warnbox" }, "Cannot go ahead: " + problems.join("; ")));
+  for (const it of objectsOf(r.plugins)) wrap.append(reviewPlugin(it));
+  wrap.append(...packageReview(r));
+  if (!problems.length) {
+    wrap.append(h("p", { class: "hint" }, r.upgrade
+      ? "Upgrade pins these manifests first, then the installer rebuilds the service and recreates the broker."
+      : "Install pins these manifests first (you approve exactly this), then the installer builds the service and recreates the broker. The plugin appears disabled; enable it in its card."));
+  }
+  return wrap;
+}
+
+// ---- the installer's GitHub token, for private plugin repositories.
+// Write-only, like the Telegram bot token: the field is read once and emptied
+// before the request is even sent, and nothing ever writes a token back. The
+// broker keeps it encrypted and answers with a state word only (git_token:
+// unset | set | unreadable), which this code only ever compares (tested). It
+// sends the token to the installer with inspect, install and upgrade, and the
+// installer offers it to git for allowlisted github.com repositories only.
+const GIT_TOKEN_SHAPE = /^[\x21-\x7e]{20,255}$/;
+function gitTokenSection(st) {
+  const input = h("input", { type: "password", autocomplete: "new-password", spellcheck: "false", maxlength: "255",
+                             "aria-label": "GitHub token for private plugin repositories",
+                             placeholder: "paste a read-only GitHub token" });
+  const set = h("button", { class: "primary", type: "submit" }, "Set");
+  const clear = h("button", { class: "ghost", type: "button" }, "Clear");
+  const form = h("form", { class: "secretrow", autocomplete: "off" }, input, set, clear);
+  const stateLine = h("p", { class: "hint" });
+  const keyWarn = h("div", { class: "warnbox" }, "BROKER_SECRETS_KEY is not set on the broker, so a token cannot be stored. Run scripts/init_secrets.py, then restart the broker.");
+  const paint = (v) => {
+    const stored = v.git_token === "set", unreadable = v.git_token === "unreadable";
+    stateLine.replaceChildren(
+      stored ? badge("set", "ok") : unreadable ? badge("re-enter required", "bad") : badge("not set", ""), " ",
+      stored ? "A token is stored. Inspect, install and upgrade use it for private repositories."
+        : unreadable ? "A token is stored but can no longer be decrypted (BROKER_SECRETS_KEY changed). Inspect, install and upgrade are refused until you enter it again or clear it."
+          : "None stored: only public repositories can be cloned.");
+    set.textContent = stored || unreadable ? "Replace" : "Set";
+    set.disabled = v.secrets_key_configured === false;
+    clear.hidden = v.git_token === "unset";
+    keyWarn.hidden = v.secrets_key_configured !== false;
+  };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const value = input.value.trim();
+    input.value = "";          // write-only: gone from the page before anything else
+    if (!value) { toast("Paste the GitHub token first.", "info"); return; }
+    if (!GIT_TOKEN_SHAPE.test(value)) { toast("That is not a GitHub token (20 to 255 characters, no spaces).", "err"); return; }
+    try {
+      paint(await withBusy(set, () => api("/v1/admin/plugins/install/git-token", { method: "POST", body: { token: value } })));
+      toast("GitHub token stored.");
+    } catch (err) { showErr(err); }
+  };
+  clear.onclick = async () => {
+    const ok = await confirmBox({ title: "Clear the GitHub token?",
+      text: "Private plugin repositories cannot be inspected, installed or upgraded until you set a token again. Public ones are not affected.",
+      ok: "Clear token", danger: true });
+    if (!ok) return;
+    try {
+      paint(await withBusy(clear, () => api("/v1/admin/plugins/install/git-token", { method: "DELETE" })));
+      toast("GitHub token cleared.");
+    } catch (e) { showErr(e); }
+  };
+  paint(st);
+  return h("div", { class: "psec" },
+    h("h4", null, "GitHub token for private plugin repositories"),
+    stateLine, keyWarn, form,
+    h("div", { class: "sub" }, "Optional. Use a read-only token: fine-grained, with access to the plugin repositories only and Contents: read-only. Write-only: the broker stores it encrypted under BROKER_SECRETS_KEY and never shows it again. It is sent to the installer only for clones of github.com repositories on the installer's allowlist."));
+}
+
+// ---- the dialogs.
+$("addPluginBtn").onclick = () => openAddPlugin({});
+async function openAddPlugin(prefill) {
+  let st = null;
+  try { st = await api("/v1/admin/plugins/install/status"); state.installer.status = st; }
+  catch (e) { if (e instanceof AuthLost) return; }
+  if (!st || !st.configured) { openInstallerOff(st); return; }
+  const upgrading = Boolean(prefill.service);
+  const source = h("input", { name: "source", required: true, maxlength: "300", spellcheck: "false",
+                              placeholder: "github.com/you/aab-plugin-name" });
+  const ref = h("input", { name: "ref", required: true, maxlength: "64", spellcheck: "false", placeholder: "v0.1.0" });
+  if (prefill.source) source.value = prefill.source;
+  if (prefill.ref) ref.value = prefill.ref;
+  // An upgrade comes from the repository it was installed from.
+  if (upgrading) source.readOnly = true;
+  const form = h("form", { class: "grid", autocomplete: "off" },
+    h("label", { class: "wide" }, "Repository", source),
+    h("label", null, upgrading ? "New release tag or commit" : "Release tag or commit", ref),
+    h("div", { class: "formhelp" }, st.allowlist_hint || ""),
+    st.reachable ? null : h("div", { class: "warnbox wide" }, "The installer is not answering: " + (st.error || "unknown error") + ". Inspect fails until it does."));
+  form.onsubmit = (e) => e.preventDefault();
+  // The token has its own small form beside this one, so Enter in either
+  // field does what that field's button says.
+  const body = h("div", null, form, gitTokenSection(st));
+  const title = upgrading ? `Upgrade ${prefill.service}` : "Add a plugin";
+  const formButtons = [
+    { label: "Cancel", cls: "ghost", onClick: (m) => m.close() },
+    { label: "Inspect", cls: "primary", onClick: (m, btn) => inspectPackage(m, btn, f) },
+  ];
+  const f = { source, ref, prefill, body, title, formButtons };
+  openModal({ title, body, wide: true, sticky: true, buttons: formButtons });
+}
+async function inspectPackage(m, btn, f) {
+  m.setError("");
+  const source = f.source.value.trim(), ref = f.ref.value.trim();
+  if (!source || !ref) { m.setError("Give the repository and a release tag (v1.2.3) or a full commit."); return; }
+  let r;
+  try { r = await withBusy(btn, () => api("/v1/admin/plugins/install/inspect", { method: "POST", body: { source, ref } })); }
+  catch (e) { if (!(e instanceof AuthLost)) m.setError(errText(e)); return; }
+  const upgrading = Boolean(f.prefill.service);
+  const problems = listOf(r.problems).slice();
+  if (upgrading && r.service !== f.prefill.service) problems.push(`this package is service ${r.service}, not ${f.prefill.service}`);
+  if (upgrading && !r.upgrade) problems.push(`${f.prefill.service} is not installed`);
+  if (!upgrading && r.upgrade) problems.push(`${r.service} is already installed: use Upgrade on its card`);
+  m.setTitle(upgrading ? `Review: upgrade ${r.service} to ${r.ref}` : `Review: ${r.source}@${r.ref}`);
+  m.setBody(inspectReview(r, problems));
+  const back = { label: "Back", cls: "ghost", onClick: (mm) => { mm.setError(""); mm.setTitle(f.title); mm.setBody(f.body); mm.setButtons(f.formButtons); } };
+  const go = { label: upgrading ? "Upgrade" : "Install", cls: "primary", onClick: (mm, b) => submitInstall(mm, b, r, upgrading) };
+  m.setButtons(problems.length ? [back] : [back, go]);
+}
+async function submitInstall(m, btn, r, upgrading) {
+  m.setError("");
+  const body = { source: r.source, ref: r.ref, commit: r.commit };
+  let out;
+  try {
+    out = await withBusy(btn, () => (upgrading
+      ? api(`/v1/admin/plugins/${enc(r.service)}/upgrade`, { method: "POST", body })
+      : api("/v1/admin/plugins/install", { method: "POST", body })));
+  } catch (e) { if (!(e instanceof AuthLost)) m.setError(errText(e)); return; }
+  m.close();
+  startJob(out.job, upgrading ? `Upgrading ${r.service} to ${r.ref}` : `Installing ${r.source}@${r.ref}`);
+  toast(upgrading ? "Pinned. The installer is upgrading the service." : "Pinned. The installer is building the service.", "info");
+}
+// The installer is opt-in and root on the host: it is turned on in the host's
+// files, never from here. Say exactly which lines and which command.
+function openInstallerOff(st) {
+  const lines = st && listOf(st.enable_lines).length ? listOf(st.enable_lines)
+    : ["INSTALLER_ENABLED=true", "INSTALLER_ALLOWED_SOURCES=github.com/<you>/*"];
+  const cmd = (st && st.manual_command) || "docker compose $(scripts/compose-files.sh) up -d";
+  openModal({
+    title: "The plugin installer is off", wide: true,
+    body: h("div", null,
+      h("p", { class: "hint" }, "Installing a plugin from its repository needs aab-installer, an opt-in container that holds the Docker socket (it is root on the host). So it is turned on in the host's files, never from this console."),
+      h("p", null, "1. In the .env next to docker-compose.yml on the host, set:"),
+      h("pre", { class: "cmdbox" }, lines.join("\n")),
+      h("p", null, "2. Once per host, log Docker in to the registry that serves the plugin base image and pull it, because the installer has no registry credentials of its own: docker login ghcr.io (a token with read:packages), then docker pull ghcr.io/pelegw/aab-plugin-base:<version>."),
+      h("p", null, "3. Load the installer's compose overlay and recreate the broker, from the checkout:"),
+      h("pre", { class: "cmdbox" }, cmd),
+      h("p", { class: "hint" }, "Then come back here and choose + Add plugin. The steps, and how to install a plugin by hand without the installer, are in docs/deployment.md and docs/plugin-packaging.md."),
+      h("p", { class: "sub" }, "Private plugin repositories need a read-only GitHub token. It is not a line in .env: once the installer is on, set it in the + Add plugin dialog, where the broker stores it encrypted."),
+      st && st.error ? h("div", { class: "sub" }, "Broker says: " + st.error) : null),
+    buttons: [{ label: "Close", cls: "primary", onClick: (m) => m.close() }],
+  });
+}
+function openRemovePlugin(r) {
+  const purge = h("input", { type: "checkbox" });
+  const plugins = listOf(r.plugins);
+  openModal({
+    title: `Remove ${r.service}?`,
+    body: h("div", null,
+      h("p", { class: "hint" }, `Stops and deletes plugin-${r.service} (installed from ${r.source}@${r.ref}) and unpins what it hosts (${plugins.join(", ") || "nothing"}): agents get 404 for it at once, and its plugin rows stay disabled.`),
+      h("label", { class: "chk" }, purge, "Also delete its data: its volumes and its two .env secrets. This cannot be undone."),
+      h("p", { class: "sub" }, "Without this, the volumes and secrets are kept, so installing it again finds its data.")),
+    buttons: [
+      { label: "Cancel", cls: "ghost", onClick: (m) => m.close() },
+      { label: "Remove", cls: "red", onClick: async (m, btn) => {
+        m.setError("");
+        let out;
+        try { out = await withBusy(btn, () => api(`/v1/admin/plugins/${enc(r.service)}/remove`, { method: "POST", body: { purge: purge.checked } })); }
+        catch (e) { if (!(e instanceof AuthLost)) m.setError(errText(e)); return; }
+        m.close();
+        startJob(out.job, `Removing ${r.service}` + (purge.checked ? " and its data" : ""));
+        refreshPlugins().catch(showErr);
+      } },
+    ],
+  });
+}
+
+// ---- the job panel: polls every 2 s, through the broker's restart.
+function stopJob() {
+  if (jobRun) { jobRun.stopped = true; clearTimeout(jobRun.timer); }
+  jobRun = null;
+  $("pluginJob").replaceChildren();
+}
+function startJob(job, what) {
+  stopJob();
+  if (!job || typeof job.id !== "string") { toast("The installer accepted the request but returned no job.", "err"); return; }
+  const run = { id: job.id, what, last: job, stopped: false, timer: null, misses: 0, restarting: false, error: null };
+  jobRun = run;
+  paintJob(run);
+  run.timer = setTimeout(() => pollJob(run), JOB_POLL_MS);
+}
+async function pollJob(run) {
+  if (run.stopped) return;
+  try {
+    run.last = await api(`/v1/admin/plugins/install/jobs/${enc(run.id)}`);
+    run.restarting = false;
+    run.misses = 0;
+  } catch (e) {
+    if (e instanceof AuthLost) { run.stopped = true; return; }
+    if (!RESTART_STATUSES.includes(e.status)) {
+      run.stopped = true;
+      run.error = errText(e);
+      paintJob(run);
+      return;
+    }
+    // Install and upgrade recreate the broker with its new environment:
+    // until it is back, calls fail. Keep asking; the job runs on regardless.
+    run.restarting = true;
+    run.misses += 1;
+    if (run.misses > JOB_MAX_MISSES) {
+      run.stopped = true;
+      run.error = "The broker has not answered for five minutes. The job keeps running in the installer: reload this page later to see how it ended.";
+    } else {
+      run.timer = setTimeout(() => pollJob(run), JOB_POLL_MS);
+    }
+    paintJob(run);
+    return;
+  }
+  const st = run.last && run.last.state;
+  if (st === "done" || st === "failed") run.stopped = true;
+  paintJob(run);
+  if (run.stopped) { jobFinished(run); return; }
+  run.timer = setTimeout(() => pollJob(run), JOB_POLL_MS);
+}
+function paintJob(run) {
+  if (jobRun !== run) return;
+  const j = objectOr(run.last);
+  const log = listOf(j.log);
+  const head = h("div", { class: "subhead" }, h("h3", null, run.what), badge(j.state || "queued", JOB_STATE_KIND[j.state] || ""));
+  if (run.stopped) {
+    const close = h("button", { type: "button", class: "ghost" }, "Close");
+    close.onclick = () => stopJob();
+    head.append(close);
+  }
+  const meta = [`job ${run.id}`];
+  if (j.service) meta.push("service " + j.service);
+  if (j.commit) meta.push("commit " + shortCommit(j.commit));
+  $("pluginJob").replaceChildren(h("div", { class: "card" }, head,
+    h("div", { class: "sub" }, meta.join(" · ")),
+    run.restarting ? h("div", { class: "hint jobline" }, "The broker is being recreated with its new settings: waiting for it to answer (attempt " + run.misses + ")...") : null,
+    j.error ? h("div", { class: "formerr" }, "Failed: " + j.error) : null,
+    run.error ? h("div", { class: "formerr" }, run.error) : null,
+    log.length ? h("pre", { class: "joblog" }, log.join("\n") + (j.log_truncated ? "\n(lines in the middle were dropped)" : ""))
+      : h("div", { class: "hint jobline" }, "Waiting for the installer to start the job...")));
+}
+async function jobFinished(run) {
+  const j = objectOr(run.last);
+  if (j.state === "done") {
+    toast(j.kind === "remove" ? `${j.service} removed.`
+      : `${j.service || "The plugin"} ${j.kind === "upgrade" ? "upgraded" : "installed"}. If its card is not there yet, the broker finds it within 30 seconds: refresh. Enable it when you are ready.`);
+  } else {
+    toast(`The ${j.kind || "job"} failed: ${j.error || "see its log"}`, "err");
+  }
+  if (!$("app").hidden && currentView() === "plugins") {
+    try { await refreshPlugins(); } catch (e) { showErr(e); }
+  }
 }
 
 // ---- config form, rendered from the manifest's config_schema.
@@ -3320,7 +3816,7 @@ $("settingsForm").onsubmit = async (e) => {
     toast(`Saved: ${names.join(", ")}.`);
   } catch (err) { showErr(err); }
 };
-const ENV_KIND = { bootstrap: "accent", exposure: "warn", deployment: "", compose: "", ops: "" };
+const ENV_KIND = { bootstrap: "accent", exposure: "warn", installer: "warn", deployment: "", compose: "", ops: "" };
 function envValue(v) {
   if (v === null || v === undefined || v === "") return h("span", { class: "sub" }, "not set");
   if (typeof v === "boolean") return badge(String(v), v ? "accent" : "");

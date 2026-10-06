@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Installed external plugins: owned by aab-installer on the host, never committed.
+plugins.d/
+
 # Databases / session credentials
 *.db
 *.db-wal

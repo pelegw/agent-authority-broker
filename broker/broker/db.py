@@ -116,6 +116,23 @@ CREATE TABLE IF NOT EXISTS plugins (
     updated_at  INTEGER NOT NULL
 );
 
+-- Owner-approved manifests for plugins NOT vendored in the broker tree (an
+-- external plugin installed from its own repository). The registry pins an
+-- offered manifest against the in-tree copy first and against this table
+-- second, and then uses the stored copy, never the plugin's: a container can
+-- never widen its own lattice. Written only by an owner action (plugin.pin,
+-- audited); plugins/pins.py is the only module that touches it.
+CREATE TABLE IF NOT EXISTS plugin_pins (
+    plugin_id     TEXT PRIMARY KEY,           -- manifest id: ^[a-z][a-z0-9]*$
+    version       TEXT NOT NULL,              -- the pinned manifest's version
+    manifest_yaml TEXT NOT NULL,              -- the approved manifest, as validated
+    source        TEXT NOT NULL DEFAULT '',   -- where it came from, e.g. github.com/o/r ('' = offered by a running service)
+    ref           TEXT NOT NULL DEFAULT '',   -- the tag or commit asked for
+    commit_sha    TEXT NOT NULL DEFAULT '',   -- the resolved commit (COMMIT is an SQL keyword)
+    pinned_at     INTEGER NOT NULL,
+    pinned_by     TEXT NOT NULL               -- the owner's username
+);
+
 -- Broker-side secrets the owner enters in the console and the broker itself
 -- uses, e.g. the Telegram bot token (slot 'broker', name 'telegram_bot_token').
 -- Read and written only through crypto.py, Fernet under BROKER_SECRETS_KEY.
@@ -255,7 +272,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
 TABLES = (
     "principals", "sessions", "admin_tokens", "api_keys", "grants", "plugins",
     "plugin_secrets", "hidden_resources", "actions", "decisions",
-    "capacity_ledger", "ledger_grants", "audit_log", "app_config",
+    "capacity_ledger", "ledger_grants", "audit_log", "app_config", "plugin_pins",
 )
 
 

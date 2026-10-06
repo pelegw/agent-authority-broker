@@ -7,8 +7,12 @@ inline handlers (agent-written text must never become markup), every API
 path it calls exists, every vocabulary word it must render (config field
 types, narrowing forms, connection kinds, roles, setting types) is covered,
 the key dialogs present the role as a ceiling (label, help line, default
-`full`, and an effective-mode table equal to roles.role_caps), and the
-Telegram bot token field is write-only. Plus the manifest projection the
+`full`, and an effective-mode table equal to roles.role_caps), the
+Telegram bot token field is write-only, and the Plugins view's + Add plugin
+flow (installer off or on, the review card rendered from the broker's real
+review, a job panel that polls through the broker's restart, the offered
+card, the write-only GitHub token for private repositories). Where node
+exists, the whole script must parse. Plus the manifest projection the
 console's editors are generated from.
 """
 
@@ -444,7 +448,14 @@ def test_every_api_path_in_the_page_exists(env, html):
                  "/v1/admin/telegram/enable", "/v1/admin/telegram/disable",
                  "/v1/admin/telegram/test", "/v1/admin/telegram/unlink",
                  "/v1/admin/settings", "/v1/admin/keys/tree",
-                 "/v1/admin/plugins/{x}/connect/finish", "/v1/admin/grants/{x}/revoke"):
+                 "/v1/admin/plugins/{x}/connect/finish", "/v1/admin/grants/{x}/revoke",
+                 # + Add plugin, the job panel, installed provenance, the offered card
+                 "/v1/admin/plugins/install/status", "/v1/admin/plugins/install/inspect",
+                 "/v1/admin/plugins/install/git-token",
+                 "/v1/admin/plugins/install", "/v1/admin/plugins/install/jobs/{x}",
+                 "/v1/admin/plugins/installed", "/v1/admin/plugins/{x}/upgrade",
+                 "/v1/admin/plugins/{x}/remove", "/v1/admin/plugins/offered",
+                 "/v1/admin/plugins/{x}/pin"):
         assert must in used, must
     missing = sorted(p for p in used if not any(_segments_match(p, s) for s in served))
     assert not missing, missing
@@ -514,3 +525,255 @@ def test_console_groups_plugins_by_shared_slot(html):
     script = _script(html)
     assert "function slotOf(p) { return (p && p.connection && p.connection.shared) || null; }" in script
     assert "schema.filter((f) => f.shared)" in script and "schema.filter((f) => !f.shared)" in script
+
+
+# ---- external plugins: + Add plugin, the job panel, the offered card -----------------
+
+def _section(html: str, view: str) -> str:
+    return re.search(rf'<section class="view" data-view="{view}".*?</section>', html, re.S).group(0)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to parse the page's JS")
+def test_the_script_parses(html, tmp_path):
+    js = tmp_path / "console.js"
+    js.write_text(_script(html), encoding="utf-8")
+    r = subprocess.run(["node", "--check", str(js)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+
+
+def test_plugins_view_has_add_plugin_in_its_header_and_the_new_panels(html):
+    sec = _section(html, "plugins")
+    assert ('<div class="viewhead"><h2>Plugins</h2><button class="primary" type="button" '
+            'id="addPluginBtn">+ Add plugin</button></div>') in sec
+    for panel in ("pluginJob", "pluginList", "pluginInstalled", "pluginOffered"):
+        assert f'<div id="{panel}"></div>' in sec, panel
+    script = _script(html)
+    assert '$("addPluginBtn").onclick = () => openAddPlugin({});' in script
+
+
+def test_the_refused_card_became_offered_awaiting_review(html):
+    script = _script(html)
+    assert "Refused plugins" not in html and "pluginRefused" not in html
+    assert 'h("h3", null, "Offered, awaiting review")' in script
+    # A pin button only where a pin would fix it; the reason otherwise.
+    assert 'if (it.pinnable) {' in script and '"Review and pin"' in script
+    assert "const why = it.pinnable ? it.reason : (it.blocked || it.error || it.reason);" in script
+
+
+def test_installed_plugins_show_where_they_came_from_with_upgrade_and_remove(html):
+    script = _script(html)
+    assert 'h("div", { class: "installedfrom" }, "installed from ",' in script
+    assert 'h("span", { class: "mono" }, `${r.source}@${r.ref}`)' in script
+    assert ('up.onclick = () => openAddPlugin({ service: r.service, source: r.source, '
+            'ref: r.ref });') in script
+    assert "rm.onclick = () => openRemovePlugin(r);" in script
+    # Remove asks, and keeps the data unless the owner ticks purge.
+    assert "body: { purge: purge.checked }" in script
+
+
+def test_installer_off_explains_the_env_lines_and_the_command(html):
+    """When the installer is off, the dialog shows the .env lines and the
+    command instead of Inspect; its fallbacks match the broker's."""
+    from broker.services import plugin_install
+    script = _script(html)
+    assert "if (!st || !st.configured) { openInstallerOff(st); return; }" in script
+    assert f'"{plugin_install.MANUAL_COMMAND}"' in script
+    assert '"INSTALLER_ENABLED=true"' in script and plugin_install.ENABLE_LINES[0] == (
+        "INSTALLER_ENABLED=true")
+    assert "docker login ghcr.io" in script
+
+
+def test_install_goes_through_inspect_and_sends_only_the_reviewed_commit(html):
+    script = _script(html)
+    assert 'api("/v1/admin/plugins/install/inspect", { method: "POST", body: { source, ref } })' \
+        in script
+    assert "const body = { source: r.source, ref: r.ref, commit: r.commit };" in script
+    # Problems (invalid or blocked manifests) leave no Install button.
+    assert "m.setButtons(problems.length ? [back] : [back, go]);" in script
+
+
+def test_the_job_panel_polls_every_two_seconds_through_the_brokers_restart(html):
+    script = _script(html)
+    assert "const JOB_POLL_MS = 2000;" in script
+    # No connection, or the edge saying nothing answers: keep polling.
+    assert "const RESTART_STATUSES = [0, 502, 503, 504];" in script
+    assert "if (!RESTART_STATUSES.includes(e.status)) {" in script
+    assert "run.restarting = true;" in script and "The broker is being recreated" in script
+    assert 'if (st === "done" || st === "failed") run.stopped = true;' in script
+    assert "const log = listOf(j.log);" in script and 'h("pre", { class: "joblog" }' in script
+    assert script.count("setTimeout(() => pollJob(run), JOB_POLL_MS)") == 3
+    # Signing out stops it.
+    show_gate = re.search(r"function showGate\(which, msg\) \{(.*?)\n\}", script, re.S).group(1)
+    assert "stopJob();" in show_gate
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run the page's JS")
+def test_the_review_card_renders_the_brokers_review(html, tmp_path):
+    """Run the page's own review functions under node, with a minimal DOM,
+    on what the broker really returns (pins.summary / pins.diff of the echo
+    manifest and an upgrade of it): no exception, and the facts an owner
+    approves are all on the card."""
+    import yaml
+
+    from broker.plugins import pins
+    from broker.plugins.manifest import load_manifest_text
+
+    old = load_manifest(ECHO_DIR / "manifest.yaml")
+    data = yaml.safe_load((ECHO_DIR / "manifest.yaml").read_text(encoding="utf-8"))
+    data["version"] = "0.2.0"
+    data["actions"].append({"name": "purge_room", "side_effect": "destructive"})
+    data["config_schema"].append({"name": "webhook_key", "type": "string", "secret": True})
+    new = load_manifest_text(yaml.safe_dump(data, sort_keys=False))
+    desc = {"service": "echo", "plugins": ["echo"], "runtime": "0.3",
+            "build": {"dockerfile": "Dockerfile"}, "volumes": {"echo_data": "/data"},
+            "environment": {"ECHO_DB": "/data/echo.db"}, "env_passthrough": ["TZ"]}
+    review = {"source": "github.com/acme/aab-plugin-echo", "ref": "v0.2.0", "commit": "b" * 40,
+              "service": "echo", "descriptor": desc, "upgrade": True,
+              "installed": {"ref": "v0.1.0", "commit": "a" * 40},
+              "plugins": [{"id": "echo", "version": "0.2.0", "valid": True, "error": None,
+                           "summary": pins.summary(new), "diff": pins.diff(old, new),
+                           "pinned": {"version": "0.1.0"}, "blocked": None},
+                          {"id": "evil", "version": "1.0.0", "valid": False,
+                           "error": "actions: too short", "summary": None, "diff": None,
+                           "pinned": None, "blocked": None}],
+              "problems": ["evil: actions: too short"]}
+    script = _script(html)
+    names = ("showControls", "isSafeUrl", "badge", "fact", "idChips", "listOf", "shortCommit",
+             "objectOr", "objectsOf", "chipsOr", "reviewPlugin", "changeList", "diffView",
+             "packageReview", "inspectReview", "h")
+    parts = [re.search(r"const BIDI_CONTROLS = [^\n]*\n", script).group(0),
+             re.search(r"const hasOwn = [^\n]*\n", script).group(0)]
+    parts += [re.search(rf"^function {n}\(.*?^\}}\n", script, re.S | re.M).group(0)
+              for n in names]
+    dom = """
+class Node { constructor() { this.children = []; } append(...k) { this.children.push(...k); }
+  get childElementCount() { return this.children.filter((c) => c instanceof El).length; } }
+class Text extends Node { constructor(t) { super(); this.text = t; } }
+class El extends Node { constructor(tag) { super(); this.tag = tag; this.attrs = {}; }
+  setAttribute(k, v) { this.attrs[k] = v; } set textContent(t) { this.children = [new Text(t)]; } }
+const document = { createElement: (t) => new El(t), createTextNode: (t) => new Text(t) };
+const location = { href: "http://console.invalid/", origin: "http://console.invalid" };
+const text = (n) => (n instanceof Text ? n.text : n.children.map(text).join(" "));
+"""
+    js = tmp_path / "review.js"
+    js.write_text(dom + "\n".join(parts) + f"\nconst r = {json.dumps(review)};\n"
+                  "console.log(text(inspectReview(r, r.problems)));\n", encoding="utf-8")
+    out = subprocess.run(["node", str(js)], capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    card = " ".join(out.stdout.split())
+    for want in ("github.com/acme/aab-plugin-echo@v0.2.0", "b" * 40, "plugin-echo", "net_echo",
+                 "an upgrade of echo from v0.1.0", "Cannot go ahead: evil: actions: too short",
+                 "post_item write modes: direct, draft", "delete_item destructive",
+                 "api_secret secret", "What changes from the pinned v0.1.0 to v0.2.0",
+                 "added purge_room", "New secrets webhook_key", "echo_secrets at /secrets",
+                 "echo_data at /data", "ECHO_DB=/data/echo.db", "From the host's .env TZ",
+                 "invalid actions: too short"):
+        assert want in card, want
+
+
+# ---- the GitHub token for private repositories: write-only --------------------------
+
+def _function(script: str, name: str) -> str:
+    return re.search(rf"^(?:async )?function {name}\(.*?^\}}\n", script, re.S | re.M).group(0)
+
+
+def test_the_git_token_field_is_write_only(html):
+    script = _script(html)
+    fn = _function(script, "gitTokenSection")
+    # A password field with no autofill, in its own small form inside the dialog.
+    assert re.search(r'const input = h\("input", \{ type: "password", '
+                     r'autocomplete: "new-password",', fn)
+    assert 'h("form", { class: "secretrow", autocomplete: "off" }, input, set, clear)' in fn
+    # The only writes to the field empty it, and the submit handler does so
+    # before it sends anything.
+    writes = re.findall(r"\binput\.value\s*=(?!=)\s*([^;]+);", fn)
+    assert writes == ['""']
+    assert not re.search(r"input[^;\n]*setAttribute", fn)
+    handler = re.search(r"form\.onsubmit = async \(e\) => \{(.*?)\n  \};", fn, re.S).group(1)
+    assert handler.index('input.value = "";') < handler.index("api(")
+    assert ('api("/v1/admin/plugins/install/git-token", { method: "POST", '
+            'body: { token: value } })') in handler
+    assert 'api("/v1/admin/plugins/install/git-token", { method: "DELETE" })' in fn
+    # The broker answers with a state word; code only ever compares it.
+    uses = re.findall(r"\.git_token\b(.{0,6})", _strip_comments(script))
+    assert uses and all(re.match(r'\s*[!=]==\s*"', u) for u in uses), uses
+    # The help line says what the owner is trusting it with.
+    for words in ("read-only", "stores it encrypted", "never shows it again",
+                  "installer's allowlist"):
+        assert words in fn, words
+
+
+def test_the_add_plugin_dialog_carries_the_git_token_section(html):
+    script = _script(html)
+    opener = _function(script, "openAddPlugin")
+    assert "const body = h(\"div\", null, form, gitTokenSection(st));" in opener
+    assert "openModal({ title, body, wide: true, sticky: true, buttons: formButtons });" in opener
+    # Back from the review restores the form and the token section together.
+    assert "mm.setBody(f.body);" in _function(script, "inspectPackage")
+    # The installer-off dialog says where the token goes instead of .env.
+    assert "It is not a line in .env" in _function(script, "openInstallerOff")
+    assert "INSTALLER_GIT_TOKEN" not in html
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run the page's JS")
+def test_the_git_token_section_shows_each_state_and_the_brokers_shape_rule(html, tmp_path):
+    """Run the page's own section under node with a minimal DOM for each
+    state the broker reports, and its shape check against the broker's."""
+    from broker.services.install_git_token import TOKEN_RE
+
+    script = _script(html)
+    parts = [re.search(r"const BIDI_CONTROLS = [^\n]*\n", script).group(0),
+             re.search(r"const GIT_TOKEN_SHAPE = [^\n]*\n", script).group(0)]
+    parts += [_function(script, n) for n in ("showControls", "isSafeUrl", "badge", "h",
+                                              "gitTokenSection")]
+    states = [{"git_token": "unset", "secrets_key_configured": True},
+              {"git_token": "set", "secrets_key_configured": True},
+              {"git_token": "unreadable", "secrets_key_configured": True},
+              {"git_token": "unset", "secrets_key_configured": False}]
+    samples = ["x" * 20, "x" * 19, "x" * 255, "x" * 256, "has space 0123456789abcdef",
+               "tab\t0123456789abcdefghij", "é" + "x" * 20, "x" * 20 + "\n",
+               "$(a)`b`'\";|&<>*?%s\\{}[]!#~0123"]
+    dom = """
+class Node { constructor() { this.children = []; } append(...k) { this.children.push(...k); }
+  replaceChildren(...k) { this.children = k.map((c) => (typeof c === "string" ? new Text(c) : c)); } }
+class Text extends Node { constructor(t) { super(); this.text = t; } }
+class El extends Node { constructor(tag) { super(); this.tag = tag; this.attrs = {}; }
+  setAttribute(k, v) { this.attrs[k] = v; } set textContent(t) { this.children = [new Text(t)]; } }
+const document = { createElement: (t) => new El(t), createTextNode: (t) => new Text(t) };
+const location = { href: "http://console.invalid/", origin: "http://console.invalid" };
+const text = (n) => (n instanceof Text ? n.text : n.children.map(text).join(" "));
+const all = (n, pred, out = []) => { if (n instanceof El && pred(n)) out.push(n);
+  for (const c of n.children) all(c, pred, out); return out; };
+"""
+    run = f"""
+const out = [];
+for (const st of {json.dumps(states)}) {{
+  const sec = gitTokenSection(st);
+  const [set, clear] = all(sec, (n) => n.tag === "button");
+  const [warn] = all(sec, (n) => n.className === "warnbox");
+  const [input] = all(sec, (n) => n.tag === "input");
+  out.push({{ text: text(sec), set: text(set), setDisabled: Boolean(set.disabled),
+             clearHidden: Boolean(clear.hidden), warnHidden: Boolean(warn.hidden),
+             type: input.attrs.type, value: input.value === undefined ? null : input.value }});
+}}
+out.push({json.dumps(samples)}.map((s) => GIT_TOKEN_SHAPE.test(s)));
+console.log(JSON.stringify(out));
+"""
+    js = tmp_path / "gittoken.js"
+    js.write_text(dom + "\n".join(parts) + run, encoding="utf-8")
+    proc = subprocess.run(["node", str(js)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    *views, shapes = json.loads(proc.stdout)
+    unset, stored, unreadable, nokey = views
+    assert "not set" in unset["text"] and unset["set"] == "Set" and unset["clearHidden"]
+    assert stored["text"].startswith("GitHub token for private plugin repositories set")
+    assert stored["set"] == "Replace" and not stored["clearHidden"]
+    assert "re-enter required" in unreadable["text"] and "BROKER_SECRETS_KEY changed" in (
+        unreadable["text"])
+    assert unreadable["set"] == "Replace" and not unreadable["clearHidden"]
+    for v in (unset, stored, unreadable):
+        assert v["warnHidden"] and not v["setDisabled"]
+    assert nokey["setDisabled"] and not nokey["warnHidden"]
+    assert all(v["type"] == "password" and v["value"] is None for v in views)
+    # The page refuses exactly what the broker refuses.
+    assert shapes == [bool(TOKEN_RE.fullmatch(s)) for s in samples]

@@ -1,9 +1,10 @@
-"""Owner routes for plugins: list, config, enable/disable, health, connect.
+"""Owner routes for plugins: list, config, enable/disable, health, connect, pins.
 
 Guarded router-wide by `require_admin` like every admin router (a test walks
 the route table). `{plugin}` in the connect routes accepts a plugin id or a
 service name, because one consent (Google) covers every plugin a service
-hosts.
+hosts. The pin routes approve (or withdraw) the manifest of a plugin that is
+not vendored in the broker tree; `offered` lists what awaits that review.
 """
 
 from fastapi import APIRouter, Depends, Request
@@ -31,6 +32,23 @@ class FinishBody(BaseModel):
 @router.get("/v1/admin/plugins")
 def list_plugins() -> dict:
     return plugins_admin.list_plugins()
+
+
+# Declared before /v1/admin/plugins/{plugin}: routes match in order, and
+# `offered` is a reserved word no plugin id may take (plugins_admin.RESERVED_IDS).
+@router.get("/v1/admin/plugins/offered")
+def offered() -> dict:
+    return plugins_admin.offered()
+
+
+@router.post("/v1/admin/plugins/{plugin}/pin")
+def pin(plugin: str, ctx: AdminContext = Depends(require_admin)) -> dict:
+    return plugins_admin.pin(ctx, plugin)
+
+
+@router.delete("/v1/admin/plugins/{plugin}/pin")
+def unpin(plugin: str, ctx: AdminContext = Depends(require_admin)) -> dict:
+    return plugins_admin.unpin(ctx, plugin)
 
 
 @router.get("/v1/admin/plugins/{plugin}")

@@ -188,6 +188,9 @@ Everything else is configured in the console:
 
 - **The Telegram bot token** (Channels > Telegram), stored in `broker.db`
   encrypted under `BROKER_SECRETS_KEY`, write-only.
+- **The installer's read-only GitHub token** for private plugin repositories
+  (Plugins > + Add plugin), stored the same way and sent to the installer
+  only with the inspect, install or upgrade request that clones.
 - **Every plugin credential**: the GitHub App id, slug and private key (or
   the PAT fallback), and the Google OAuth client id and secret (one shared
   Google account card for Gmail, Calendar and Drive). Secret fields are
@@ -321,7 +324,24 @@ application covers the admin plane: `/admin*`, `/auth*`, `/v1/admin*` and
 `/oauth*` (the OAuth callback page). Agent paths are not behind Access;
 agents authenticate with their key. The broker refuses to boot in public
 mode without Access. Step-by-step runbook (EC2 and Cloudflare):
-[deploy/DEPLOY.md](deploy/DEPLOY.md).
+[deploy/DEPLOY.md](deploy/DEPLOY.md). On a host, `docker compose
+$(scripts/compose-files.sh) ...` picks the compose files from `.env` (the
+public overlay once `SITE_DOMAIN` is set, the installer and installed
+plugins when enabled); `deploy/push.sh` uses it.
+
+## External plugins
+
+A plugin can also live in its own repository and be installed from the
+console: Plugins, **+ Add plugin**, `github.com/you/aab-plugin-x` at a release
+tag, review what it can do, Install. The owner pins (approves) its manifest
+before anything is built, exactly as for the plugins shipped here. The
+installer is an opt-in container that holds the Docker socket (root on the
+host), reachable only from the broker, cloning only repositories listed in
+`INSTALLER_ALLOWED_SOURCES`, and rendering each plugin's compose service
+from a small descriptor through a fixed template. Plugin authors build on
+`ghcr.io/pelegw/aab-plugin-base`. See
+[docs/plugin-packaging.md](docs/plugin-packaging.md) and, to turn it on,
+[docs/deployment.md](docs/deployment.md).
 
 ## Development
 
@@ -334,6 +354,7 @@ python -m venv .venv
 
 # plugin runtime and each plugin service (from the repo root)
 pip install -e "plugin-runtime[dev]"                     && (cd plugin-runtime && python -m pytest)
+pip install -e "installer[dev]"                          && (cd installer && python -m pytest)
 pip install -e plugin-runtime -e "plugins/whatsapp[dev]" && (cd plugins/whatsapp && python -m pytest)
 pip install -e plugin-runtime -e "plugins/google[dev]"   && (cd plugins/google && python -m pytest)
 pip install -e plugin-runtime -e "plugins/github[dev]"   && (cd plugins/github && python -m pytest)

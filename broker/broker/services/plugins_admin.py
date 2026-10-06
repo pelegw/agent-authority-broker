@@ -16,6 +16,13 @@ callback/<service>` (SITE_DOMAIN is a fail-closed exposure setting; a
 missing one refuses the connect). Local mode: `http://<request host>/oauth/
 callback/<service>`. The plugin stores it beside its state nonce and reuses
 it for the code exchange.
+
+Pins (plugins/pins.py): a plugin not vendored in the broker tree is
+registered only once the owner pins its manifest. `offered()` lists every
+refused offer with its review card; `pin()` approves what a running service
+offers, `pin_manifest()` approves a manifest text directly (the install flow
+pins before the service exists), `unpin()` withdraws the approval and the
+plugin with it. In-tree ids can never be pinned here: the tree wins.
 """
 
 from __future__ import annotations
@@ -24,12 +31,15 @@ import logging
 import os
 import re
 
+import yaml
+
 from ..audit import audit
 from ..config import get_settings
 from ..errors import PolicyError
 from ..logging_setup import kv
-from ..plugins import manifest_view, settings
+from ..plugins import manifest_view, pins, settings
 from ..plugins.adapter import AdapterError
+from ..plugins.manifest import ID_RE, Manifest, ManifestError, load_manifest_text
 from ..plugins.registry import get_registry, plugin_rows
 
 log = logging.getLogger(__name__)
@@ -291,3 +301,145 @@ def resolve(ctx, plugin_id: str, kind: str, query: str, limit: int = 20) -> list
         return e.adapter.resolve(kind, query, max(1, min(limit, 50)))
     except AdapterError as exc:
         raise _relay_error(exc) from exc
+
+
+# ---- pins: the owner approves an external plugin's manifest -------------------------
+
+# Words the admin routes use right after /v1/admin/plugins/. A plugin with one
+# of these ids would have its GET view shadowed by the route, so none can be
+# pinned (and an id nobody can pin is never registered).
+RESERVED_IDS = frozenset({"offered", "installed", "install"})
+
+
+def _blocker(plugin_id: str, service: str | None) -> str | None:
+    """Why `plugin_id` cannot be pinned (from `service`), or None."""
+    reg = get_registry()
+    if not isinstance(plugin_id, str) or not ID_RE.match(plugin_id):
+        return "not a valid plugin id"
+    if plugin_id in RESERVED_IDS:
+        return f"{plugin_id!r} is a reserved word in the admin routes"
+    try:
+        in_tree = reg.in_tree(plugin_id) is not None
+    except ManifestError:
+        in_tree = True                     # an invalid in-tree file still owns the id
+    if in_tree:
+        # The tree wins over any row, so a pin here would never apply.
+        return "this plugin ships with the broker; it is pinned by the broker's own tree"
+    entry = reg.entries().get(plugin_id)
+    if service is not None and entry is not None and entry.service != service:
+        return f"plugin id already served by {entry.service!r}"
+    return None
+
+
+def pin_blocker(plugin_id: str, service: str | None = None) -> str | None:
+    """Why `plugin_id` (hosted by `service`) cannot be pinned, or None. The
+    install flow checks every id of a package with it before pinning any."""
+    return _blocker(plugin_id, service)
+
+
+def _offered_manifest(plugin_id: str, offer: dict) -> tuple[str, Manifest]:
+    """The offered manifest as YAML text plus its validated form. The text
+    is what is stored and what the broker then uses, never the raw offer."""
+    raw = offer.get("manifest")
+    if not isinstance(raw, dict):
+        raise ManifestError("the offered manifest is not an object")
+    text = yaml.safe_dump(raw, sort_keys=False, allow_unicode=True)
+    m = load_manifest_text(text)
+    if m.id != plugin_id:
+        raise ManifestError(f"manifest declares id {m.id!r}, not {plugin_id!r}")
+    return text, m
+
+
+def _current_pin(plugin_id: str) -> Manifest | None:
+    try:
+        return pins.get(plugin_id)
+    except ManifestError:
+        return None                        # an unreadable pin diffs as a first pin
+
+
+def _offer_view(plugin_id: str, offer: dict) -> dict:
+    out = {"id": plugin_id, "service": offer.get("service"), "reason": offer.get("reason"),
+           "pinned": pins.record(plugin_id), "valid": False, "error": None,
+           "summary": None, "diff": None, "pinnable": False, "blocked": None}
+    try:
+        _, m = _offered_manifest(plugin_id, offer)
+    except ManifestError as exc:
+        out["error"] = str(exc)[:1000]
+        return out
+    blocked = _blocker(plugin_id, offer.get("service"))
+    out.update(valid=True, summary=pins.summary(m), diff=pins.diff(_current_pin(plugin_id), m),
+               pinnable=blocked is None, blocked=blocked)
+    return out
+
+
+def offered() -> dict:
+    """Every refused offer, with what pinning it would approve."""
+    return {"items": [_offer_view(pid, offer)
+                      for pid, offer in sorted(get_registry().offers().items())]}
+
+
+def pin_manifest(ctx, plugin_id: str, manifest_text: str, *, source: str = "",
+                 ref: str = "", commit: str = "", service: str | None = None) -> dict:
+    """Approve `manifest_text` as the pin for `plugin_id` (validated), audit
+    it, and register the plugin now if its service already offered it."""
+    blocked = _blocker(plugin_id, service)
+    if blocked:
+        raise PolicyError(409, blocked, "conflict")
+    previous = pins.record(plugin_id)
+    try:
+        m = pins.set(plugin_id, manifest_text, source, ref, commit, ctx.username)
+    except ManifestError as exc:
+        _audit(ctx, "plugin.pin", plugin_id, {"error": "invalid manifest"}, "error")
+        log.warning("plugin pin refused: invalid manifest %s", kv(plugin=plugin_id, **_by(ctx)))
+        raise PolicyError(400, f"invalid manifest: {exc}"[:2000], "invalid_manifest") from exc
+    registered = get_registry().repin(plugin_id)
+    detail = {"version": m.version, "previous": previous["version"] if previous else None,
+              "service": service, "source": source, "ref": ref, "commit": commit,
+              "registered": registered}
+    _audit(ctx, "plugin.pin", plugin_id, detail)
+    log.info("plugin pinned %s", kv(plugin=plugin_id, version=m.version,
+                                    previous=detail["previous"], service=service,
+                                    registered=registered, **_by(ctx)))
+    return {"pin": pins.record(plugin_id), "registered": registered,
+            "plugin": view(plugin_id) if registered else None}
+
+
+def pin(ctx, plugin_id: str) -> dict:
+    """Approve the manifest a running service offered under `plugin_id`."""
+    offer = get_registry().offers().get(plugin_id)
+    if offer is None:
+        raise PolicyError(404, "no offered manifest for this plugin id", "not_found")
+    blocked = _blocker(plugin_id, offer.get("service"))
+    if blocked:
+        raise PolicyError(409, blocked, "conflict")
+    try:
+        text, _ = _offered_manifest(plugin_id, offer)
+    except ManifestError as exc:
+        _audit(ctx, "plugin.pin", plugin_id, {"error": "invalid manifest"}, "error")
+        log.warning("plugin pin refused: invalid manifest %s", kv(plugin=plugin_id, **_by(ctx)))
+        raise PolicyError(400, f"invalid manifest: {exc}"[:2000], "invalid_manifest") from exc
+    return pin_manifest(ctx, plugin_id, text, service=offer.get("service"))
+
+
+def unpin(ctx, plugin_id: str) -> dict:
+    """Remove the owner's pin. The plugin stops being served at once (its
+    offer goes back up for review) and its row is disabled, so a later pin
+    needs an explicit enable."""
+    record = pins.record(plugin_id)
+    if record is None:
+        raise PolicyError(404, "no pin for this plugin id", "not_found")
+    pins.delete(plugin_id)
+    reg = get_registry()
+    try:
+        in_tree = reg.in_tree(plugin_id) is not None
+    except ManifestError:
+        in_tree = True
+    withdrawn = False
+    if not in_tree:                        # an in-tree plugin never depended on the row
+        withdrawn = reg.withdraw(plugin_id, "not pinned: the owner removed the pin")
+        settings.set_enabled(plugin_id, False)
+    _audit(ctx, "plugin.unpin", plugin_id, {"version": record["version"],
+                                            "withdrawn": withdrawn})
+    log.info("plugin unpinned %s", kv(plugin=plugin_id, version=record["version"],
+                                      withdrawn=withdrawn, **_by(ctx)))
+    return {"unpinned": plugin_id, "version": record["version"], "withdrawn": withdrawn}

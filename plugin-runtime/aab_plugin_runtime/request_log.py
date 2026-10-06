@@ -1,9 +1,9 @@
 """`RequestContextMiddleware`: a request id and one access line per HTTP request.
 
-Shared by the broker and the plugin runtime: two byte-identical copies
-(`broker/broker/request_log.py`, `plugin-runtime/aab_plugin_runtime/
-request_log.py`), kept identical by a test, like logging_setup.py. For every
-HTTP request it:
+Shared by the broker, the plugin runtime and the installer: three
+byte-identical copies (`broker/broker/request_log.py`, `plugin-runtime/
+aab_plugin_runtime/request_log.py`, `installer/aab_installer/request_log.py`),
+kept identical by a test, like logging_setup.py. For every HTTP request it:
 
   * takes the caller's `X-Request-Id` when it is well formed and does not
     use a prefix reserved for this service's own background jobs, else

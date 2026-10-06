@@ -1,0 +1,41 @@
+# Rendered by aab-installer from plugins.d/finance/src/aab-plugin.yaml.
+# Do not edit: every install or upgrade rewrites it from the descriptor.
+# The plugin gets one network (net_finance, shared with the broker only),
+# named volumes only, no ports, and only its own token and key.
+services:
+  plugin-finance:
+    build:
+      context: ./plugins.d/finance/src
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '5'
+    networks:
+    - net_finance
+    volumes:
+    - finance_secrets:/secrets
+    - finance_data:/data
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    environment:
+      PLUGIN_TOKEN: '${PLUGIN_TOKEN_FINANCE:?missing in .env: the installer adds it (scripts/init_secrets.py --rotate PLUGIN_TOKEN_FINANCE)}'
+      PLUGIN_SECRETS_KEY: '${PLUGIN_SECRETS_KEY_FINANCE:?missing in .env: the installer adds it (scripts/init_secrets.py --rotate PLUGIN_SECRETS_KEY_FINANCE)}'
+      PLUGIN_SECRETS_DIR: /secrets
+      FINANCE_DB: /data/finance.db
+      TZ: ${TZ:-UTC}
+  broker:
+    networks:
+    - net_finance
+    environment:
+      PLUGIN_URL_FINANCE: http://plugin-finance:8090
+      PLUGIN_TOKEN_FINANCE: '${PLUGIN_TOKEN_FINANCE:?missing in .env: the installer adds it (scripts/init_secrets.py --rotate PLUGIN_TOKEN_FINANCE)}'
+networks:
+  net_finance: {}
+volumes:
+  finance_secrets: {}
+  finance_data: {}

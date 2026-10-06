@@ -43,6 +43,42 @@ jobs:
         if: hashFiles('plugin-runtime/pyproject.toml') != ''
         run: pytest plugin-runtime
 
+  # The opt-in plugin installer (installer/): descriptor validation, the
+  # overlay renderer (golden file), the .env helper, scripts/compose-files.sh,
+  # and the HTTP service with a fake command runner and local bare git
+  # repositories. No Docker needed.
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install installer (editable, with dev extras)
+        run: pip install -e "installer[dev]"
+      - name: pytest
+        working-directory: installer
+        run: python -m pytest
+
+  # The base image every external plugin builds FROM (plugins/base;
+  # release.yml publishes it as ghcr.io/pelegw/aab-plugin-base on a v* tag).
+  # Built here on every push without pushing, so a broken base Dockerfile
+  # fails CI before a release depends on it, and the contract plugins rely on
+  # (docs/plugin-packaging.md) is checked inside the image.
+  plugin-base-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker build plugins/base (no push)
+        run: docker build --build-context runtime=plugin-runtime -t aab-plugin-base:ci plugins/base
+      - name: The image keeps the contract plugins build on
+        run: |
+          docker run --rm aab-plugin-base:ci sh -c '
+            test "$(id -u):$(id -g)" = "10001:10001" &&
+            test "$(stat -c %u:%a /secrets)" = "10001:700" &&
+            test "$PLUGIN_SECRETS_DIR" = /secrets &&
+            python -c "import aab_plugin_runtime, uvicorn"'
+
   # The WhatsApp plugin service (plugins/whatsapp): its own package and tests.
   # The broker job above also runs broker/tests/targets, which serves this
   # plugin through the runtime end to end (imported from source there).
@@ -65,15 +101,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Validate both compose shapes against a throwaway .env from the real
-      # secrets script, so a missing variable or bad key fails here.
-      - name: docker compose config (base and base+public)
+      # Validate every compose shape against a throwaway .env from the real
+      # secrets script, so a missing variable or bad key fails here: base,
+      # base+public, base+installer (INSTALLER_ENABLED=true), and the full set
+      # scripts/compose-files.sh prints with an installer-rendered plugin
+      # overlay (the golden file) in plugins.d.
+      - name: docker compose config (base, public, installer, rendered plugin)
         run: |
           python3 scripts/init_secrets.py --out .env
           sed -i 's/^SITE_DOMAIN=$/SITE_DOMAIN=aab.example.com/' .env
           docker compose config -q
           docker compose -f docker-compose.yml -f docker-compose.public.yml config -q
-          rm -f .env
+          sed -i 's/^INSTALLER_ENABLED=false$/INSTALLER_ENABLED=true/' .env
+          docker compose -f docker-compose.yml -f docker-compose.installer.yml config -q
+          mkdir -p plugins.d/finance/src
+          cp installer/tests/golden/finance.compose.yml plugins.d/finance/compose.yml
+          python3 scripts/init_secrets.py --out .env --rotate PLUGIN_TOKEN_FINANCE
+          python3 scripts/init_secrets.py --out .env --rotate PLUGIN_SECRETS_KEY_FINANCE
+          sh scripts/compose-files.sh
+          docker compose $(sh scripts/compose-files.sh) config -q
+          rm -rf .env plugins.d
 
   go:
     runs-on: ubuntu-latest

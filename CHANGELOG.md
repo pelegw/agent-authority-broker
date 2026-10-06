@@ -6,6 +6,80 @@ lives only in `VERSION`.
 ## [Unreleased]
 
 ### Added
+- **External plugins.** A plugin can live in its own git repository and be
+  installed into a running gateway from the console, with the owner's
+  approval of its manifest unchanged as the authority property
+  (`docs/plugin-packaging.md`). The finance plugin is the first.
+  - **Pins in the database.** A plugin not vendored in the broker tree is
+    registered only against the owner's pin in the new `plugin_pins` table
+    (`plugins/pins.py`); the in-tree file always wins. A refused offer is
+    kept for review with its summary and the diff against the current pin:
+    `GET /v1/admin/plugins/offered`, `POST` / `DELETE
+    /v1/admin/plugins/{id}/pin` (audited `plugin.pin` / `plugin.unpin`;
+    unpinning stops serving the plugin at once and disables its row).
+  - **The installer** (`installer/`, `docker-compose.installer.yml`), an
+    opt-in container (`INSTALLER_ENABLED=true`) that holds the Docker socket
+    and is therefore root on the host. It shares `net_installer` with the
+    broker alone, answers only `X-Installer-Token`, clones only sources in
+    `INSTALLER_ALLOWED_SOURCES` (env-only, empty refuses everything) at a
+    release tag or a full commit over https, refuses a commit other than the
+    reviewed one, renders each plugin's compose overlay from its descriptor
+    (`aab-plugin.yaml`, schema 1, strict) through a fixed template (one
+    network, no ports, no bind mounts, only its own token and key), keeps
+    install records and one job at a time in `plugins.d/`, and rolls a
+    failed install or upgrade back. It holds no git credential: `/inspect`,
+    `/install` and `/upgrade` take an optional `git_token` (the broker's,
+    see below), used for that request's or that job's single clone, given
+    to git only through `GIT_ASKPASS` for `github.com`, masked in the job's
+    lines, and written nowhere (never a URL, the job record, `install.json`
+    or a log line).
+  - **Private plugin repositories: the GitHub token is a console setting.**
+    A read-only GitHub token, entered in the + Add plugin dialog (write-only
+    field, Set / Clear, a not set / set / re-enter required badge), stored
+    encrypted under `BROKER_SECRETS_KEY` through `crypto.py`
+    (`services/install_git_token.py`), exactly like the Telegram bot token:
+    `POST` / `DELETE /v1/admin/plugins/install/git-token`, audited
+    `installer.git_token.set` / `.clear`, never returned by any route; the
+    install status carries `git_token: unset | set | unreadable`. The broker
+    sends it in the body of inspect, install and upgrade only; one that no
+    longer decrypts refuses them with 409 `git_token_unreadable` before
+    anything is pinned or asked. Job answers relayed to the console are
+    projected to the job's known fields. It is not in `.env`.
+  - **Install API** (`services/plugin_install.py`, `routers/admin_install.py`):
+    `GET /v1/admin/plugins/install/status`, `POST .../install/inspect` (the
+    review card: every manifest validated by the broker, actions with side
+    effects and modes, resources, narrowings, constraints, secret settings,
+    volumes, environment, the diff on upgrade), `POST
+    /v1/admin/plugins/install` and `POST /v1/admin/plugins/{service}/upgrade`
+    (pin first, then ask the installer; a refused request puts the pins
+    back), `POST /v1/admin/plugins/{service}/remove` (then unpin),
+    `GET .../install/jobs/{id}`, `GET /v1/admin/plugins/installed`. Audited
+    `plugin.install`, `plugin.upgrade`, `plugin.remove`, refusals included.
+    An installer that is off or down answers 503 saying which.
+  - **Console**: "+ Add plugin" on the Plugins view (source and ref, Inspect,
+    the review card, Install), a job panel that polls every 2 s through the
+    broker's own restart, "installed from <source>@<ref>" with Upgrade and
+    Remove (purge optional) on installed plugins, and "Offered, awaiting
+    review" with Review and pin in place of the refused list. With the
+    installer off, the dialog shows the `.env` lines and the command instead.
+  - **The compose file set is computed**: `scripts/compose-files.sh` prints
+    the base file, the public overlay (`SITE_DOMAIN` set), the installer
+    overlay (`INSTALLER_ENABLED=true`) and every installed plugin's overlay;
+    `deploy/push.sh`, the installer and the docs use it.
+  - **Published runtime**: `plugins/base/Dockerfile` builds
+    `ghcr.io/pelegw/aab-plugin-base:<version>` (Python 3.12, the runtime and
+    uvicorn, the `aab` user, `/secrets` 0700, the TCP healthcheck, no `CMD`);
+    `.github/workflows/release.yml` publishes it (`:<version>` and
+    `:latest`) and attaches the runtime wheel to the GitHub Release on every
+    `v*` tag that equals `VERSION`; CI builds the base image on every push
+    without pushing and checks its contract.
+  - New `.env` entries (all from `scripts/init_secrets.py`):
+    `INSTALLER_ENABLED` (`false`), `INSTALLER_TOKEN` (generated),
+    `INSTALLER_ALLOWED_SOURCES` (empty), `AAB_HOME` (`/opt/aab`);
+    `--rotate` accepts any installed service's
+    `PLUGIN_TOKEN_<SERVICE>` / `PLUGIN_SECRETS_KEY_<SERVICE>`. The checklist
+    it prints lists the installer's GitHub token among the console-entered
+    credentials.
 - `GET /v1/admin/health`: the owner's health summary for an uptime monitor.
   Behind owner credentials (an `aab_admin_` token or the session), it checks
   the database, refreshes every enabled plugin's `/status` live (in
@@ -34,6 +108,16 @@ lives only in `VERSION`.
   migration, and every token already in them is `admin`.
 
 ### Changed
+- `deploy/push.sh` never syncs `plugins.d/` (excluded from rsync, so
+  `--delete` cannot wipe installed plugins; git-ignored, so never in the git
+  archive), builds its compose command from `scripts/compose-files.sh`, and
+  appends `INSTALLER_TOKEN` and `AAB_HOME` to an older `.env`.
+- The redaction backstop (all three `logging_setup.py` copies, now including
+  the installer's) also masks credentials inside URLs and the values of
+  `X-Installer-Token`, `git_token`, `installer_git_token` and
+  `installer_token`. The broker's boot line names `installer_token` as set or
+  unset and says whether the installer is configured.
+- `aab-plugin-runtime` is versioned on the gateway line: 0.3.0.
 - The role is presented as what it always was in `effective = P ∩ G ∩ R`: a
   **ceiling**. It never grants anything (the capabilities are the only
   grant); it caps every capability below it. The algebra is unchanged.

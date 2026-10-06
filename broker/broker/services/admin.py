@@ -384,7 +384,7 @@ def add_hidden(ctx, target: str, kind: str, resource_id: str, label: str = "",
             raise PolicyError(503, "plugin unavailable; cannot normalize the id",
                               "unavailable") from exc
     out = hidden.add(target, kind, rid, label[:200], reason[:500])
-    get_registry().clear_cache()
+    get_registry().clear_ancestry_cache()
     _audit(ctx, "hidden.add", f"{target}:{kind}:{rid}", {"reason": reason[:200]})
     # The id only: the label and the owner's reason stay in the database.
     log.info("resource hidden %s", kv(target=target, kind=kind, resource=rid, **_by(ctx)))

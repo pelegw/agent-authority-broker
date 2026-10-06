@@ -103,7 +103,8 @@ separation physical.
 
 **What the broker holds:** the owner's password hash, hashes of session
 cookies, admin tokens and agent keys; grants and denies; the decision record
-and its `DECISION_SIGNING_KEY`; the Telegram bot token (entered in the
+and its `DECISION_SIGNING_KEY`; the Telegram bot token and the installer's
+read-only GitHub token for private plugin repositories (both entered in the
 console, encrypted in `plugin_secrets` under `BROKER_SECRETS_KEY`); one
 `PLUGIN_TOKEN_<SERVICE>` per plugin service (`WHATSAPP`, `GITHUB`, `GOOGLE`) so
 it can call the plugin API.
@@ -324,6 +325,12 @@ flowchart TB
     subgraph WN["network: wa_internal (plugin-whatsapp + sidecar only)"]
       SC["whatsapp-sidecar<br/>Go whatsmeow :8081<br/>never published"]
     end
+    subgraph NIN["network: net_installer (broker + aab-installer; opt-in overlay)"]
+      INS["aab-installer :8070<br/>never published<br/>Docker socket: root on the host"]
+    end
+    subgraph NEX["network: net_&lt;service&gt; (broker + one installed plugin)"]
+      PEX["plugin-&lt;service&gt;<br/>built from plugins.d/&lt;service&gt;/src"]
+    end
     VB[("broker_data<br/>broker.db")]
     VW[("wa_data<br/>messages.db")]
     VSE[("wa_session<br/>session.db")]
@@ -343,6 +350,9 @@ flowchart TB
   BROKER -->|"HTTP + X-Plugin-Token (net_whatsapp)"| PWA
   BROKER -->|"HTTP + X-Plugin-Token (net_github)"| PGH
   BROKER -->|"HTTP + X-Plugin-Token (net_google)"| PGO
+  BROKER -->|"HTTP + X-Plugin-Token (net_&lt;service&gt;)"| PEX
+  BROKER -->|"HTTP + X-Installer-Token (net_installer)"| INS
+  INS -->|"docker compose via the socket"| PEX
   PWA -->|"HTTP + X-Internal-Token (wa_internal)"| SC
   BROKER -.- VB
   SC -.-|rw| VW
@@ -357,6 +367,7 @@ flowchart TB
   PGH -->|egress| EXT
   PGO -->|egress| EXT
   SC -->|egress| EXT
+  INS -->|"git clone: allowlisted sources, https"| EXT
 ```
 
 Notes:
@@ -365,10 +376,13 @@ Notes:
   broker, loopback only). Public mode: only `443` (the edge); the broker's
   host port is removed (`ports: !reset []`). No plugin port and no sidecar
   port is ever published.
-- **Networks.** Five, each carrying exactly one kind of traffic:
-  `edge_net` (edge ↔ broker), one network per plugin service
+- **Networks.** Five in every deployment, each carrying exactly one kind of
+  traffic: `edge_net` (edge ↔ broker), one network per plugin service
   (`net_whatsapp`, `net_github`, `net_google`: the broker ↔ that one
-  service) and `wa_internal` (plugin-whatsapp ↔ sidecar). The broker is on
+  service) and `wa_internal` (plugin-whatsapp ↔ sidecar). With the opt-in
+  installer, `net_installer` (broker ↔ `aab-installer` only), and one
+  `net_<service>` per installed external plugin (broker ↔ that plugin only,
+  rendered by the installer, never supplied by the plugin's repository). The broker is on
   every network except `wa_internal`; the only other container on two
   networks is plugin-whatsapp (its own and `wa_internal`). So the edge
   cannot reach any plugin, and a compromised edge cannot call `/perform`;
@@ -396,7 +410,18 @@ Notes:
   directory, on configure and on every read, so a console session cannot
   turn the field into a read of any other file. The host directory is
   git-ignored and should be readable only by uid 10001.
-- Every image runs as a non-root user (`aab`), one uvicorn worker in the broker.
+- **The plugin installer** (opt-in, `docker-compose.installer.yml`, loaded when
+  `INSTALLER_ENABLED=true`): `aab-installer` mounts the Docker socket (the
+  only container that does, so it is root on the host) and the checkout at
+  `AAB_HOME`, at the same path as on the host. It shares `net_installer` with
+  the broker alone, publishes nothing, and clones only allowlisted sources;
+  it owns `plugins.d/`, from which each installed plugin is built and whose
+  rendered `compose.yml` joins the compose file set
+  (`scripts/compose-files.sh`). Section 4.1 has the boundary.
+- Every image runs as a non-root user (`aab`), one uvicorn worker in the
+  broker, except `aab-installer`, which runs as root deliberately: whoever
+  holds the socket is root on the host, so an unprivileged user inside would
+  add no boundary.
 
 ### 2.2 Secrets and environment per container (the env split)
 
@@ -409,11 +434,13 @@ token and one key per container, whatever number of plugin ids it hosts.
 
 | Container | Receives | Must never receive |
 |---|---|---|
-| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `SITE_DOMAIN` (public overlay only: builds the OAuth redirect URI `https://<SITE_DOMAIN>/oauth/callback/<service>`), `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE`, `BROKER_DB`, `TZ`, `LOG_LEVEL`, `LOG_FORMAT` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, the `wa_data` and `wa_session` volumes |
+| `broker` | `SETUP_TOKEN`, `BROKER_SECRETS_KEY`, `DECISION_SIGNING_KEY`, `ORIGIN_SECRET` (public overlay only; forced empty in the base file), `CF_ACCESS_ENABLED/TEAM_DOMAIN/AUD/ALLOWED_EMAILS`, `ALLOW_INSECURE_ADMIN`, `MCP_ALLOWED_HOSTS`, `SITE_DOMAIN` (public overlay only: builds the OAuth redirect URI `https://<SITE_DOMAIN>/oauth/callback/<service>`), `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>` for `WHATSAPP`, `GITHUB`, `GOOGLE` and each installed external plugin (from its rendered overlay), `INSTALLER_URL` and `INSTALLER_TOKEN` (installer overlay only), `BROKER_DB`, `TZ`, `LOG_LEVEL`, `LOG_FORMAT` | `SIDECAR_TOKEN`, any `PLUGIN_SECRETS_KEY_<SERVICE>`, `INSTALLER_ALLOWED_SOURCES`, the Docker socket, the `wa_data` and `wa_session` volumes |
 | `plugin-whatsapp` | `PLUGIN_TOKEN_WHATSAPP`, `PLUGIN_SECRETS_KEY_WHATSAPP`, `SIDECAR_URL` (`http://whatsapp-sidecar:8081`), `SIDECAR_TOKEN`, `MESSAGES_DB` (`/data/messages.db`), `LOG_LEVEL`, `LOG_FORMAT`, `wa_data` (ro) | Other services' tokens/keys, broker secrets (`DECISION_SIGNING_KEY`, `BROKER_SECRETS_KEY`, `SETUP_TOKEN`, `ORIGIN_SECRET`), the `wa_session` volume |
 | `whatsapp-sidecar` | `SIDECAR_TOKEN`, `DEVICE_NAME`, `TZ`, `LOG_LEVEL`, `SESSION_DIR` (`/session`), `wa_data` (rw), `wa_session` (rw; the only container that mounts it) | Everything else |
 | `plugin-github` | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_GITHUB` / `PLUGIN_SECRETS_KEY_GITHUB`), `LOG_LEVEL`, `LOG_FORMAT`; the App id, slug and private key are console config, not env (+ the optional read-only `/run/secrets/github` bind holding the PEM, a file alternative to pasting it) | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN` |
 | `plugin-google` | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_GOOGLE` / `PLUGIN_SECRETS_KEY_GOOGLE`), `LOG_LEVEL`, `LOG_FORMAT`; nothing Google-specific: the OAuth client id and secret are console config, and the broker passes the redirect URI with each connect | Other services' tokens/keys, broker secrets, `SIDECAR_TOKEN`, `SITE_DOMAIN` |
+| `plugin-<service>` (each installed external plugin) | `PLUGIN_TOKEN`, `PLUGIN_SECRETS_KEY`, `PLUGIN_SECRETS_DIR` (the runtime's generic names, fed from `PLUGIN_TOKEN_<SERVICE>` / `PLUGIN_SECRETS_KEY_<SERVICE>`), the literal `environment` of its descriptor, its allowlisted `env_passthrough` (`TZ`, `LOG_LEVEL`, `LOG_FORMAT`), `<service>_secrets` at `/secrets` and the `<service>_*` volumes it declares | Other services' tokens/keys, broker and installer secrets, `SIDECAR_TOKEN`, any bind mount, any other volume or network (the installer renders its overlay; the repository supplies none) |
+| `aab-installer` (installer overlay only) | `INSTALLER_TOKEN`, `INSTALLER_ALLOWED_SOURCES`, `AAB_HOME`, `LOG_LEVEL`, `LOG_FORMAT`; the Docker socket and the checkout at `AAB_HOME` (same path inside), so it can read `.env`: it is root on the host | Any other variable in its environment, a published port, any network but `net_installer` |
 | `edge` | `SITE_DOMAIN`, `ORIGIN_SECRET`, origin certificate + key, Cloudflare origin-pull CA | Every other secret |
 
 The table names the `.env` entries each container is fed from. Inside a
@@ -427,9 +454,11 @@ services (`plugin-whatsapp`, `plugin-github`, `plugin-google`) read these
 generic names.
 
 Third-party credentials are not in the env split at all (`docs/configuration.md`):
-the owner enters them in the console. The Telegram bot token is stored in
-`broker.db` (the `plugin_secrets` table, slot `broker`), encrypted under
-`BROKER_SECRETS_KEY`; the GitHub App id and key
+the owner enters them in the console. The Telegram bot token and the
+installer's GitHub token are stored in `broker.db` (the `plugin_secrets`
+table, slot `broker`), encrypted under `BROKER_SECRETS_KEY`; the broker
+sends the GitHub token to the installer in the body of each inspect, install
+and upgrade request, and the installer keeps none. The GitHub App id and key
 and the Google OAuth client id and secret are entered in each plugin's config
 form and relayed once to that plugin's `/configure`, never stored by the
 broker.
@@ -451,6 +480,8 @@ operational view of the same split (volumes, rotation per secret) is
 | **whatsapp-sidecar** | Speaks the WhatsApp multi-device protocol (whatsmeow), archives every message into `messages.db`, internal API `/health`, `/status`, `/qr`, `/send`, `/media`; no policy | WhatsApp session (`session.db` in `wa_session`, which only this container mounts; the account credential, plaintext: see 4.3), `SIDECAR_TOKEN` | Inbound only from `wa_internal`; outbound to WhatsApp servers |
 | **plugin-github** | Plugin API for `github`; `github_app` connection (install URL, installation recorded on `/connect/finish`) mints installation tokens restricted to the requested repos and permissions | App private key (uploaded: encrypted in `github_secrets`; or file: `private_key_path`, confined to the read-only `/run/secrets/github` bind), installation id and connect `state` nonces in `github_secrets`, App id, cached installation tokens (memory, ≤ 50 min), `PLUGIN_TOKEN_GITHUB`, `PLUGIN_SECRETS_KEY_GITHUB` | Inbound from the broker on `net_github`; outbound to `api.github.com`; cannot reach the other plugin services |
 | **plugin-google** | Plugin API for `gmail`, `gcal`, `gdrive` (one `GET /manifests` returns all three; shared `aab_plugin_google/client.py`); `google_oauth` connection builds the auth URL, owns the state nonce, exchanges the code, mints per-scope-set access tokens by downscoped refresh | OAuth client id/secret, refresh token and connect `state` nonces with the `redirect_uri` the broker passed (encrypted in `google_secrets`), access tokens (memory only, per scope set), `PLUGIN_TOKEN_GOOGLE`, `PLUGIN_SECRETS_KEY_GOOGLE` | Inbound from the broker on `net_google`; outbound to Google OAuth and API endpoints; cannot reach the other plugin services |
+| **aab-installer** (opt-in) | Inspect, install, upgrade and remove external plugins: clone an allowlisted source at a tag or a full commit (over https; for a private `github.com` repository, the GitHub token the broker sends with that request, given to git through `GIT_ASKPASS` for that clone only), validate the descriptor, render the overlay through a fixed template, ensure the service's `.env` secrets via `scripts/init_secrets.py`, run `docker compose` (build and start the plugin, recreate the broker), roll back on failure; one job at a time, persisted in `plugins.d/_installer/` | `INSTALLER_TOKEN` (no git credential of its own: a GitHub token lives only as long as the request or job it came with); through its mounts, the Docker socket (root on the host) and the checkout including `.env` | Inbound from the broker only, on `net_installer`; outbound to allowlisted git hosts; the Docker daemon through the socket; cannot reach any plugin |
+| **plugin-&lt;service&gt;** (each installed external plugin) | Plugin API for the ids its descriptor lists, from its own repository at the pinned commit, on the base image `aab-plugin-base` | `PLUGIN_TOKEN_<SERVICE>`, `PLUGIN_SECRETS_KEY_<SERVICE>`, whatever it stores in `<service>_secrets` | Inbound from the broker on `net_<service>`; cannot reach other plugins, the installer or the edge |
 | **Telegram Bot API** | Delivers approval cards to the owner's phone and returns button taps | (external) | Broker calls it outbound; taps are fetched by the broker's poll loop, no inbound webhook |
 
 ---
@@ -549,8 +580,13 @@ flowchart LR
     D6[("D6 wa_data<br/>messages.db")]
     D7[("D7 wa_session<br/>session.db")]
   end
+  subgraph Z7["TZ7: aab-installer container (opt-in; net_installer; root on the host)"]
+    P12["P12 Installer<br/>inspect, jobs,<br/>overlay renderer"]
+    DH[("DH host: .env,<br/>plugins.d, Docker daemon")]
+  end
   subgraph Z6["TZ6: third-party services"]
     TG(["Telegram Bot API"])
+    GH(["Allowlisted git hosts"])
     TK(["Token and consent endpoints<br/>Google OAuth, GitHub App"])
     TA(["Target APIs<br/>GitHub, Google"])
     WS(["WhatsApp servers"])
@@ -595,6 +631,10 @@ flowchart LR
   P2 -->|36| CF
   P2 -->|37| P4
   P8 -->|"38, 42, 44"| P9
+  P2 <-->|"45, 48, 51"| P12
+  P12 <-->|46| GH
+  P2 -->|47| D2
+  P12 -->|"49, 50"| DH
   P2 -->|39| OW
   TK -->|40| OW
 ```
@@ -666,6 +706,25 @@ that refreshes health).
 | 43 | P10 ↔ token endpoints | Plugin checks `state`, exchanges the code with its own client id + secret for a refresh token (Google), or verifies the installation with an App JWT (GitHub); result stored encrypted in D5 (27) | HTTPS | Yes: client secret / App JWT out, refresh token back |
 | 44 | P8 → P9 | `POST /disconnect`: the plugin wipes its stored credential (WhatsApp: 409, unlink the device on the phone) | HTTP on the service's own network; `X-Plugin-Token` | No |
 
+**Install flows (45 to 51, opt-in installer)**
+
+External plugins (`docs/plugin-packaging.md`). The installer (P12) is a
+separate container, root on the host; the broker decides authority (the pin,
+47) before the installer does anything lasting. Sequence for an install:
+2 → 5 → 45 → 46 → (review) → 45 → 46 → 47 → 48 → 49 → 50, then the
+recreated broker discovers the plugin over 25 against the pin; the console
+follows the job through 51 while the broker restarts.
+
+| # | From → To | Data carried | Protocol / auth | Credential? |
+|---|---|---|---|---|
+| 45 | P2 → P12 | `POST /inspect {source, ref, git_token?}` → descriptor, manifest texts, resolved commit, the install record if any; the broker validates every manifest and builds the review | HTTP on `net_installer`; `X-Installer-Token: INSTALLER_TOKEN`, constant-time compare; `GET /health` the only tokenless route | Yes: installer token; the owner's GitHub token in the body when one is stored (decrypted from `plugin_secrets` for this request; never logged or returned) |
+| 46 | P12 → git host | `git clone --depth 1 --branch <tag>` or fetch by commit, into a temporary directory (inspect) or `plugins.d/<service>/src` (a job); no system or global git config, `GIT_ALLOW_PROTOCOL=https`, `core.symlinks=false`, hooks off | HTTPS; anonymous, or the broker's GitHub token (sent with that inspect, install or upgrade request) answered by the `GIT_ASKPASS` script to `github.com`'s prompts only | Yes when the owner stored one: read-only git token, for this clone only (never in a URL, an argument, a file or a log) |
+| 47 | P2 → D2 | The owner's pin of every manifest (`plugin_pins`: manifest text, version, source, ref, commit, who, when), audited `plugin.pin`; restored exactly if the installer refuses 48 | In-process SQLite; `AdminContext` | No |
+| 48 | P2 → P12 | `POST /install {source, ref, commit, git_token?}`, `POST /upgrade {service, source, ref, commit, git_token?}`, `POST /remove {service, purge}` → 202 job (audited `plugin.install` / `.upgrade` / `.remove`); after a remove, the broker unpins what the service hosted | HTTP on `net_installer`; `X-Installer-Token` | Yes: installer token; the GitHub token in install and upgrade bodies when one is stored (the job keeps it in memory for its one clone, masked in its lines, never saved) |
+| 49 | P12 → host `.env` | The service's `PLUGIN_TOKEN_<SERVICE>` / `PLUGIN_SECRETS_KEY_<SERVICE>` generated by `scripts/init_secrets.py --rotate` (never read back), retired or purged on remove | Local file through the checkout mount (0600, owner kept) | Yes: generated secrets (written, never returned) |
+| 50 | P12 → Docker daemon | `docker compose --project-directory <AAB_HOME> <the file set> up -d --build plugin-<service>`, `up -d broker`, `rm -s -f`, `network rm`, `volume rm` (purge) | The Docker socket (root on the host) | No (the overlay maps `.env` values by name) |
+| 51 | P2 → P12 | `GET /jobs/{id}` (state, log lines: redacted, 64-hex runs, `INSTALLER_TOKEN` and the job's own GitHub token masked; the broker relays only the job's known fields) and `GET /installed`, polled by the console every 2 s through the broker's own restart | HTTP on `net_installer`; `X-Installer-Token` | No |
+
 ---
 
 ## 4. Security notes per trust boundary
@@ -680,6 +739,7 @@ that refreshes health).
 | **Agent key → authority** | 6, 9, 10 | `aab_` key hashed with sha256; previous hash accepted during the rotation grace (`key_rotation_grace_seconds`, 24h); key and every ancestor must be enabled and unexpired; per-key `rate_per_min`. | A key holds no authority itself; everything comes from grants re-walked per call. |
 | **Owner identity** | 7, 8, 19 | Password (`hashlib.scrypt`, per-user salt), 5 failed logins/min/IP; sessions 12h idle / 7d absolute; admin tokens `aab_admin_<48hex>` stored hashed, revocable, optional expiry; one-time `SETUP_TOKEN` inert after setup. | Every human action carries an `AdminContext` and is recorded under the owner's username. |
 | **Broker ↔ plugin services** | 24, 25, 38, 42, 44 | One shared token per service, `PLUGIN_TOKEN_<SERVICE>` (`WHATSAPP`, `GITHUB`, `GOOGLE`), in `X-Plugin-Token`, constant-time compared; one network per service (`net_whatsapp`, `net_github`, `net_google`: the broker and that service only, so no plugin service can reach another); every manifest from `GET /manifests` pinned (id + version) against the broker's vendored copy. | Plain HTTP inside the host. The plugin trusts the broker's `CallScope`: a compromised broker can request any credential the connection can mint, but cannot read stored credentials. The authorization code crosses here once (42). |
+| **Broker ↔ installer (installer == host root)** | 45, 48, 51 (and 46, 49, 50 behind it) | Bounded by network, token, allowlist, rendered overlays, pinned commits, askpass credentials: `net_installer` holds the broker and the installer only; every call but `/health` needs `INSTALLER_TOKEN` (constant-time; an empty token refuses to boot); `INSTALLER_ALLOWED_SOURCES` is env-only and fail closed; refs are a release tag or a full commit, and a job installs only the commit the owner reviewed; overlays are rendered from a strictly validated descriptor through a fixed template (one network, no ports, no binds, own token and key only); the git credential is the broker's (a console setting, encrypted under `BROKER_SECRETS_KEY`), sent per request, and reaches git only through `GIT_ASKPASS`, for `github.com` only; the installer stores none. | The installer holds the Docker socket, so whoever controls it is root on the host: it is opt-in, reachable from nothing but the broker, and a hijacked console session can trigger only reviewed installs from allowlisted sources, never widen the allowlist or supply compose YAML. It decides no authority: the broker pins before any job, and a plugin is served only if it offers exactly the pinned manifest. Nothing from a plugin repository runs on the host; its Dockerfile runs inside `docker build`. |
 | **Plugin ↔ sidecar** | 30, 33 | `SIDECAR_TOKEN` in `X-Internal-Token`, constant-time compared; network `wa_internal` which the broker is not on. | The sidecar has no policy at all; everything it is asked to do it does. The shared `wa_data` volume is a second crossing: sidecar rw, plugin-whatsapp ro, nobody else; it holds only the archive. The plaintext `session.db` is in `wa_session`, which only the sidecar mounts (4.3). |
 | **Broker ↔ Telegram** | 16, 17 | Outbound HTTPS with the bot token; taps accepted only when both the chat id and the user id match the linked owner; kill switch. | No inbound webhook port. A Telegram tap is an owner action (`via=telegram`); agents have no path to it. Card content (summary, resource labels) leaves the host. |
 | **Owner ↔ consent, callback relay** | 35, 39 to 43 | The plugin generates, stores and checks the `state` nonce (10-minute TTL, single use); the callback page needs no owner credential (Access in public mode) and holds no data, and the POST it makes is admin-guarded (session and CSRF header, plus Access in public mode); the relay to `/connect/finish` uses the service token. The redirect URI is the broker's own callback, computed by the broker (public mode: from `SITE_DOMAIN` in its env, not from console config) and handed to the plugin in `/connect/start`. | The broker never sees a client secret or a refresh token; an intercepted code is useless without the plugin's client secret. The long-lived credential is created and kept only inside the plugin service. |
@@ -756,7 +816,8 @@ follows the same rule.
   service's credentials "reconnect required"; boot fails closed if encrypted
   data exists and its key is missing. `BROKER_SECRETS_KEY` protects the
   secrets the owner enters in the console and the broker itself uses (the
-  Telegram bot token, in `plugin_secrets`); a changed key makes them
+  Telegram bot token and the installer's GitHub token, in `plugin_secrets`);
+  a changed key makes them
   "re-enter required", a missing key with stored values refuses boot.
 
 ---
@@ -819,7 +880,17 @@ remains before the 0.2.0 tag is verification (the table after this one).
 | 7. Google plugin service | `plugin-google`: `gmail`, `gcal` and `gdrive` over one `google_oauth` connection, per-scope-set access tokens by downscoped refresh, every narrowing and constraint in the plugin; shared config fields and the broker-computed `redirect_uri`; the OAuth callback page served without the owner credential | `plugins/google/`, `routers/oauth.py`, `docs/plugins/google.md`, `docs/platform-thesis.md` |
 | 8. Simulation and release docs | Approval-volume simulation (standing grants vs per-action approval), `aab simulate`; the README, CHANGELOG and operator docs for 0.2.0 | `broker/tests/simulation/`, `docs/approval-volume.md`, `README.md`, `CHANGELOG.md`, `deploy/DEPLOY.md` |
 
-What remains before the tag:
+Unreleased (0.3.0, external plugins): pins in the database with offers
+awaiting review (`plugins/pins.py`, the registry), the opt-in installer
+(`installer/`, `docker-compose.installer.yml`, `scripts/compose-files.sh`),
+the install API and the console's + Add plugin (`services/plugin_install.py`,
+`routers/admin_install.py`), the plugin base image and the release workflow
+(`plugins/base/`, `.github/workflows/release.yml`), and
+`docs/plugin-packaging.md`. Tested without Docker; the acceptance test in
+`docs/deployment.md` (images built, a real install through the socket, the
+broker's restart under a polling console) is still to run.
+
+What remained before the 0.2.0 tag:
 
 | Item | Target | Status |
 |---|---|---|

@@ -1,5 +1,7 @@
-"""Plugin registry: env discovery, manifest pinning, plugins rows, states,
-the lattice singleton, and the RemoteAdapter error contract."""
+"""Plugin registry: env discovery, manifest pinning (in-tree files first,
+then the owner's database pins), refused offers kept for review and re-pinned,
+plugins rows, states, the lattice singleton, and the RemoteAdapter error
+contract."""
 
 import httpx
 import pytest
@@ -8,12 +10,12 @@ from cryptography.fernet import Fernet
 from aab_plugin_runtime import serve
 from broker import db
 from broker.config import plugin_services
-from broker.plugins import registry, settings
+from broker.plugins import pins, registry, settings
 from broker.plugins.adapter import AdapterError, CallScope, RemoteAdapter, request
 from broker.plugins.registry import get_registry
 
-from .conftest import (PLUGIN_TOKEN, echo_manifest, enable_plugin, register_remote,
-                       runtime_factory)
+from .conftest import (ECHO_DIR, PLUGIN_TOKEN, echo_manifest, enable_plugin,
+                       register_remote, runtime_factory)
 
 
 def _audit(action):
@@ -164,6 +166,140 @@ def test_ambiguous_kind_has_no_ancestry(echo_local):
     reg._entries["echo2"] = registry.Entry(reg._entries["echo"].manifest,
                                            reg._entries["echo"].adapter, "x")
     assert reg.ancestors("folder", "a1x") == ()
+
+
+# ------------------------------------------------------------ database pins and offers
+
+ECHO_TEXT = (ECHO_DIR / "manifest.yaml").read_text(encoding="utf-8")
+
+
+@pytest.fixture()
+def external(env, tmp_path):
+    """A registry with nothing vendored in its tree: echo is an external
+    plugin, pinned (or not) only in the database."""
+    registry.reset_registry(registry.Registry(vendored_dirs=(tmp_path / "no-tree",)))
+
+
+def _offer(echo_impl, tmp_path, service="echosvc"):
+    runtime = serve([echo_impl], PLUGIN_TOKEN, tmp_path / f"{service}-secrets",
+                    Fernet.generate_key().decode())
+    get_registry().discover({service: ("http://plugin-echo", PLUGIN_TOKEN)},
+                            client_factory=runtime_factory(runtime))
+    return runtime
+
+
+def _versioned(version: str) -> str:
+    return ECHO_TEXT.replace("version: 0.1.0", f"version: {version}")
+
+
+def test_a_database_pin_is_accepted(external, echo_impl, tmp_path):
+    pins.set("echo", ECHO_TEXT, by="owner")
+    register_remote(echo_impl, tmp_path)
+    reg = get_registry()
+    assert reg.manifests()["echo"].model_dump() == echo_manifest().model_dump()
+    assert reg.offered == {} and "echo" not in reg.refused
+    assert reg.adapter("echo").status()["healthy"] is True       # the adapter works
+
+
+def test_the_database_pin_is_what_is_used_not_the_offer(external, echo_impl, tmp_path):
+    # Same id and version, wider offer: the stored copy wins, as in-tree.
+    pins.set("echo", ECHO_TEXT, by="owner")
+    echo_impl.manifest = {**echo_impl.manifest, "actions": [
+        *echo_impl.manifest["actions"], {"name": "drop_everything", "side_effect": "destructive"}]}
+    register_remote(echo_impl, tmp_path)
+    assert "drop_everything" not in get_registry().manifests()["echo"].action_names
+
+
+def test_in_tree_beats_the_database(vendored_echo, echo_impl, tmp_path):
+    pins.set("echo", _versioned("9.9.9"), by="owner")
+    reg = get_registry()
+    assert reg.vendored("echo").version == "0.1.0"
+    register_remote(echo_impl, tmp_path)                 # offers 0.1.0: the tree's version
+    assert reg.manifests()["echo"].version == "0.1.0"
+    assert reg.offered == {}
+
+
+def test_a_mismatch_against_a_database_pin_is_refused_and_offered(external, echo_impl,
+                                                                  tmp_path):
+    pins.set("echo", _versioned("0.0.9"), by="owner")
+    _offer(echo_impl, tmp_path)
+    reg = get_registry()
+    assert "echo" not in reg.entries()
+    assert "mismatch" in reg.refused["echo"]
+    offer = reg.offered["echo"]
+    assert offer["service"] == "echosvc" and "mismatch" in offer["reason"]
+    assert offer["manifest"]["version"] == "0.1.0"        # what the service offered
+    [row] = _audit("plugin.refused")
+    assert row["resource"] == "echo" and row["result"] == "denied"
+
+
+def test_an_unpinned_offer_is_kept_for_review(external, echo_impl, tmp_path):
+    _offer(echo_impl, tmp_path)
+    reg = get_registry()
+    assert reg.entries() == {}
+    assert "no vendored manifest" in reg.offered["echo"]["reason"]
+    assert reg.offers() == reg.offered and reg.offers() is not reg.offered
+
+
+def test_repin_registers_the_offer_and_clears_it(external, echo_impl, tmp_path):
+    _offer(echo_impl, tmp_path)
+    reg = get_registry()
+    assert reg.repin("echo") is False                    # nothing pinned yet: still refused
+    assert "echo" in reg.offered
+    pins.set("echo", ECHO_TEXT, by="owner")
+    assert reg.repin("echo") is True
+    assert reg.service_of("echo") == "echosvc"
+    assert reg.offered == {} and "echo" not in reg.refused
+    assert reg.adapter("echo").status()["healthy"] is True
+    assert reg.plugin_rows()["echo"]["enabled"] == 0     # a new plugin starts disabled
+    assert reg.repin("echo") is False                    # nothing left to re-pin
+
+
+def test_repin_of_an_in_process_offer(external, echo_impl):
+    from broker.plugins.adapter import InProcessAdapter
+    reg = get_registry()
+    assert reg.register(InProcessAdapter(echo_impl, echo_manifest()), echo_impl.manifest) is False
+    pins.set("echo", ECHO_TEXT, by="owner")
+    assert reg.repin("echo") is True and "echo" in reg.entries()
+
+
+def test_withdraw_stops_serving_and_offers_again(external, echo_impl, tmp_path):
+    pins.set("echo", ECHO_TEXT, by="owner")
+    register_remote(echo_impl, tmp_path)
+    reg = get_registry()
+    assert reg.withdraw("echo", "pin removed") is True
+    assert "echo" not in reg.entries()
+    assert reg.offered["echo"]["reason"] == "pin removed"
+    assert reg.offered["echo"]["manifest"]["id"] == "echo"
+    assert reg.withdraw("echo", "again") is False
+    assert reg.repin("echo") is True                     # the pin still exists
+
+
+def test_clear_cache_resets_offers_but_hiding_does_not(external, echo_impl, tmp_path):
+    _offer(echo_impl, tmp_path)
+    reg = get_registry()
+    reg.clear_ancestry_cache()                           # what hiding a resource calls
+    assert "echo" in reg.offered
+    reg.clear_cache()
+    assert reg.offered == {} and reg.repin("echo") is False
+
+
+def test_rediscovery_rerecords_offers(external, echo_impl, tmp_path):
+    _offer(echo_impl, tmp_path)
+    reg = get_registry()
+    reg.offered["ghost"] = {"manifest": {}, "service": "echosvc", "reason": "stale"}
+    _offer(echo_impl, tmp_path)
+    assert set(reg.offered) == {"echo"}
+
+
+def test_an_unreadable_database_pin_is_refused_not_fatal(external, echo_impl, tmp_path):
+    with db.connect() as conn:
+        conn.execute("INSERT INTO plugin_pins (plugin_id, version, manifest_yaml, pinned_at,"
+                     " pinned_by) VALUES ('echo', '0.1.0', 'id: [unclosed', 0, 'owner')")
+    _offer(echo_impl, tmp_path)
+    reg = get_registry()
+    assert reg.entries() == {}
+    assert "no vendored manifest" in reg.refused["echo"]
 
 
 # ------------------------------------------------------------ RemoteAdapter contract

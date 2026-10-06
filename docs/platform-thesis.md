@@ -113,6 +113,31 @@ grant** (`private_events`, `others_events`, `file_content`, never
 certification gate exists to catch, and the kind a declarative spec makes
 visible in review.
 
+## What external packaging cost
+
+Moving a plugin out of the gateway's tree (0.3.0, for the finance plugin) is
+the first change that had to touch the registry's trust root instead of the
+manifest vocabulary, and it still touched zero engine files: the policy
+engine, the grant algebra, the decision record, the ledger, the visibility
+layer, the MCP surface and the skill generator are unchanged (`git diff
+--stat` against the 0.2.0 line, measured before the merge). What it cost
+instead: the pin moved from a vendored file to an owner-written table
+(`plugins/pins.py`, the registry's fall-through and its list of offers
+awaiting review), an owner API and console flow to review, pin, install,
+upgrade and remove (about 770 lines in `pins.py`, `services/plugin_install.py`
+and `routers/admin_install.py`, plus the Plugins view), a new container with
+its own package (`installer/`, about 1,800 lines of code besides the shared
+logging copies, and as many of tests), a compose file set that is computed
+rather than listed (`scripts/compose-files.sh`, used by `deploy/push.sh`,
+the installer and the docs), and a published runtime (the base image and the
+wheel, built on every tag). The finance plugin itself touched no gateway file.
+The real price is a new trust boundary, the installer being root on the host;
+it is bounded by structure (its own network with the broker alone, a token,
+an env-only allowlist, overlays rendered from a validated descriptor through
+a fixed template, the reviewed commit pinned, the git credential reachable
+only through `GIT_ASKPASS`) rather than by policy checks, which is the same
+choice the engine makes.
+
 ## Verdict
 
 - Engine files touched by the second and third plugins: zero. The thesis holds where it was stated.
