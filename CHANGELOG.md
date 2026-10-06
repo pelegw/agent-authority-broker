@@ -5,6 +5,10 @@ lives only in `VERSION`.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.0] - 2026-10-06
+
 ### Added
 - **External plugins.** A plugin can live in its own git repository and be
   installed into a running gateway from the console, with the owner's

@@ -3,7 +3,7 @@
 This puts the broker on a public EC2 instance, reachable only through
 Cloudflare, with the admin/management plane gated by Cloudflare Access SSO.
 
-> Status (v0.2.0): all three plugin services (`plugin-whatsapp`,
+> Status (v0.3.0): all three plugin services (`plugin-whatsapp`,
 > `plugin-github`, `plugin-google`) are real, and every third-party
 > credential (the Telegram bot token, the GitHub App or PAT, the Google
 > OAuth client) is entered in the console, never in `.env`. The images and
@@ -12,7 +12,7 @@ Cloudflare, with the admin/management plane gated by Cloudflare Access SSO.
 > `docker compose up`" on the host after the first deploy. The topology,
 > env split and volumes are explained in `docs/deployment.md`.
 >
-> External plugins (unreleased, 0.3.0): the opt-in plugin installer is in
+> External plugins (0.3.0): the opt-in plugin installer is in
 > step 10. Its images (`installer/`, `plugins/base/`) and the install path
 > have been tested without Docker only (fake Docker, local git
 > repositories); run the acceptance test in `docs/deployment.md` > "External
@@ -219,7 +219,7 @@ layers are checked: the Access identity and the owner credential.
 ## 9. Verify
 
 ```bash
-curl https://aab.example.com/v1/health          # {"status":"ok","version":"0.2.0"}
+curl https://aab.example.com/v1/health          # {"status":"ok","version":"0.3.0"}
 curl -s -o /dev/null -w '%{http_code}\n' https://<elastic-ip>/v1/health   # should FAIL/timeout: origin not directly reachable
 curl -H "Authorization: Bearer $AAB_ADMIN_TOKEN" -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
      -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" https://aab.example.com/v1/admin/health   # 200 ok / 503 degraded: the owner's view, behind Access

@@ -16,7 +16,7 @@ every console setting with its bounds, is `docs/configuration.md`.
 > [Verify after `docker compose up`](#verify-after-docker-compose-up) has the
 > recorded outputs. Pairing a real phone was not part of that run.
 >
-> External plugins (unreleased, 0.3.0): the opt-in plugin installer, the
+> External plugins (0.3.0): the opt-in plugin installer, the
 > computed compose file set and the plugin base image are described in
 > [External plugins: the installer](#external-plugins-the-installer). They are
 > tested without Docker (a fake Docker, local git repositories, compose files
@@ -168,7 +168,7 @@ gateway, for example), set `BROKER_PORT` in `.env`.
    `plugin-whatsapp` towards `whatsapp-sidecar:8081`), while the broker
    reaches all three (step 5 lists all five plugins).
 3. **Health.** `curl -s http://127.0.0.1:8080/health` and `/v1/health`
-   answer `200 {"status":"ok","version":"0.2.0"}` (`HEAD` answers the status
+   answer `200 {"status":"ok","version":"0.3.0"}` (`HEAD` answers the status
    alone). Anonymous, they report liveness only, never plugin or connection
    state. With a **monitor token** (Account > Admin tokens, scope
    "monitor"; or `aab tokens create --scope monitor`) the same paths answer
@@ -238,7 +238,7 @@ gateway, for example), set `BROKER_PORT` in `.env`.
      `503 {"error":"target is not connected","code":"not_connected"}`,
      never a 500.
    - MCP `initialize` answers with `serverInfo`
-     `{"name":"agent-authority-broker","version":"0.2.0"}`, and `tools/list`
+     `{"name":"agent-authority-broker","version":"0.3.0"}`, and `tools/list`
      holds only the 12 generic tools (`get_my_access`, `list_targets`,
      `resolve_resource`, `request_permission`, `get_permission_status`,
      `list_my_permissions`, `delegate`, `list_my_delegations`,

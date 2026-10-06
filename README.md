@@ -108,7 +108,7 @@ phone with WhatsApp for pairing.
 python scripts/init_secrets.py        # writes .env (mode 0600) with 11 generated secrets;
                                       # prints a checklist, never a secret value
 docker compose up -d --build
-curl http://127.0.0.1:8080/v1/health  # {"status":"ok","version":"0.2.0"}
+curl http://127.0.0.1:8080/v1/health  # {"status":"ok","version":"0.3.0"}
 ```
 
 1. **Create the owner account.** Open <http://127.0.0.1:8080/admin>. The
@@ -396,7 +396,12 @@ grants and under per-action approval, printing the interrupt table.
 
 ## Status and caveats
 
-Version 0.2.0, single owner.
+Version 0.3.0, single owner.
+
+- **External plugins and the installer are verified.** The acceptance test
+  in `docs/deployment.md` ran under Docker on a laptop and on the production
+  host: the echo fixture from a public repository and the finance plugin
+  from a private one, installed from the console, then removed and purged.
 
 - **Verified under Docker, except with a paired phone.** The five images
   build, the stack runs as uid 10001 with only the broker published, and
