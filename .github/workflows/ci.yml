@@ -43,6 +43,21 @@ jobs:
         if: hashFiles('plugin-runtime/pyproject.toml') != ''
         run: pytest plugin-runtime
 
+  # The opt-in plugin installer (installer/): descriptor validation, the
+  # overlay renderer (golden file) and the .env helper. No Docker needed.
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install installer (editable, with dev extras)
+        run: pip install -e "installer[dev]"
+      - name: pytest
+        working-directory: installer
+        run: python -m pytest
+
   # The WhatsApp plugin service (plugins/whatsapp): its own package and tests.
   # The broker job above also runs broker/tests/targets, which serves this
   # plugin through the runtime end to end (imported from source there).

@@ -1,7 +1,9 @@
 """scripts/init_secrets.py: generates every deployment secret (the broker's
-own plus a token and a key per plugin service), never prints one, refuses to
-clobber, rotates exactly one line, and matches .env.example. Third-party
-credentials have no entry at all: they are entered in the console.
+own plus a token and a key per plugin service, and the opt-in installer's
+token), never prints one, refuses to clobber, rotates exactly one line,
+appends an installed plugin service's pair under any valid service name, and
+matches .env.example. Third-party credentials have no entry at all: they are
+entered in the console.
 
 The script is run as a subprocess (as an operator would run it), with the
 interpreter running the tests.
@@ -23,7 +25,8 @@ SCRIPT = REPO / "scripts" / "init_secrets.py"
 FERNET_KEYS = ["BROKER_SECRETS_KEY", "PLUGIN_SECRETS_KEY_WHATSAPP",
                "PLUGIN_SECRETS_KEY_GITHUB", "PLUGIN_SECRETS_KEY_GOOGLE"]
 HEX_TOKENS = ["SIDECAR_TOKEN", "ORIGIN_SECRET", "DECISION_SIGNING_KEY",
-              "PLUGIN_TOKEN_WHATSAPP", "PLUGIN_TOKEN_GITHUB", "PLUGIN_TOKEN_GOOGLE"]
+              "PLUGIN_TOKEN_WHATSAPP", "PLUGIN_TOKEN_GITHUB", "PLUGIN_TOKEN_GOOGLE",
+              "INSTALLER_TOKEN"]
 GENERATED = ["SETUP_TOKEN", *HEX_TOKENS, *FERNET_KEYS]
 # Public-mode exposure values: the only hand-filled entries left in the file.
 PLACEHOLDERS = ["CF_ACCESS_TEAM_DOMAIN", "CF_ACCESS_AUD", "SITE_DOMAIN"]
@@ -35,7 +38,9 @@ CONSOLE_ONLY = ["GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GOOGLE_OAUTH_CL
 EXPECTED_KEYS = ["SETUP_TOKEN", "ORIGIN_SECRET", "BROKER_SECRETS_KEY", "DECISION_SIGNING_KEY",
                  "PLUGIN_TOKEN_WHATSAPP", "PLUGIN_SECRETS_KEY_WHATSAPP", "SIDECAR_TOKEN",
                  "PLUGIN_TOKEN_GITHUB", "PLUGIN_SECRETS_KEY_GITHUB", "PLUGIN_TOKEN_GOOGLE",
-                 "PLUGIN_SECRETS_KEY_GOOGLE", *PLACEHOLDERS, "BROKER_PORT", "DEVICE_NAME", "TZ",
+                 "PLUGIN_SECRETS_KEY_GOOGLE", "INSTALLER_ENABLED", "INSTALLER_TOKEN",
+                 "INSTALLER_ALLOWED_SOURCES", "AAB_HOME",
+                 *PLACEHOLDERS, "BROKER_PORT", "DEVICE_NAME", "TZ",
                  "LOG_LEVEL", "LOG_FORMAT",
                  "GITHUB_APP_KEY_DIR", "MCP_ALLOWED_HOSTS", "CF_ACCESS_ENABLED",
                  "CF_ACCESS_ALLOWED_EMAILS", "ALLOW_INSECURE_ADMIN"]
@@ -72,12 +77,14 @@ def test_fresh_run_creates_every_key(out):
     assert len({values[n] for n in GENERATED}) == len(GENERATED)
 
 
-def test_generates_exactly_the_eleven_expected_secrets(out):
-    # The broker's four, SIDECAR_TOKEN, and a token + key per plugin service.
-    assert len(GENERATED) == 11
+def test_generates_exactly_the_twelve_expected_secrets(out):
+    # The broker's four, SIDECAR_TOKEN, a token + key per plugin service, and
+    # the installer's token (generated even while the installer is off, so
+    # turning it on is one setting).
+    assert len(GENERATED) == 12
     r = run("--out", out)
     assert r.returncode == 0, r.stderr
-    assert "with 11 generated secrets" in r.stdout
+    assert "with 12 generated secrets" in r.stdout
     for name in GENERATED:
         assert name in r.stdout   # names are listed, values never are
 
@@ -251,6 +258,61 @@ def test_file_mode_is_0600(out):
     assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
     run("--out", out, "--rotate", "SETUP_TOKEN")
     assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
+
+
+def test_installer_entries_fail_closed(out):
+    # Off, and with no allowed source: a fresh deployment can install nothing.
+    run("--out", out)
+    v = parse(out)
+    assert v["INSTALLER_ENABLED"] == "false"
+    assert v["INSTALLER_ALLOWED_SOURCES"] == ""
+    assert v["AAB_HOME"] == "/opt/aab"
+    lines = out.read_text(encoding="utf-8").splitlines()
+    comment = lines[lines.index("INSTALLER_ALLOWED_SOURCES=") - 1]
+    assert "Empty refuses every install" in comment and "console" in comment
+    comment = lines[lines.index("INSTALLER_ENABLED=false") - 1]
+    assert "root on this host" in comment
+
+
+@pytest.mark.parametrize("name,shape", [("PLUGIN_TOKEN_FINANCE", "hex"),
+                                        ("PLUGIN_SECRETS_KEY_FINANCE", "fernet"),
+                                        ("PLUGIN_TOKEN_AB", "hex"),
+                                        ("PLUGIN_SECRETS_KEY_" + "A" * 32, "fernet")])
+def test_rotate_appends_an_installed_plugin_service_pair(out, name, shape):
+    run("--out", out)
+    before = out.read_bytes()
+    r = run("--out", out, "--rotate", name)
+    assert r.returncode == 0, r.stderr
+    after = out.read_bytes()
+    assert after.startswith(before)                     # appended, nothing else touched
+    value = parse(out)[name]
+    if shape == "hex":
+        assert len(bytes.fromhex(value)) == 32
+    else:
+        assert len(base64.urlsafe_b64decode(value)) == 32
+    assert value not in r.stdout and value not in r.stderr
+    svc = name.rsplit("_", 1)[1].lower()
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert lines[-2].startswith("# ") and f"plugin-{svc}" in lines[-2]
+    assert f"plugin-{svc}" in r.stdout and "next: " in r.stdout
+    # A second rotate replaces the one line it added.
+    run("--out", out, "--rotate", name)
+    assert [l.split("=", 1)[0] for l in out.read_text(encoding="utf-8").splitlines()
+            if l.startswith(name + "=")] == [name]
+    assert parse(out)[name] != value
+
+
+@pytest.mark.parametrize("name", ["PLUGIN_TOKEN_", "PLUGIN_TOKEN_A", "PLUGIN_TOKEN_finance",
+                                  "PLUGIN_TOKEN_FIN_ANCE", "PLUGIN_TOKEN_1FIN",
+                                  "PLUGIN_TOKEN_" + "A" * 33, "PLUGIN_SECRET_KEY_FINANCE",
+                                  "PLUGIN_URL_FINANCE", "XPLUGIN_TOKEN_FINANCE"])
+def test_rotate_refuses_malformed_plugin_names(out, name):
+    run("--out", out)
+    before = out.read_bytes()
+    r = run("--out", out, "--rotate", name)
+    assert r.returncode == 2
+    assert "PLUGIN_TOKEN_<SERVICE>" in r.stderr
+    assert out.read_bytes() == before
 
 
 def test_env_example_matches_the_script(tmp_path):
