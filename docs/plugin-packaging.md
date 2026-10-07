@@ -104,7 +104,7 @@ These names come from `service` (here `finance`):
 | Its token, in the host's `.env` | `PLUGIN_TOKEN_FINANCE` (the broker presents it as `X-Plugin-Token`) |
 | Its secret-store key, in the host's `.env` | `PLUGIN_SECRETS_KEY_FINANCE` |
 | Where the broker finds it | `PLUGIN_URL_FINANCE=http://plugin-finance:8090` |
-| Its files on the host | `plugins.d/finance/` (`src/`, `compose.yml`, `install.json`) |
+| Its files on the host | `plugins.d/finance/` (`src/`, `compose.yml`, `newrelic.yml`, `install.json`) |
 
 ## What the installer renders, and what that guarantees
 
@@ -157,6 +157,16 @@ enforces these invariants. For external plugins, the template and
 - No extra Linux capability and no privilege escalation.
 - The rotated `json-file` logging that every service uses, and
   `restart: unless-stopped`.
+
+Beside the overlay, the installer writes `plugins.d/<service>/newrelic.yml`.
+It changes one thing: the plugin's logging goes to the New Relic log shipper,
+like the logging of every other service. `scripts/compose-files.sh` loads it
+only when `NEWRELIC_ENABLED=true` (`docs/logging.md`). The installer builds
+it from the service name alone. Its golden file is
+`installer/tests/golden/finance.newrelic.yml`. A plugin installed before
+the installer wrote this file gets it once from
+`python -m aab_installer.render_newrelic <service>`, through the same
+template (`docs/logging.md`, What the overlay adds).
 
 ## The base image
 
@@ -274,7 +284,7 @@ installer do:
    - It fetches the reviewed commit into `plugins.d/<service>/src`.
    - It makes sure that `.env` holds the token and the secret-store key of
      the plugin service. `scripts/init_secrets.py --rotate` generates them.
-   - It writes the overlay and `install.json`.
+   - It writes the overlay, its New Relic logging override and `install.json`.
    - It runs `docker compose ... up -d --build plugin-<service>`.
    - It runs `up -d broker`. This recreates the broker with its new
      environment and network, but never rebuilds it.

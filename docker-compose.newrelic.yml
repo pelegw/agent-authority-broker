@@ -1,0 +1,118 @@
+# New Relic overlay (opt-in). Loaded ON TOP of the other files when .env says
+# NEWRELIC_ENABLED=true (scripts/compose-files.sh adds it after every other
+# file, then the logging overrides in ops/newrelic/ and plugins.d/):
+#
+#   docker compose $(scripts/compose-files.sh) up -d
+#
+# It ships every service's log lines and the audit record (the decisions and
+# audit_log tables of broker.db) off this server to New Relic Logs, so an
+# agent elsewhere can query them (docs/logging.md, "Shipping logs and the
+# audit record to New Relic"). What bounds it:
+#   * log-shipper (Fluent Bit) is the ONLY container that receives
+#     NEW_RELIC_LICENSE_KEY. It mounts no volume but its read-only config,
+#     sits alone on net_logs, and publishes one port, on the host's
+#     127.0.0.1 only, for the Docker daemon's log driver. No container can
+#     reach it, and it can reach no container.
+#   * audit-exporter holds no credential and has no network at all. It
+#     mounts broker_data read-only (and opens broker.db with mode=ro), so it
+#     cannot change the record it copies. Its stdout IS the export.
+#   * Every service's logging switches to Docker's fluentd driver with
+#     fluentd-async: a container starts and runs while the shipper is down,
+#     and Docker's dual logging keeps `docker compose logs` working.
+#
+# A compose override cannot name a service no loaded file defines, so the
+# edge (public overlay), aab-installer (installer overlay) and each installed
+# plugin get their logging override from a small file of their own
+# (ops/newrelic/public.yml, ops/newrelic/installer.yml,
+# plugins.d/<service>/newrelic.yml), which compose-files.sh adds only beside
+# the file that defines the service.
+
+# The one logging block every shipped service uses (a test keeps the copies
+# in ops/newrelic/ and the installer's rendered override identical).
+x-fluentd: &fluentd
+  driver: fluentd
+  options:
+    fluentd-address: 127.0.0.1:24224
+    fluentd-async: "true"
+    tag: "aab.{{.Name}}"
+
+# The shipper's own log stays on this server, rotated like every other
+# json-file log: shipping it through itself would loop its own errors back in.
+x-local-logging: &local-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  broker:
+    logging: *fluentd
+  plugin-whatsapp:
+    logging: *fluentd
+  whatsapp-sidecar:
+    logging: *fluentd
+  plugin-github:
+    logging: *fluentd
+  plugin-google:
+    logging: *fluentd
+
+  log-shipper:
+    # Pinned: a new Fluent Bit release is a reviewed change, not a pull.
+    image: fluent/fluent-bit:5.1.3
+    restart: unless-stopped
+    logging: *local-logging
+    # region-US.yaml or region-EU.yaml. Any other value names no file, and
+    # Fluent Bit refuses to start (docker compose logs log-shipper says so).
+    entrypoint: ["/fluent-bit/bin/fluent-bit"]
+    command: ["-c", "/fluent-bit/etc/aab/region-${NEW_RELIC_REGION:-US}.yaml"]
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [net_logs]
+    ports:
+      # The Docker daemon connects here for every container's log lines.
+      # Loopback only: nothing off this host can send it lines.
+      - "127.0.0.1:24224:24224"
+    volumes:
+      - ./ops/fluent-bit:/fluent-bit/etc/aab:ro
+    environment:
+      # A third-party credential in .env, by exception: Fluent Bit reads it at
+      # start, before any console exists (docs/configuration.md).
+      NEW_RELIC_LICENSE_KEY: ${NEW_RELIC_LICENSE_KEY:?set NEW_RELIC_LICENSE_KEY in .env, or NEWRELIC_ENABLED=false (docs/logging.md)}
+
+  audit-exporter:
+    # The broker's own image, as the broker service builds and tags it
+    # (docker-compose.yml): `aab audit export` reads broker.db directly. No
+    # build here, so one `up --build` builds the broker once, and
+    # pull_policy never: compose never fetches an image of this name from a
+    # registry.
+    image: aab-broker
+    pull_policy: never
+    restart: unless-stopped
+    logging: *fluentd
+    command: ["aab", "audit", "export", "--loop"]
+    # The image's healthcheck probes the broker's HTTP port; nothing listens here.
+    healthcheck:
+      disable: true
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - broker_data:/gwdata:ro               # the record it copies, never writable here
+      - audit_export_state:/audit-export     # its cursor, and nothing else
+    environment:
+      BROKER_DB: /gwdata/broker.db
+      AUDIT_EXPORT_STATE: /audit-export/cursor.json
+      AUDIT_EXPORT_INTERVAL: ${AUDIT_EXPORT_INTERVAL:-3600}
+      AUDIT_EXPORT_HASH_RESOURCES: ${AUDIT_EXPORT_HASH_RESOURCES:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-text}
+
+# Not internal: the shipper sends to New Relic over https. Only it is here.
+networks:
+  net_logs: {}
+
+volumes:
+  audit_export_state: {}

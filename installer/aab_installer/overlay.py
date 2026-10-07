@@ -21,6 +21,16 @@ them, enforced here by construction and by installer/tests/test_overlay.py):
   * the rotated json-file logging every service uses, restart unless-stopped;
   * the broker gains `net_<service>`, PLUGIN_URL_<SVC> and PLUGIN_TOKEN_<SVC>.
 
+Beside it, render_newrelic() writes `plugins.d/<service>/newrelic.yml`: the
+plugin's logging switched to the log shipper, and nothing else.
+scripts/compose-files.sh loads it only when NEWRELIC_ENABLED=true, after
+docker-compose.newrelic.yml, which cannot name an installed plugin itself (a
+compose override may not mention a service no loaded file defines). It is
+written on every install and upgrade whatever the setting, so turning New
+Relic on or off never needs a re-render. A plugin installed before the
+installer wrote it gets it once from `python -m aab_installer.render_newrelic`
+(render_newrelic.py), through this same function.
+
 Relative paths in an overlay resolve against the project directory (the
 gateway checkout), not against the overlay's own directory, which is why the
 build context is spelled from the project root.
@@ -38,12 +48,26 @@ PLUGIN_PORT = 8090          # what the plugin runtime image serves on (plugins/b
 PLUGINS_DIR = "plugins.d"
 # docker-compose.yml's x-logging: at most 5 files of 10 MB per container.
 LOGGING = {"driver": "json-file", "options": {"max-size": "10m", "max-file": "5"}}
+# docker-compose.newrelic.yml's x-fluentd (broker/tests/test_config_files.py
+# keeps the two identical): Docker's fluentd driver to the log shipper on the
+# host's loopback, async, so a shipper outage never blocks the plugin.
+FLUENTD_LOGGING = {"driver": "fluentd",
+                   "options": {"fluentd-address": "127.0.0.1:24224", "fluentd-async": "true",
+                               "tag": "aab.{{.Name}}"}}
+NEWRELIC_FILE = "newrelic.yml"
 
 HEADER = """\
 # Rendered by aab-installer from plugins.d/{service}/src/aab-plugin.yaml.
 # Do not edit: every install or upgrade rewrites it from the descriptor.
 # The plugin gets one network (net_{service}, shared with the broker only),
 # named volumes only, no ports, and only its own token and key.
+"""
+
+NEWRELIC_HEADER = """\
+# Rendered by aab-installer for plugin-{service}. Do not edit.
+# scripts/compose-files.sh loads it only when NEWRELIC_ENABLED=true, after
+# docker-compose.newrelic.yml: the plugin's log lines then go to the log
+# shipper like every other service's (docs/logging.md). Logging only.
 """
 
 
@@ -112,3 +136,18 @@ def render(d: Descriptor, svc_dir: str | PurePosixPath) -> str:
     body = yaml.safe_dump(document(d, svc_dir), sort_keys=False, default_flow_style=False,
                           width=1000, allow_unicode=False)
     return HEADER.format(service=d.service) + body
+
+
+def newrelic_document(service: str) -> dict:
+    """The New Relic logging override as data: one service, one key."""
+    return {"services": {names(service)["compose_service"]: {"logging": FLUENTD_LOGGING}}}
+
+
+def render_newrelic(service: str) -> str:
+    """The YAML for `plugins.d/<service>/newrelic.yml`. Built from the
+    validated service name alone: nothing from the repository reaches it.
+    The installer writes it on install and upgrade; render_newrelic.py
+    writes the same bytes for a plugin installed before that."""
+    body = yaml.safe_dump(newrelic_document(service), sort_keys=False,
+                          default_flow_style=False, width=1000, allow_unicode=False)
+    return NEWRELIC_HEADER.format(service=service) + body

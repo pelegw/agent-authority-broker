@@ -11,6 +11,16 @@
 #   docker-compose.public.yml         when SITE_DOMAIN is set in .env (the public deploy)
 #   docker-compose.installer.yml      when INSTALLER_ENABLED=true in .env (opt-in)
 #   plugins.d/<service>/compose.yml   every installed external plugin (installer-owned)
+#   docker-compose.newrelic.yml       when NEWRELIC_ENABLED=true in .env (opt-in), then
+#                                     the logging override of each service it cannot
+#                                     name itself, after the file that defines it:
+#     ops/newrelic/public.yml           the edge (with docker-compose.public.yml)
+#     ops/newrelic/installer.yml        aab-installer (with docker-compose.installer.yml)
+#     plugins.d/<service>/newrelic.yml  each installed plugin whose overlay has one
+#                                       (the installer renders it; older installs lack it)
+#
+# The New Relic files come last: a later file overrides an earlier one, and
+# they switch every service's logging to the log shipper.
 #
 # Paths are printed relative to the checkout: run compose from it, or with
 # --project-directory pointing at it. Only plugins.d entries whose directory
@@ -29,13 +39,23 @@ env_value() {
   fi
 }
 
+public=""
+installer=""
+newrelic=""
+if [ -n "$(env_value SITE_DOMAIN)" ]; then public=1; fi
+if [ "$(env_value INSTALLER_ENABLED)" = "true" ]; then installer=1; fi
+if [ "$(env_value NEWRELIC_ENABLED)" = "true" ]; then newrelic=1; fi
+
 out="-f docker-compose.yml"
-if [ -n "$(env_value SITE_DOMAIN)" ]; then
+if [ -n "$public" ]; then
   out="$out -f docker-compose.public.yml"
 fi
-if [ "$(env_value INSTALLER_ENABLED)" = "true" ]; then
+if [ -n "$installer" ]; then
   out="$out -f docker-compose.installer.yml"
 fi
+# Valid service names only (no space can hide in one), kept for the New
+# Relic pass below.
+services=""
 for f in plugins.d/*/compose.yml; do
   [ -f "$f" ] || continue
   svc="${f#plugins.d/}"
@@ -44,5 +64,20 @@ for f in plugins.d/*/compose.yml; do
     ""|[!a-z]*|*[!a-z0-9]*) continue ;;
   esac
   out="$out -f $f"
+  services="$services $svc"
 done
+if [ -n "$newrelic" ]; then
+  out="$out -f docker-compose.newrelic.yml"
+  if [ -n "$public" ]; then
+    out="$out -f ops/newrelic/public.yml"
+  fi
+  if [ -n "$installer" ]; then
+    out="$out -f ops/newrelic/installer.yml"
+  fi
+  for svc in $services; do
+    if [ -f "plugins.d/$svc/newrelic.yml" ]; then
+      out="$out -f plugins.d/$svc/newrelic.yml"
+    fi
+  done
+fi
 printf '%s\n' "$out"

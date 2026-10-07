@@ -79,6 +79,9 @@ async def lifespan(app: FastAPI):
     # Discover plugin services from env; unreachable ones are retried lazily.
     init_registry()
     log_registry()
+    # Keeps broker.db-wal and -shm in place while the broker runs, so the
+    # audit exporter can read the file from its read-only mount (db.hold_open).
+    keeper = db.hold_open()
     loops = [background.Loop(scheduler.scheduler_loop),
              # Runs the Telegram poll loop while a bot token is stored and
              # stops it when the token is cleared: no restart is ever needed.
@@ -93,6 +96,7 @@ async def lifespan(app: FastAPI):
         # Telegram tap), so no database work outlives the app.
         for loop in loops:
             await loop.stop()
+        keeper.close()
         log.info("broker stopped")
 
 

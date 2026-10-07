@@ -107,6 +107,21 @@ class Settings(BaseSettings):
     # closed at boot instead of silently guarding admin with the password alone.
     allow_insecure_admin: bool = False
 
+    # --- Audit export (docs/logging.md, "The audit export") ------------------
+
+    # Read by `aab audit export` (the New Relic overlay's audit-exporter),
+    # never by the broker process: compose hands them to that container
+    # alone. They are here so the command parses them like every other
+    # setting, and a value it cannot read fails validation, so the command
+    # refuses to run instead of guessing. Its flags override them.
+    # The cursor file. Empty means unset, and the command refuses to run.
+    audit_export_state: str = ""
+    # Replace resource ids (and the strings in audit_log.detail) with
+    # sha256 prefixes. Unreadable is an error, never a silent "off".
+    audit_export_hash_resources: bool = False
+    # Seconds between two runs with --loop.
+    audit_export_interval: int = Field(default=3600, ge=1)
+
     def public_mode(self) -> bool:
         """True once an edge origin secret is configured (internet exposure)."""
         return bool(self.origin_secret)

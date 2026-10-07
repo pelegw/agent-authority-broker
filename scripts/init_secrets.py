@@ -36,6 +36,12 @@ what must exist before the database is readable, plus the public-mode
 exposure values (Cloudflare Access, SITE_DOMAIN), which are written as empty,
 labelled placeholders; a checklist of where to obtain each is printed.
 
+One third-party credential is here by exception: NEW_RELIC_LICENSE_KEY
+(opt-in log shipping, NEWRELIC_ENABLED). Fluent Bit reads it from its
+environment when it starts, and no broker code ever holds it, so there is no
+console to enter it in. It is an empty placeholder the owner fills in, never
+generated, and compose hands it to the log-shipper container alone.
+
 `.env.example` in the repo is this file's `--example` output; a test keeps the
 two identical so the template can't drift from what the script writes.
 """
@@ -80,6 +86,11 @@ def _fernet_key() -> str:
 def _setup_token() -> str:
     return secrets.token_urlsafe(32)
 
+
+# Its placeholder goes in a checklist block of its own: it is not about the
+# public deploy, and it matters only when the owner turns shipping on.
+NEWRELIC_SECTION = ("Log shipping to New Relic (opt-in: docker-compose.newrelic.yml; see "
+                    "docs/logging.md)")
 
 # (section title, entries). Order here is the order in the file.
 SECTIONS: list[tuple[str, list[Entry]]] = [
@@ -137,6 +148,28 @@ SECTIONS: list[tuple[str, list[Entry]]] = [
               "Absolute path of this checkout on the host (deploy/push.sh REMOTE_DIR). The "
               "installer mounts it at the same path, so compose resolves paths as the host does.",
               default="/opt/aab"),
+    ]),
+    (NEWRELIC_SECTION, [
+        Entry("NEWRELIC_ENABLED",
+              "Ship every service's logs and the audit record to New Relic Logs "
+              "(scripts/compose-files.sh reads this; exactly true turns it on). Off by default.",
+              default="false"),
+        Entry("NEW_RELIC_REGION",
+              "Your New Relic account's data center: US or EU (capitals). Picks the "
+              "log-shipper's endpoint.",
+              default="US"),
+        Entry("NEW_RELIC_LICENSE_KEY",
+              "New Relic ingest license key. A third-party credential kept here by exception: "
+              "Fluent Bit reads it at start (docs/configuration.md). log-shipper only.",
+              obtain="New Relic > your user menu > API keys > the INGEST - LICENSE key > "
+                     "Copy key."),
+        Entry("AUDIT_EXPORT_INTERVAL",
+              "Seconds between two runs of the audit exporter (it sends only new rows).",
+              default="3600"),
+        Entry("AUDIT_EXPORT_HASH_RESOURCES",
+              "true: the audit export replaces every resource id with sha256:<16 hex> "
+              "(docs/logging.md). Service log lines are not changed.",
+              default="false"),
     ]),
     ("Public-mode values (fill in for an internet deploy; see the checklist the script prints)", [
         Entry("CF_ACCESS_TEAM_DOMAIN",
@@ -327,11 +360,19 @@ def _write_private(path: Path, data: bytes) -> None:
 
 
 def _checklist() -> list[str]:
+    newrelic = {e.name for title, entries in SECTIONS if title == NEWRELIC_SECTION
+                for e in entries}
     out = ["For a public (internet) deploy, fill in these values in the file:"]
     for e in ENTRIES.values():
-        if e.obtain:
+        if e.obtain and e.name not in newrelic:
             out.append(f"  [ ] {e.name}: {e.obtain}")
     out.append("  and set CF_ACCESS_ENABLED=true (see deploy/DEPLOY.md).")
+    out.append("")
+    out.append("To ship logs and the audit record to New Relic (optional), set "
+               "NEWRELIC_ENABLED=true and NEW_RELIC_REGION, and fill in:")
+    for e in ENTRIES.values():
+        if e.obtain and e.name in newrelic:
+            out.append(f"  [ ] {e.name}: {e.obtain}")
     out.append("")
     out.append("Entered in the console (/admin), never in this file, when you enable the feature:")
     for what, where, obtain in CONSOLE_ENTERED:

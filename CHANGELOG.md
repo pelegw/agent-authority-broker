@@ -10,8 +10,68 @@ lives only in `VERSION`.
   License, version 3 or later (`AGPL-3.0-or-later`), with the license
   classifier on every Python package and a License section in the README
   that says how the license reaches plugins built on the runtime.
+- **Shipping logs and the audit record to New Relic** (opt-in,
+  `NEWRELIC_ENABLED=true`; `docs/logging.md`). `docker-compose.newrelic.yml`,
+  added last by `scripts/compose-files.sh`, adds:
+  - `log-shipper`: Fluent Bit 5.1.3 (`ops/fluent-bit/`, output `nrlogs`,
+    endpoint by `NEW_RELIC_REGION`, US or EU). It is the only container that
+    receives `NEW_RELIC_LICENSE_KEY`, sits alone on `net_logs`, runs as
+    `nobody` read-only, and publishes only `127.0.0.1:24224` for the Docker
+    log driver. Its pipeline joins Docker's split long lines and parses JSON
+    lines into attributes. From the WhatsApp sidecar it keeps every stderr
+    line (Go's log lines and any crash output, a panic included) and, from
+    stdout, whatsmeow's log lines only. It drops whatsmeow's `QRChannel`
+    lines and any line that carries a pairing code (whatsmeow logs the code
+    at `DEBUG`). So the pairing QR (stdout) and its code never leave the
+    server. Its own log stays local.
+  - `audit-exporter`: `aab audit export --loop` (new module
+    `broker/audit_export.py`) from the broker's image, hourly by default
+    (`AUDIT_EXPORT_INTERVAL`). It prints every new `decisions` and
+    `audit_log` row, all columns with `hash` and `prev_hash`, as one JSON
+    line with `service: "audit"` and `table`. It opens `broker.db` read-only
+    (`mode=ro`, `query_only`) from a read-only `broker_data` mount, with no
+    network and no credential. A cursor in its own volume moves only after a
+    batch is out (at least once, never a gap) and notices a replaced
+    database. The cursor names a row by its identity columns only (`id`,
+    `hash`; `id`, `ts`, `actor`, `action`), so a column added by an upgrade
+    does not restart the export.
+  - Typed text never leaves in the audit export. The values of the
+    `audit_log.detail` keys `reason`, `note`, `label`, `message` and `text`
+    (at any depth) are always replaced with `redacted:sha256:<16 hex>`. A
+    `detail` that is not a JSON object is replaced whole.
+    `AUDIT_EXPORT_HASH_RESOURCES=true` also replaces every resource id, and
+    every other string in `audit_log.detail`, with `sha256:<16 hex>`.
+  - `AUDIT_EXPORT_STATE`, `AUDIT_EXPORT_INTERVAL` and
+    `AUDIT_EXPORT_HASH_RESOURCES` are settings (`broker/config.py`); the
+    flags `--state`, `--interval` and `--hash-resources` override them, and
+    an unreadable value stops the exporter with the variable's name. With
+    `--loop`, `--reset` stays armed until a run succeeds. On SIGTERM the
+    exporter exits within about a second (the handler only sets a flag).
+  - Every service's logging switches to the `fluentd` driver with
+    `fluentd-async`, so a shipper outage never blocks a service, and Docker's
+    dual logging keeps `docker compose logs`. The edge, `aab-installer` and
+    each installed plugin get the switch from their own override file
+    (`ops/newrelic/public.yml`, `ops/newrelic/installer.yml`, and
+    `plugins.d/<service>/newrelic.yml`, which the installer now renders on
+    every install and upgrade). For a plugin installed before, `python -m
+    aab_installer.render_newrelic <service>` (or `--all`), run once in the
+    installer container, writes the same file.
+  - `.env` gains `NEWRELIC_ENABLED=false`, `NEW_RELIC_REGION=US`, an empty
+    `NEW_RELIC_LICENSE_KEY` (a third-party credential kept in the file by
+    exception, because Fluent Bit reads it at start; `docs/configuration.md`),
+    `AUDIT_EXPORT_INTERVAL=3600` and `AUDIT_EXPORT_HASH_RESOURCES=false`.
+    The console's file-only list names them.
 
 ### Changed
+- The broker holds one idle database connection while it runs
+  (`db.hold_open()`), so `broker.db-wal` and `-shm` always exist. A reader on
+  a read-only mount (the audit exporter) cannot create them, and SQLite
+  deletes them whenever the last connection closes.
+- The broker image creates `/audit-export`, owned by `aab`, for the audit
+  exporter's cursor volume.
+- The `broker` service names its image `aab-broker` (the name compose gave
+  it already), with `pull_policy: never`. The audit exporter runs that image
+  and has no build of its own, so `up --build` builds the broker once.
 - Every document under `docs/` is rewritten in simplified technical English
   (short active sentences, one instruction each, a fixed vocabulary, lists
   instead of long enumerations), with every heading, table, code block,

@@ -205,6 +205,8 @@ def test_install_runs_the_expected_commands_and_leaves_the_expected_files(client
     assert (svc / "src" / "aab-plugin.yaml").read_text(encoding="utf-8") == ECHO_DESCRIPTOR
     assert (svc / "compose.yml").read_text(encoding="utf-8") == overlay.render(
         parse(ECHO_DESCRIPTOR), "plugins.d/echo")
+    # Written whatever NEWRELIC_ENABLED says: compose-files.sh decides.
+    assert (svc / "newrelic.yml").read_text(encoding="utf-8") == overlay.render_newrelic("echo")
     record = json.loads((svc / "install.json").read_text(encoding="utf-8"))
     assert (record["service"], record["source"], record["ref"], record["commit"]) == (
         "echo", SOURCE, "v0.1.0", echo_repo.v1)
@@ -223,7 +225,7 @@ def test_install_runs_the_expected_commands_and_leaves_the_expected_files(client
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 def test_the_overlay_and_record_are_readable_by_the_deploying_user(client, project, echo_repo):
     install(client, echo_repo)
-    for name in ("compose.yml", "install.json"):
+    for name in ("compose.yml", "newrelic.yml", "install.json"):
         mode = stat.S_IMODE(os.stat(project / "plugins.d" / "echo" / name).st_mode)
         assert mode == 0o644, name
 
@@ -301,13 +303,31 @@ def test_upgrade_moves_to_the_new_commit(client, project, fake_docker, echo_repo
 def test_a_failed_upgrade_restores_the_previous_files(client, project, fake_docker, echo_repo):
     install(client, echo_repo)
     svc = project / "plugins.d" / "echo"
-    before = {p: (svc / p).read_bytes() for p in ("compose.yml", "install.json",
+    before = {p: (svc / p).read_bytes() for p in ("compose.yml", "newrelic.yml", "install.json",
                                                   "src/aab_plugin_echo/manifest.yaml")}
     fake_docker.fail["--build plugin-echo"] = 2
     job = run_job(client, "/upgrade", {"service": "echo", "source": SOURCE, "ref": "v0.2.0",
                                        "commit": echo_repo.v2})
     assert job["state"] == "failed"
     assert {p: (svc / p).read_bytes() for p in before} == before
+
+
+def test_an_upgrade_adds_the_newrelic_override_to_an_older_install(client, project,
+                                                                   fake_docker, echo_repo):
+    """An install made before newrelic.yml existed gains it on its next
+    upgrade; a failed upgrade takes it away again, as it was."""
+    install(client, echo_repo)
+    svc = project / "plugins.d" / "echo"
+    (svc / "newrelic.yml").unlink()
+    fake_docker.fail["--build plugin-echo"] = 2
+    job = run_job(client, "/upgrade", {"service": "echo", "source": SOURCE, "ref": "v0.2.0",
+                                       "commit": echo_repo.v2})
+    assert job["state"] == "failed" and not (svc / "newrelic.yml").exists()
+    fake_docker.fail.clear()
+    job = run_job(client, "/upgrade", {"service": "echo", "source": SOURCE, "ref": "v0.2.0",
+                                       "commit": echo_repo.v2})
+    assert job["state"] == "done", job
+    assert (svc / "newrelic.yml").read_text(encoding="utf-8") == overlay.render_newrelic("echo")
 
 
 def test_upgrade_needs_an_installed_service_from_the_same_source(client, echo_repo):

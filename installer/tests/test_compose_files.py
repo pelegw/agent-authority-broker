@@ -68,6 +68,65 @@ def test_installed_plugins_are_listed_and_strays_are_not(checkout):
 
 
 @needs_sh
+@pytest.mark.parametrize("env,expected", [
+    ("NEWRELIC_ENABLED=true\n", ["docker-compose.newrelic.yml"]),
+    ("NEWRELIC_ENABLED=TRUE\n", []),                       # exactly "true", or off
+    ("NEWRELIC_ENABLED=true\r\nNEWRELIC_ENABLED=false\r\n", []),   # the last one wins
+    ("NEWRELIC_ENABLED=false\n", []),
+    ("SITE_DOMAIN=aab.example.com\nNEWRELIC_ENABLED=true\n",
+     ["docker-compose.public.yml", "docker-compose.newrelic.yml", "ops/newrelic/public.yml"]),
+    ("INSTALLER_ENABLED=true\nNEWRELIC_ENABLED=true\r\n",
+     ["docker-compose.installer.yml", "docker-compose.newrelic.yml",
+      "ops/newrelic/installer.yml"]),
+    ("SITE_DOMAIN=x\nINSTALLER_ENABLED=true\nNEWRELIC_ENABLED=true\n",
+     ["docker-compose.public.yml", "docker-compose.installer.yml",
+      "docker-compose.newrelic.yml", "ops/newrelic/public.yml", "ops/newrelic/installer.yml"]),
+])
+def test_the_newrelic_overlay_comes_last_with_one_override_per_optional_file(checkout, env,
+                                                                             expected):
+    """A compose override cannot name a service no loaded file defines, so
+    the edge's and the installer's logging overrides come only with the
+    file that defines them, and after docker-compose.newrelic.yml."""
+    (checkout / ".env").write_text(env, newline="")
+    out = files_for(checkout)
+    assert out[:2] == ["-f", "docker-compose.yml"]
+    assert out[3::2] == expected and all(f == "-f" for f in out[2::2])
+
+
+@needs_sh
+def test_installed_plugins_get_their_newrelic_override_after_every_overlay(checkout):
+    for name in ("finance", "budget", "old"):
+        (checkout / "plugins.d" / name).mkdir(parents=True)
+        (checkout / "plugins.d" / name / "compose.yml").write_text("services: {}\n")
+    for name in ("finance", "budget"):         # "old" was installed before the file existed
+        (checkout / "plugins.d" / name / "newrelic.yml").write_text("services: {}\n")
+    # A newrelic.yml without its compose.yml (or in a stray directory) would
+    # name a service no file defines: never listed.
+    for name in ("orphan", "Bad"):
+        (checkout / "plugins.d" / name).mkdir()
+        (checkout / "plugins.d" / name / "newrelic.yml").write_text("services: {}\n")
+    plugins = ["-f", "plugins.d/budget/compose.yml", "-f", "plugins.d/finance/compose.yml",
+               "-f", "plugins.d/old/compose.yml"]
+    assert files_for(checkout) == ["-f", "docker-compose.yml", *plugins]
+    (checkout / ".env").write_text("NEWRELIC_ENABLED=true\n", newline="")
+    assert files_for(checkout) == [
+        "-f", "docker-compose.yml", *plugins, "-f", "docker-compose.newrelic.yml",
+        "-f", "plugins.d/budget/newrelic.yml", "-f", "plugins.d/finance/newrelic.yml"]
+
+
+@needs_sh
+def test_the_installer_accepts_every_file_the_script_prints(checkout):
+    (checkout / "plugins.d" / "finance").mkdir(parents=True)
+    for name in ("compose.yml", "newrelic.yml"):
+        (checkout / "plugins.d" / "finance" / name).write_text("services: {}\n")
+    (checkout / ".env").write_text("SITE_DOMAIN=x\nINSTALLER_ENABLED=true\n"
+                                   "NEWRELIC_ENABLED=true\n", newline="")
+    printed = " ".join(files_for(checkout))
+    assert len(printed.split()) == 16
+    assert _compose_with(printed).files() == printed.split()
+
+
+@needs_sh
 def test_the_repo_checkout_itself():
     out = files_for(REPO)
     assert out[:2] == ["-f", "docker-compose.yml"]
@@ -82,6 +141,10 @@ def _compose_with(output: str, code: int = 0) -> Compose:
     "-f docker-compose.yml -f ../x/compose.yml", "-f docker-compose.yml --env-file /x",
     "-f docker-compose.yml -f plugins.d/../compose.yml", "-f docker-compose.yml extra",
     "-f docker-compose.yml -f plugins.d/Bad/compose.yml",
+    "-f docker-compose.yml -f ops/newrelic/other.yml",
+    "-f docker-compose.yml -f ops/newrelic/../../etc/x.yml",
+    "-f docker-compose.yml -f plugins.d/finance/other.yml",
+    "-f docker-compose.yml -f ops/fluent-bit/pipeline.yaml",
 ])
 def test_unexpected_file_lists_are_refused(output):
     with pytest.raises(ComposeError):

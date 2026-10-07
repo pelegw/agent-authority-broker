@@ -105,8 +105,10 @@ jobs:
       # secrets script, so a missing variable or bad key fails here: base,
       # base+public, base+installer (INSTALLER_ENABLED=true), and the full set
       # scripts/compose-files.sh prints with an installer-rendered plugin
-      # overlay (the golden file) in plugins.d.
-      - name: docker compose config (base, public, installer, rendered plugin)
+      # overlay (the golden file) in plugins.d, then the same set with the
+      # New Relic overlay (NEWRELIC_ENABLED=true): it must refuse to start
+      # without a license key, and validate with a fake one.
+      - name: docker compose config (base, public, installer, rendered plugin, New Relic)
         run: |
           python3 scripts/init_secrets.py --out .env
           sed -i 's/^SITE_DOMAIN=$/SITE_DOMAIN=aab.example.com/' .env
@@ -119,6 +121,16 @@ jobs:
           python3 scripts/init_secrets.py --out .env --rotate PLUGIN_TOKEN_FINANCE
           python3 scripts/init_secrets.py --out .env --rotate PLUGIN_SECRETS_KEY_FINANCE
           sh scripts/compose-files.sh
+          docker compose $(sh scripts/compose-files.sh) config -q
+          cp installer/tests/golden/finance.newrelic.yml plugins.d/finance/newrelic.yml
+          sed -i 's/^NEWRELIC_ENABLED=false$/NEWRELIC_ENABLED=true/' .env
+          sh scripts/compose-files.sh
+          # (`! cmd` would not fail a `bash -e` step; this does.)
+          if docker compose $(sh scripts/compose-files.sh) config -q; then
+            echo "the New Relic overlay must refuse to start without NEW_RELIC_LICENSE_KEY"
+            exit 1
+          fi
+          sed -i 's/^NEW_RELIC_LICENSE_KEY=$/NEW_RELIC_LICENSE_KEY=ci-fake-license-key/' .env
           docker compose $(sh scripts/compose-files.sh) config -q
           rm -rf .env plugins.d
 

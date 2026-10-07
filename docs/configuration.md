@@ -8,7 +8,7 @@ session must not be able to weaken what the operator decided.
 ## What lives in files, and why
 
 `python scripts/init_secrets.py` writes `.env`. Do not write it by hand.
-`.env` holds only two categories.
+`.env` holds only the categories below.
 
 **1. Generated bootstrap secrets.** They must exist before the database is
 readable, or before containers can authenticate each other.
@@ -80,6 +80,40 @@ token only lets git read the private ones among them. As a third-party
 credential, it follows the rule of the Telegram bot token. The owner enters it
 in the console, and the broker encrypts it under `BROKER_SECRETS_KEY`. It is
 never in a file.
+
+**4. Log shipping to New Relic (opt-in).** `docker-compose.newrelic.yml`
+sends every service's log lines and the audit record off the server
+(`docs/logging.md`). These keys decide whether data leaves the server and
+where it goes. Thus they are file-only: a hijacked console session cannot
+turn shipping on or point it elsewhere.
+
+| Key | Read by | Why it lives in a file |
+|---|---|---|
+| `NEWRELIC_ENABLED` | `scripts/compose-files.sh` | Loads the overlay at all. Off (`false`) by default; exactly `true` turns it on. |
+| `NEW_RELIC_REGION` | compose | `US` or `EU`: picks the shipper's configuration file, and with it the endpoint. |
+| `NEW_RELIC_LICENSE_KEY` | `log-shipper` only | The ingest key. A third-party credential, kept here by exception (below). |
+| `AUDIT_EXPORT_INTERVAL` | the audit exporter | Seconds between two exports (default 3600, at least 1). An unreadable value stops the exporter. |
+| `AUDIT_EXPORT_HASH_RESOURCES` | the audit exporter | `true` replaces each resource id in the audit export with a sha256 prefix. An unreadable value stops the exporter, so it never guesses "off". |
+
+**The exception: `NEW_RELIC_LICENSE_KEY`.** The rule for third-party
+credentials is that the owner enters them in the console. This key breaks
+the rule, for these reasons:
+
+- Fluent Bit reads it from its environment when it starts. No broker code
+  ever holds it, so the console has no way to hand it over.
+- The shipper is a stock image with no API. It has no `/configure` route,
+  and adding one would add an attack surface to the one container that talks
+  to the internet with the key.
+- It is an ingest key. It can send data to New Relic, but it cannot read
+  anything back.
+
+The key keeps every other property of a credential:
+
+- Compose hands it to `log-shipper` alone. A test enforces it.
+- `scripts/init_secrets.py` writes it empty, never generates it, never
+  rotates it and never prints it.
+- No log line carries it. The shipper's configuration names it as an
+  environment reference only.
 
 The console's Settings view lists every env-only key with its reason
 (`GET /v1/admin/settings` → `env_only`). It shows secrets as set or unset,

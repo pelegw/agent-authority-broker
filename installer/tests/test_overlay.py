@@ -17,6 +17,7 @@ from aab_installer import descriptor, overlay
 from .conftest import FINANCE, REPO
 
 GOLDEN = Path(__file__).resolve().parent / "golden" / "finance.compose.yml"
+GOLDEN_NEWRELIC = Path(__file__).resolve().parent / "golden" / "finance.newrelic.yml"
 
 VARIANTS = [
     FINANCE,
@@ -138,6 +139,35 @@ def test_the_overlay_only_points_at_the_services_own_directory():
         with pytest.raises(ValueError):
             overlay.render(d, wrong)
     assert overlay.render(d, "plugins.d/finance") == overlay.render(d, "./plugins.d/finance")
+
+
+def test_the_example_renders_exactly_the_golden_newrelic_override():
+    d = descriptor.parse(FINANCE)
+    assert overlay.render_newrelic(d.service) == GOLDEN_NEWRELIC.read_bytes().decode("utf-8")
+
+
+@pytest.mark.parametrize("text", VARIANTS, ids=["finance", "minimal", "full"])
+def test_the_newrelic_override_changes_the_plugins_logging_and_nothing_else(text):
+    """Loaded after docker-compose.newrelic.yml: one service (the plugin's
+    own), one key (logging), the shipper's fluentd block. No network, volume,
+    port, environment or interpolation can come in through it."""
+    d = descriptor.parse(text)
+    out = overlay.render_newrelic(d.service)
+    doc = yaml.safe_load(out)
+    n = overlay.names(d.service)
+    assert doc == {"services": {n["compose_service"]: {"logging": {
+        "driver": "fluentd",
+        "options": {"fluentd-address": "127.0.0.1:24224", "fluentd-async": "true",
+                    "tag": "aab.{{.Name}}"}}}}}
+    assert doc["services"][n["compose_service"]]["logging"] == overlay.FLUENTD_LOGGING
+    assert "$" not in out
+    # Nothing from the descriptor but the validated service name (values too
+    # short to search for, like "1", are skipped).
+    body = out.split("services:", 1)[1]
+    for value in (*d.environment.values(), *d.volumes, *d.volumes.values(),
+                  d.build.dockerfile):
+        if len(value) >= 4:
+            assert value not in body, value
 
 
 def test_names_are_derived_in_one_place():

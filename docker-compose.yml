@@ -39,6 +39,13 @@ services:
   # service's own network with a per-service X-Plugin-Token; holds no target
   # credential itself. The only container on every plugin network.
   broker:
+    # The tag the build gets, spelled out: the New Relic overlay's
+    # audit-exporter runs this same image under this name, never a build
+    # of its own. pull_policy never: with an image name beside a build,
+    # compose would otherwise try a registry pull of that name before
+    # building a missing image. It still builds one that is missing.
+    image: aab-broker
+    pull_policy: never
     build:
       context: ./broker
       # VERSION lives at the repo root (single source); the Dockerfile copies

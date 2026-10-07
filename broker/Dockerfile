@@ -13,12 +13,14 @@ RUN pip install --no-cache-dir .
 # Run unprivileged as aab, uid 10001 like every image in the stack (the
 # sidecar and plugin-whatsapp share wa_data under that uid; the broker never
 # mounts it, nor the sidecar-only wa_session, and holds no target credential). /gwdata is created and owned in the image so a fresh named volume mounted
-# there inherits that ownership. /srv stays root-owned: the code is read-only
+# there inherits that ownership. So is /audit-export: the audit exporter (this
+# image, docker-compose.newrelic.yml) keeps its cursor there, because it
+# mounts broker_data read-only. /srv stays root-owned: the code is read-only
 # to the running process.
 RUN groupadd --system --gid 10001 aab \
  && useradd --system --uid 10001 --gid aab --no-create-home --shell /usr/sbin/nologin aab \
- && mkdir -p /gwdata \
- && chown aab:aab /gwdata
+ && mkdir -p /gwdata /audit-export \
+ && chown aab:aab /gwdata /audit-export
 USER aab
 
 EXPOSE 8080
