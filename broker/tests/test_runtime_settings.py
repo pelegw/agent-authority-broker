@@ -268,9 +268,23 @@ def test_the_new_relic_keys_are_listed_as_file_only_and_never_shown(env, monkeyp
     monkeypatch.setenv("NEW_RELIC_LICENSE_KEY", "fake-license-not-for-display")
     get_settings.cache_clear()
     [row] = [e for e in rs.describe()["env_only"] if "NEW_RELIC_LICENSE_KEY" in e["name"]]
-    for name in ("NEWRELIC_ENABLED", "NEW_RELIC_REGION", "AUDIT_EXPORT_INTERVAL",
-                 "AUDIT_EXPORT_HASH_RESOURCES"):
+    for name in ("NEWRELIC_ENABLED", "NEW_RELIC_REGION"):
         assert name in row["name"]
     assert row["category"] == "ops" and "by exception" in row["why"]
     assert "value" not in row and "set" not in row
+
+
+def test_the_audit_export_settings_are_file_only_and_show_no_broker_value(env, monkeypatch):
+    """They are Settings fields (the exporter parses them through
+    get_settings), but the broker process never receives them: the console
+    names them, refuses to edit them, and shows no value of its own."""
+    monkeypatch.setenv("AUDIT_EXPORT_HASH_RESOURCES", "true")
+    get_settings.cache_clear()
+    rows = {e["name"]: e for e in rs.describe()["env_only"]}
+    for name in ("AUDIT_EXPORT_STATE", "AUDIT_EXPORT_INTERVAL", "AUDIT_EXPORT_HASH_RESOURCES"):
+        assert rows[name]["category"] == "ops" and rows[name]["why"], name
+        assert "value" not in rows[name] and "set" not in rows[name], name
+        with pytest.raises(PolicyError) as e:
+            rs.update(CTX, {name.lower(): 1})
+        assert e.value.code == "env_only", name
     assert "fake-license-not-for-display" not in json.dumps(rs.describe())

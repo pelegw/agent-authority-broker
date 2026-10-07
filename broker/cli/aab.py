@@ -33,7 +33,7 @@ Examples:
   aab simulate [--hours 8] [--seed 7] [--json]   # approval-volume simulation, local only
   aab audit export --state cursor.json [--db broker.db] [--hash-resources] [--loop] [--reset]
       (local, read-only: prints new decisions and audit_log rows as JSON lines;
-       env AUDIT_EXPORT_STATE, BROKER_DB, AUDIT_EXPORT_HASH_RESOURCES,
+       the settings AUDIT_EXPORT_STATE, BROKER_DB, AUDIT_EXPORT_HASH_RESOURCES,
        AUDIT_EXPORT_INTERVAL give the defaults; docs/logging.md)
 
 Passwords and plugin secrets are only ever read with getpass, never from
@@ -412,18 +412,13 @@ def _skill(args) -> int:
 
 # ---- aab audit export: the audit record as JSON lines, offline ---------------------
 
-AUDIT_INTERVAL_DEFAULT = 3600
-_TRUE = ("true", "1", "yes", "on")
-_FALSE = ("", "false", "0", "no", "off")
-
-
 def _audit_commands(sub) -> None:
     au = sub.add_parser("audit", help="the audit record, for a log shipper").add_subparsers(
         dest="sub", required=True)
     ex = au.add_parser("export", help="print new decisions and audit_log rows as JSON lines "
                                       "(reads broker.db read-only; no broker or token needed)")
     ex.add_argument("--db", default=None, help="broker.db (default: BROKER_DB)")
-    ex.add_argument("--state", default=os.environ.get("AUDIT_EXPORT_STATE"),
+    ex.add_argument("--state", default=None,
                     help="the cursor file (default: AUDIT_EXPORT_STATE)")
     ex.add_argument("--hash-resources", action="store_true", default=None,
                     help="replace resource ids with sha256:<16 hex> (default: "
@@ -432,19 +427,29 @@ def _audit_commands(sub) -> None:
                     help="run again every --interval seconds until stopped")
     ex.add_argument("--interval", type=int, default=None,
                     help="seconds between runs with --loop (default: AUDIT_EXPORT_INTERVAL, "
-                         f"else {AUDIT_INTERVAL_DEFAULT})")
+                         "3600 when unset)")
     ex.add_argument("--reset", action="store_true",
-                    help="ignore the cursor and export everything again (first run only)")
+                    help="ignore the cursor and export everything again (with --loop: "
+                         "until a run succeeds)")
 
 
-def _env_flag(name: str) -> bool | None:
-    """True / False for the usual spellings, None for anything else."""
-    raw = os.environ.get(name, "").strip().lower()
-    if raw in _FALSE:
-        return False
-    if raw in _TRUE:
-        return True
-    return None
+def _audit_settings():
+    """The broker settings, or None after saying on stderr which variable
+    could not be read. Names and pydantic's reason only, never the value:
+    the same validation covers the broker's secrets."""
+    from pydantic import ValidationError
+
+    from broker.config import get_settings
+    try:
+        return get_settings()
+    except ValidationError as exc:
+        for err in exc.errors():
+            name = "_".join(str(part) for part in err["loc"]).upper()
+            print(f"{name}: {err['msg']}", file=sys.stderr)
+        # A privacy switch nobody can read must not run as "off".
+        print("aab audit export refuses to run with a setting it cannot read "
+              "(docs/configuration.md)", file=sys.stderr)
+        return None
 
 
 def _audit(args) -> int:
@@ -452,43 +457,42 @@ def _audit(args) -> int:
     beside the broker with the volume mounted read-only, and needs neither
     a token nor a network. Rows go to stdout, its own lines to stderr."""
     import signal
-    import threading
 
     from broker import audit_export
-    from broker.config import get_settings
 
-    if not args.state:
+    settings = _audit_settings()
+    if settings is None:
+        return 2
+    state = args.state or settings.audit_export_state
+    if not state:
         print("set AUDIT_EXPORT_STATE or pass --state (the cursor file)", file=sys.stderr)
         return 2
-    hash_resources = args.hash_resources
-    if hash_resources is None:
-        hash_resources = _env_flag("AUDIT_EXPORT_HASH_RESOURCES")
-        if hash_resources is None:
-            # A privacy switch with a value nobody can read: refuse to run
-            # rather than guess "off" and ship identifiers in the clear.
-            print("AUDIT_EXPORT_HASH_RESOURCES must be true or false", file=sys.stderr)
-            return 2
-    db_path = args.db or get_settings().broker_db
+    hash_resources = args.hash_resources or settings.audit_export_hash_resources
+    interval = settings.audit_export_interval if args.interval is None else args.interval
+    if args.loop and interval < 1:
+        print("--interval must be a whole number of seconds, 1 or more", file=sys.stderr)
+        return 2
+    db_path = args.db or settings.broker_db
+    # --reset stays armed until a run gets through: a first run that fails
+    # (the broker not up yet) must not quietly turn it into a plain export.
+    reset = args.reset
 
-    def run(first: bool) -> bool:
-        return audit_export.run_once(db_path, args.state, sys.stdout,
-                                     hash_resources=hash_resources,
-                                     reset=args.reset and first)
+    def run() -> bool:
+        nonlocal reset
+        ok = audit_export.run_once(db_path, state, sys.stdout,
+                                   hash_resources=hash_resources, reset=reset)
+        if ok:
+            reset = False
+        return ok
 
     if not args.loop:
-        return 0 if run(True) else 1
-    interval = args.interval
-    if interval is None:
-        raw = os.environ.get("AUDIT_EXPORT_INTERVAL", "").strip()
-        interval = int(raw) if raw.isdigit() else AUDIT_INTERVAL_DEFAULT if not raw else None
-    if interval is None or interval < 1:
-        print("the interval must be a whole number of seconds, 1 or more", file=sys.stderr)
-        return 2
-    stop = threading.Event()
+        return 0 if run() else 1
+    stop = audit_export.StopFlag()
     # docker stop sends SIGTERM to PID 1, which has no default handler: without
-    # this the container would wait out the stop timeout and be killed.
+    # this the container would wait out the stop timeout and be killed. The
+    # handler only sets a flag (StopFlag says why not threading.Event).
     for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, lambda *_: stop.set())
+        signal.signal(sig, stop.set)
     audit_export.run_loop(run, interval, stop)
     return 0
 

@@ -232,14 +232,27 @@ ENV_ONLY: tuple[dict, ...] = (
             "into which checkout), so a hijacked console session must not be able to "
             "widen them. (The GitHub token for private repositories is a console setting "
             "under Plugins, + Add plugin: a credential, not a bound.)"},
-    {"name": "NEWRELIC_ENABLED, NEW_RELIC_REGION, NEW_RELIC_LICENSE_KEY, "
-             "AUDIT_EXPORT_INTERVAL, AUDIT_EXPORT_HASH_RESOURCES",
+    {"name": "NEWRELIC_ENABLED, NEW_RELIC_REGION, NEW_RELIC_LICENSE_KEY",
      "field": None, "secret": True, "category": "ops",
-     "why": "Read by compose, the log shipper and the audit exporter, not by the broker. "
-            "They decide whether logs and the audit record leave this server and where "
-            "they go, so a hijacked console session must not be able to turn shipping on "
-            "or point it elsewhere. The license key is a third-party credential kept in "
-            "the file by exception: Fluent Bit reads it at start. See docs/logging.md."},
+     "why": "Read by compose and the log shipper, not by the broker. They decide whether "
+            "logs and the audit record leave this server and where they go, so a hijacked "
+            "console session must not be able to turn shipping on or point it elsewhere. "
+            "The license key is a third-party credential kept in the file by exception: "
+            "Fluent Bit reads it at start. See docs/logging.md."},
+    # Settings fields that `aab audit export` reads in its own container
+    # ("read_by"): the broker process never receives them, so its own value
+    # would mislead, and describe() shows none.
+    {"name": "AUDIT_EXPORT_STATE", "field": "audit_export_state", "secret": False,
+     "category": "ops", "read_by": "audit-exporter",
+     "why": "The audit exporter's cursor file, in its own volume; compose sets it."},
+    {"name": "AUDIT_EXPORT_INTERVAL", "field": "audit_export_interval", "secret": False,
+     "category": "ops", "read_by": "audit-exporter",
+     "why": "Seconds between two audit exports. Read by the audit exporter at start."},
+    {"name": "AUDIT_EXPORT_HASH_RESOURCES", "field": "audit_export_hash_resources",
+     "secret": False, "category": "ops", "read_by": "audit-exporter",
+     "why": "Decides whether resource ids leave this server in clear in the audit export, "
+            "so a hijacked console session must not be able to switch it off. Read by the "
+            "audit exporter at start."},
     {"name": "BROKER_PORT, TZ, DEVICE_NAME, GITHUB_APP_KEY_DIR", "field": None,
      "secret": False, "category": "compose",
      "why": "Read by Docker Compose, the edge or other containers, not by the broker."},
@@ -314,7 +327,7 @@ def describe() -> dict:
     env_only = []
     for e in ENV_ONLY:
         row = {"name": e["name"], "category": e["category"], "why": e["why"]}
-        if e["field"] is not None:
+        if e["field"] is not None and "read_by" not in e:
             current = getattr(s, e["field"])
             if e["secret"]:
                 row["set"] = bool(current)
