@@ -34,10 +34,12 @@ def test_a_well_formed_inbound_id_is_used_and_echoed(client):
 
 
 @pytest.mark.parametrize("supplied", ["has space", "x" * 129, "quote\"d", "",
-                                      "sched-" + "a" * 32, "tg-" + "b" * 32])
+                                      "sched-" + "a" * 32, "tg-" + "b" * 32,
+                                      "inst-" + "c" * 32])
 def test_a_malformed_or_reserved_inbound_id_is_replaced(client, supplied):
-    """Reserved: the scheduler's and Telegram's prefixes, so no caller can
-    make its calls look like the broker's own background work."""
+    """Reserved: the scheduler's, Telegram's and the installer sync's
+    prefixes, so no caller can make its calls look like the broker's own
+    background work."""
     r = client.get("/auth/status", headers={"X-Request-Id": supplied})
     assert HEX32.fullmatch(r.headers["x-request-id"])
 

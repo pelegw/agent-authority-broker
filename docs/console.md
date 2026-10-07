@@ -302,15 +302,17 @@ The opt-in `aab-installer` installs external plugins
   requests to the installer. The page never holds it.
 - The **job panel** above the plugin cards polls `GET .../install/jobs/{id}`
   every 2 s. It shows the job's state and log lines: the steps, the compose
-  commands, their exit codes and a short redacted tail of their output.
-  Install and upgrade **recreate the broker**. While the broker does not
-  answer, the panel keeps polling and says that the installer recreates the
-  broker. No answer means no connection, or 502 / 503 / 504 from the edge.
-  After five minutes without an answer, the panel stops and says that the job
-  continues in the installer. The panel stops on `done` or `failed` and
-  reloads the view. The broker finds a just-started service within 30
-  seconds. The new plugin appears **disabled**. Enable it like any other
-  plugin.
+  commands, their exit codes and a short redacted tail of their output. No
+  job restarts the broker: the installer connects the running broker to the
+  plugin's network. If the broker does not answer for a while (a deploy
+  during a long build), the panel keeps polling and says so. No answer means
+  no connection, or 502 / 503 / 504 from the edge. After five minutes without
+  an answer, the panel stops and says that the job continues in the
+  installer. The panel stops on `done` or `failed` and reloads the view. When
+  the job ends, the broker reads the new service from the installer and
+  discovers it. It retries every 2 seconds while the new container starts,
+  so the card usually appears within a few seconds. The new plugin appears
+  **disabled**. Enable it like any other plugin.
 - An installed plugin's card shows **installed from `<source>@<ref>`** and the
   commit. It has **Upgrade** (the same dialog, with the repository fixed) and
   **Remove**. Remove asks for confirmation, names what the service serves, and
@@ -535,7 +537,8 @@ For + Add plugin, the test covers these items:
 - Provenance and remove.
 - The installer-off dialog. Its fallbacks equal the broker's.
 - Inspect before install, with only the reviewed commit sent.
-- The job panel's interval, restart statuses and stop states.
+- The job panel's interval, the statuses it waits out, and its stop states.
+  The page never says that a job restarts the broker.
 
 Where node is present, the whole script must parse (`node --check`). Also, the
 test runs the page's own review functions under node on the broker's real

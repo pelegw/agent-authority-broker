@@ -61,12 +61,15 @@ def env(tmp_path, monkeypatch):
     get_settings.cache_clear()
     from broker import db, ledger, notify
     from broker.plugins.registry import reset_registry
+    from broker.services import plugin_install
     db.init()
     reset_registry()
+    plugin_install.reset_sync()
     ledger.rate_limiter.reset()
     monkeypatch.setattr(notify, "_PROVIDERS", [])
     yield
     reset_registry()
+    plugin_install.reset_sync()
     get_settings.cache_clear()
 
 

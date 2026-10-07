@@ -579,6 +579,13 @@ by implication. Structure limits it:
   fixed template.
 - It never runs anything from a plugin repository on the machine. The
   plugin's Dockerfile runs inside `docker build`, like any image.
+- It never recreates or restarts the broker. An install connects the running
+  broker to the network of the plugin
+  (`docker network connect aab_net_<service>`). A remove disconnects it.
+  These two commands are the only ones that touch the broker container.
+- The broker reads each installed service's URL and token from the
+  installer's `GET /services`. The installer reads the token from `.env` at
+  each request. The broker keeps it in memory only.
 
 ### Enabling it
 
@@ -646,10 +653,14 @@ Remove (the Remove button on the plugin card) does these steps:
 
 - It stops and deletes `plugin-<service>`.
 - It deletes `plugins.d/<service>/`.
-- It recreates the broker without the service.
+- It disconnects the broker from the network of the service. The broker
+  keeps running.
 - It removes the network of the service.
 - It unpins every plugin in the service. Agents get 404 at once. The plugin
   rows stay, disabled.
+- When the job ends, the installer no longer lists the service. The broker
+  then forgets it, even if its environment still names it from the last
+  deploy.
 
 Without purge, the volumes of the service stay. Its two `.env` secrets
 become comments (`#aab-retired# PLUGIN_TOKEN_<SERVICE>=...`). If you install
@@ -698,10 +709,14 @@ tag it `v0.1.0`.
 4. In the console, open Plugins, + Add plugin. Enter the repository and
    `v0.1.0`, then choose Inspect. The review lists echo's actions with their
    side effects and modes. It also lists the secret setting `api_secret`,
-   and the volumes: `echo_secrets` and the declared ones. Choose Install. The
-   job panel shows the clone, the added `.env` entries, the overlay that the
-   installer wrote, the build, `up -d broker`, the "being recreated" line,
-   then `done`.
+   and the volumes: `echo_secrets` and the declared ones. Before you choose
+   Install, record the broker container:
+   `docker inspect -f '{{.Id}} {{.State.StartedAt}}' aab-broker-1`. Choose
+   Install. The job panel shows the clone, the added `.env` entries, the
+   overlay that the installer wrote, the build, `ps -q broker`,
+   `docker network connect aab_net_echo <hex64>`, then `done`. The
+   `docker inspect` command prints the same id and start time as before. Its
+   `NetworkSettings.Networks` now include `aab_net_echo`.
 5. The echo card appears disabled, with "installed from <source>@v0.1.0".
    Enable it. `plugins.d/echo/compose.yml` has one network, no ports, no
    binds and the two volumes. `.env` has `PLUGIN_TOKEN_ECHO` and
@@ -711,6 +726,8 @@ tag it `v0.1.0`.
    key lists Echo. A read action answers 200.
 7. Remove the plugin with no purge. Then check these results:
    - The job completes.
+   - The broker container has the same id and start time. It is no longer
+     on `aab_net_echo`, and that network is gone.
    - The card is gone.
    - The agent's call answers 404.
    - The `aab_echo_*` volumes remain.

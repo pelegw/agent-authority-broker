@@ -12,6 +12,12 @@ plugin runtime's X-Plugin-Token contract):
   POST /remove          {service, purge} -> 202 job
   GET  /jobs/{id}       the job: state queued|running|done|failed, log lines
   GET  /installed       {"items": [install records]}
+  GET  /services        {"items": [{service, url, token}]}: how the broker reaches each
+                        installed service. The token is PLUGIN_TOKEN_<SERVICE>, read from
+                        .env at each request. The broker already holds every plugin token
+                        (it is the caller each one authenticates); this route lets it learn
+                        a new service's token without being recreated for a new
+                        environment. Never logged, never in a job record.
 
 `git_token` is the read-only GitHub token the owner stored in the broker's
 console, sent only when one is stored. It is used for that request's clone
@@ -29,9 +35,9 @@ the job's `error`, never in an HTTP status.
 
 Logging (docs/logging.md): the shared logging_setup and request_log
 (byte-identical copies, kept so by a broker test), as `installer`. Lines
-carry sources, refs, commits, services and job ids; never INSTALLER_TOKEN
-and never a GitHub token (the ready line says `git_auth=per_request`: the
-installer holds none of its own).
+carry sources, refs, commits, services and job ids; never INSTALLER_TOKEN,
+never a plugin token and never a GitHub token (the ready line says
+`git_auth=per_request`: the installer holds none of its own).
 """
 
 from __future__ import annotations
@@ -163,9 +169,12 @@ def create_app(settings: Settings | None = None, *, git: Git | None = None,
 
     def _submit(kind: str, params: dict, work, token: str = "") -> JSONResponse:
         # The token rides with the work (in the closure) and as the job's
-        # mask, never in `params`, which become the stored job record.
+        # mask, never in `params`, which become the stored job record. Every
+        # plugin token already in .env is masked too, whatever its shape (a
+        # generated one is 64-hex and masked anyway; a hand-written one may
+        # not be).
         try:
-            job = store.submit(kind, params, work, mask=(token,))
+            job = store.submit(kind, params, work, mask=(token, *installer.known_tokens()))
         except Busy:
             raise InstallerError(409, "another install, upgrade or remove is in progress",
                                  "busy") from None
@@ -223,6 +232,12 @@ def create_app(settings: Settings | None = None, *, git: Git | None = None,
     @app.get("/installed")
     def installed() -> dict:
         return {"items": installer.installed()}
+
+    @app.get("/services")
+    def services() -> dict:
+        # Answered to the broker only (the token guard above); the access
+        # line has the path alone, and nothing here logs the items.
+        return {"items": installer.services()}
 
     # git_auth: the installer holds no GitHub token; the broker sends one with
     # each request that needs it (named here, never shown anywhere).

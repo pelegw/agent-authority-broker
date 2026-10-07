@@ -4,8 +4,10 @@ A separate, opt-in container (docker-compose.installer.yml) that holds the
 Docker socket, so it is root on the host. It is reachable only from the
 broker (net_installer) and only with INSTALLER_TOKEN; it clones only
 allowlisted sources at a tag or commit, renders each plugin's compose overlay
-from the plugin's descriptor through a fixed template (overlay.py), and runs
-`docker compose` for it. Nothing from a plugin repository runs on the host:
+from the plugin's descriptor through a fixed template (overlay.py), runs
+`docker compose` for it, and connects the running broker to the plugin's
+network (it never recreates the broker; the broker reads the plugin's URL
+and token from GET /services). Nothing from a plugin repository runs on the host:
 the plugin's Dockerfile runs inside `docker build`, like any image.
 
 `__version__` is read from the repo-root VERSION file (the single place the

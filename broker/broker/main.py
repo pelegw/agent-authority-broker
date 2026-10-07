@@ -15,6 +15,7 @@ from . import logging_setup
 
 logging_setup.configure("broker")
 
+import anyio  # noqa: E402
 from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.exceptions import RequestValidationError  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
@@ -32,12 +33,14 @@ from .routers import (actions, admin, admin_install, admin_keys, admin_ops,  # n
                       admin_plugins, admin_settings, admin_telegram, auth, delegations, health,
                       me, oauth, permissions, skill, targets)
 from .routers import console  # noqa: E402
+from .services import plugin_install  # noqa: E402
 
 log = logging.getLogger(__name__)
 # Request ids the broker's own background jobs use (actions/scheduler.py,
-# notify/telegram_inbound.py). An inbound X-Request-Id with one of these
-# prefixes is replaced, so no caller can pass itself off as the scheduler.
-BACKGROUND_ID_PREFIXES = ("sched-", "tg-")
+# notify/telegram_inbound.py, the installer sync in services/plugin_install.py).
+# An inbound X-Request-Id with one of these prefixes is replaced, so no
+# caller can pass itself off as the scheduler.
+BACKGROUND_ID_PREFIXES = ("sched-", "tg-", plugin_install.BACKGROUND_PREFIX)
 
 
 def log_boot(journal_mode: str) -> None:
@@ -64,7 +67,8 @@ def log_registry() -> None:
     reg = get_registry()
     log.info("plugin registry ready %s", kv(
         plugins=sorted(reg.entries()), enabled=reg.enabled_plugins(),
-        unreachable=reg.pending_services(), refused=sorted(reg.refused)))
+        unreachable=reg.pending_services(), refused=sorted(reg.refused),
+        installer_services=reg.dynamic_services()))
 
 
 @asynccontextmanager
@@ -78,6 +82,20 @@ async def lifespan(app: FastAPI):
     crypto.check_boot()
     # Discover plugin services from env; unreachable ones are retried lazily.
     init_registry()
+    installer = plugin_install.configured_installer()
+    if installer:
+        # Then the services the installer installed (GET /services): a
+        # plugin installed since this container was created is reached
+        # without recreating it. A thread, so a slow installer delays only
+        # this boot step; one that is down leaves the env services alone.
+        plugin_install.reset_sync()
+        try:
+            await anyio.to_thread.run_sync(plugin_install.reconcile_services)
+        except Exception as exc:
+            # Never a reason not to boot: the env services stand, and the
+            # sync loop tries again. The type only, as everywhere.
+            log.error("installer services not applied at boot %s",
+                      kv(error=type(exc).__name__))
     log_registry()
     # Keeps broker.db-wal and -shm in place while the broker runs, so the
     # audit exporter can read the file from its read-only mount (db.hold_open).
@@ -86,6 +104,10 @@ async def lifespan(app: FastAPI):
              # Runs the Telegram poll loop while a bot token is stored and
              # stops it when the token is cleared: no restart is ever needed.
              background.Loop(telegram_inbound.supervise)]
+    if installer:
+        # Keeps the installer's services current: installs, upgrades and
+        # removes apply while the broker runs (no restart, ever).
+        loops.append(background.Loop(plugin_install.services_loop))
     try:
         # The MCP session manager MUST run inside the app's lifespan, else
         # /mcp requests die with "Task group is not initialized".

@@ -20,6 +20,10 @@ them, enforced here by construction and by installer/tests/test_overlay.py):
     descriptor's literal environment and its allowlisted passthrough;
   * the rotated json-file logging every service uses, restart unless-stopped;
   * the broker gains `net_<service>`, PLUGIN_URL_<SVC> and PLUGIN_TOKEN_<SVC>.
+    An install does not recreate the broker for them: the job connects the
+    running broker to the network, and the broker reads the URL and token
+    from `GET /services`. They are here so that the next full `up -d` (a
+    deploy) recreates the broker into that same state.
 
 Beside it, render_newrelic() writes `plugins.d/<service>/newrelic.yml`: the
 plugin's logging switched to the log shipper, and nothing else.

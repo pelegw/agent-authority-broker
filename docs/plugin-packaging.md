@@ -158,6 +158,11 @@ enforces these invariants. For external plugins, the template and
 - The rotated `json-file` logging that every service uses, and
   `restart: unless-stopped`.
 
+The `broker` block takes effect at the next deploy, when compose recreates
+the broker. An install does not wait for that. The installer connects the
+running broker to `net_<service>`, and the broker reads the same URL and
+token from the installer (see [Install, upgrade, remove](#install-upgrade-remove)).
+
 Beside the overlay, the installer writes `plugins.d/<service>/newrelic.yml`.
 It changes one thing: the plugin's logging goes to the New Relic log shipper,
 like the logging of every other service. `scripts/compose-files.sh` loads it
@@ -286,37 +291,83 @@ installer do:
      the plugin service. `scripts/init_secrets.py --rotate` generates them.
    - It writes the overlay, its New Relic logging override and `install.json`.
    - It runs `docker compose ... up -d --build plugin-<service>`.
-   - It runs `up -d broker`. This recreates the broker with its new
-     environment and network, but never rebuilds it.
+   - It runs `docker compose ... ps -q broker` to find the running broker
+     container. Then it runs
+     `docker network connect aab_net_<service> <broker container>`. The
+     broker joins the network of the plugin service while it runs. The
+     installer never recreates or restarts the broker.
 
    If a step fails, the job rolls the files back. Thus a broken overlay never
-   stays in the set of compose files. The broker comes back, discovers the
-   plugin service and finds the pin. The card of the plugin appears
-   **disabled**. The owner enables it as any other plugin.
+   stays in the set of compose files. When the job ends, the broker reads
+   the URL and the token of the new plugin service from the installer
+   (`GET /services`). Then it discovers the plugin service and finds the
+   pin. The card of the plugin appears **disabled**. The owner enables it as
+   any other plugin.
 3. **Upgrade.** The same steps, for an installed plugin service from the
    same source. Another repository under the same service name is a remove
    and then an install, each with its own review. The broker pins the new
-   manifests first. Then the installer rebuilds the plugin service and
-   recreates the broker. If an upgrade fails, the installer restores the
-   previous checkout and overlay and starts them again. The broker then
-   offers the old manifest for review, because the pin already moved. Pin it
-   there to restore the plugin. If the installer rejects the upgrade request
-   because it is busy or down, the broker puts the old pins back at once.
+   manifests first. Then the installer rebuilds the plugin service. The
+   broker is on its network already, so the job runs no command for the
+   broker. When the job ends, the broker discovers the new container. If an
+   upgrade fails, the installer restores the previous checkout and overlay
+   and starts them again. The broker then offers the old manifest for
+   review, because the pin already moved. Until then, the broker does not
+   serve the plugin. Pin it there to restore the plugin. If the installer
+   rejects the upgrade request because it is busy or down, the broker puts
+   the old pins back at once.
 4. **Remove.** The installer stops and deletes `plugin-<service>`. It
-   deletes `plugins.d/<service>/`. It recreates the broker without the
-   plugin service and removes its network. The broker then unpins every
+   deletes `plugins.d/<service>/`. It runs
+   `docker network disconnect aab_net_<service> <broker container>` and then
+   removes the network. The broker keeps running. The broker unpins every
    plugin of that plugin service. Agents get 404 at once. The plugin rows
-   stay, disabled. Without purge, the installer keeps the volumes and the
-   two `.env` secrets of the plugin service. It comments out the secrets as
-   `#aab-retired# PLUGIN_TOKEN_<SERVICE>=...`. Thus a later install of the
-   same service restores the same secret-store key, and its data still
-   decrypts. With purge, the installer deletes the `<service>_*` volumes and
-   both secrets permanently.
+   stay, disabled. When the job ends, the installer no longer lists the
+   service, and the broker forgets it. Without purge, the installer keeps
+   the volumes and the two `.env` secrets of the plugin service. It comments
+   out the secrets as `#aab-retired# PLUGIN_TOKEN_<SERVICE>=...`. Thus a
+   later install of the same service restores the same secret-store key,
+   and its data still decrypts. With purge, the installer deletes the
+   `<service>_*` volumes and both secrets permanently.
+
+The network commands are idempotent. On connect, "already exists" counts as
+done. On disconnect, "is not connected" and "not found" count as done. Thus
+a retried job never fails on its own earlier step.
+
+The overlay still gives the broker `net_<service>`, `PLUGIN_URL_<SERVICE>`
+and `PLUGIN_TOKEN_<SERVICE>`. Thus the next full `docker compose up -d` (a
+deploy) recreates the broker once, into the same state. That recreate
+belongs to the deploy. An install, an upgrade or a remove never causes it.
+
+The broker learns the installed plugin services in three ways:
+
+- At boot, after it discovers the plugin services in its environment.
+- When it sees a job end. It sees the end through the job route of the
+  console, or through its own polling of the jobs that it asked for.
+- Every 60 seconds, as a safety net.
+
+All of it runs in a background loop, never in a request. If the installer
+is off, down or answers with something malformed, the broker keeps the
+services that it has, and logs the problem once.
+
+The broker merges this list with the plugin services in its environment:
+
+- Until the installer first answers after a broker start, the environment
+  stands alone. The same applies when the installer is off.
+- After that answer, the installer is the authority for every external
+  service. The broker uses the installer's URL and token for each service
+  in the list. These values are fresher than the environment of the broker
+  container: a purge and a reinstall make a new token.
+- The broker drops every other service in its environment, once, with an
+  INFO line. Thus a `docker restart` of the broker after a remove does not
+  bring the removed plugin back, and it causes no retry warnings.
+- The in-tree services (`whatsapp`, `github`, `google` and the other
+  reserved names) always come from the environment. The broker never drops
+  them, and it refuses a list that names one.
 
 One job runs at a time. The state and the log lines of a job live in
 `plugins.d/_installer/jobs/<id>.json`. The log lines never hold a token. The
 file survives restarts of both the installer and the broker. Thus the
-console can follow a job through the restart of the broker.
+console can follow a job even when the broker is down for a moment (a deploy
+during a long build).
 
 ## Private repositories: the GitHub token in the console
 
@@ -419,3 +470,10 @@ installer made.
   repositories).
 - Connect to plugins, or to anything on the network other than an
   allowlisted git server and the image pulls of the Docker daemon.
+- Recreate or restart the broker. It changes the broker container in one way
+  only: it connects the broker to the network of a plugin service, or
+  disconnects it. The installer finds the container through compose, so it
+  never touches a container of another project.
+- Give out a secret-store key. `GET /services` gives the broker each URL and
+  `PLUGIN_TOKEN_<SERVICE>`, which the broker holds anyway. It never gives
+  out `PLUGIN_SECRETS_KEY_<SERVICE>`.

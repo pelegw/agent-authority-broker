@@ -10,7 +10,8 @@ the key dialogs present the role as a ceiling (label, help line, default
 `full`, and an effective-mode table equal to roles.role_caps), the
 Telegram bot token field is write-only, and the Plugins view's + Add plugin
 flow (installer off or on, the review card rendered from the broker's real
-review, a job panel that polls through the broker's restart, the offered
+review, a job panel that waits out a broker that does not answer and never
+claims that a job restarts it, the offered
 card, the write-only GitHub token for private repositories). Where node
 exists, the whole script must parse. Plus the manifest projection the
 console's editors are generated from.
@@ -592,13 +593,17 @@ def test_install_goes_through_inspect_and_sends_only_the_reviewed_commit(html):
     assert "m.setButtons(problems.length ? [back] : [back, go]);" in script
 
 
-def test_the_job_panel_polls_every_two_seconds_through_the_brokers_restart(html):
+def test_the_job_panel_polls_every_two_seconds_and_waits_out_a_silent_broker(html):
     script = _script(html)
     assert "const JOB_POLL_MS = 2000;" in script
-    # No connection, or the edge saying nothing answers: keep polling.
+    # No connection, or the edge saying nothing answers (a deploy, a
+    # restart): keep polling.
     assert "const RESTART_STATUSES = [0, 502, 503, 504];" in script
     assert "if (!RESTART_STATUSES.includes(e.status)) {" in script
-    assert "run.restarting = true;" in script and "The broker is being recreated" in script
+    assert "run.restarting = true;" in script and "The broker does not answer right now" in script
+    # No job recreates the broker any more, and the page never says one does.
+    assert "recreates the broker." not in script and "being recreated" not in script
+    assert "connects the running broker to it: the broker does not restart." in script
     assert 'if (st === "done" || st === "failed") run.stopped = true;' in script
     assert "const log = listOf(j.log);" in script and 'h("pre", { class: "joblog" }' in script
     assert script.count("setTimeout(() => pollJob(run), JOB_POLL_MS)") == 3

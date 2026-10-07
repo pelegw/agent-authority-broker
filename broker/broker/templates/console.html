@@ -2504,14 +2504,16 @@ async function togglePlugin(ui) {
 // shown here, and pins what the owner approved before the installer builds
 // anything. Everything a repository supplies (names, descriptions, paths,
 // environment values) is plugin-written text and goes through h() as text.
-// Install and upgrade recreate the broker, so the job panel keeps polling
-// through its restart.
+// No install, upgrade or remove restarts the broker: the installer connects
+// the running broker to the plugin's network and the broker picks the service
+// up by itself. The panel still waits out a broker that does not answer for a
+// while (a deploy or a restart during a long build) and keeps polling.
 const JOB_POLL_MS = 2000;
 // About five minutes of a broker that does not answer before the panel stops
 // waiting (the job itself runs on in the installer).
 const JOB_MAX_MISSES = 150;
-// Answers that mean "the broker is being recreated": no connection at all, or
-// the edge reporting that nothing answers behind it.
+// Answers that mean "the broker does not answer right now": no connection at
+// all, or the edge reporting that nothing answers behind it.
 const RESTART_STATUSES = [0, 502, 503, 504];
 const JOB_STATE_KIND = { queued: "", running: "accent", done: "ok", failed: "bad" };
 let jobRun = null;                 // the job the panel follows: {id, what, last, timer, ...}
@@ -2718,8 +2720,8 @@ function inspectReview(r, problems) {
   wrap.append(...packageReview(r));
   if (!problems.length) {
     wrap.append(h("p", { class: "hint" }, r.upgrade
-      ? "Upgrade pins these manifests first, then the installer rebuilds the service and recreates the broker."
-      : "Install pins these manifests first (you approve exactly this), then the installer builds the service and recreates the broker. The plugin appears disabled; enable it in its card."));
+      ? "Upgrade pins these manifests first, then the installer rebuilds the service. The broker keeps running and serves the new version once it answers."
+      : "Install pins these manifests first (you approve exactly this), then the installer builds the service and connects the running broker to it: the broker does not restart. The plugin appears disabled; enable it in its card."));
   }
   return wrap;
 }
@@ -2889,7 +2891,7 @@ function openRemovePlugin(r) {
   });
 }
 
-// ---- the job panel: polls every 2 s, through the broker's restart.
+// ---- the job panel: polls every 2 s, and waits out a broker that does not answer.
 function stopJob() {
   if (jobRun) { jobRun.stopped = true; clearTimeout(jobRun.timer); }
   jobRun = null;
@@ -2917,8 +2919,8 @@ async function pollJob(run) {
       paintJob(run);
       return;
     }
-    // Install and upgrade recreate the broker with its new environment:
-    // until it is back, calls fail. Keep asking; the job runs on regardless.
+    // The broker does not answer (a deploy or a restart while the job
+    // runs): keep asking; the job runs on regardless.
     run.restarting = true;
     run.misses += 1;
     if (run.misses > JOB_MAX_MISSES) {
@@ -2951,7 +2953,7 @@ function paintJob(run) {
   if (j.commit) meta.push("commit " + shortCommit(j.commit));
   $("pluginJob").replaceChildren(h("div", { class: "card" }, head,
     h("div", { class: "sub" }, meta.join(" · ")),
-    run.restarting ? h("div", { class: "hint jobline" }, "The broker is being recreated with its new settings: waiting for it to answer (attempt " + run.misses + ")...") : null,
+    run.restarting ? h("div", { class: "hint jobline" }, "The broker does not answer right now: waiting for it (attempt " + run.misses + ")...") : null,
     j.error ? h("div", { class: "formerr" }, "Failed: " + j.error) : null,
     run.error ? h("div", { class: "formerr" }, run.error) : null,
     log.length ? h("pre", { class: "joblog" }, log.join("\n") + (j.log_truncated ? "\n(lines in the middle were dropped)" : ""))
@@ -2961,7 +2963,7 @@ async function jobFinished(run) {
   const j = objectOr(run.last);
   if (j.state === "done") {
     toast(j.kind === "remove" ? `${j.service} removed.`
-      : `${j.service || "The plugin"} ${j.kind === "upgrade" ? "upgraded" : "installed"}. If its card is not there yet, the broker finds it within 30 seconds: refresh. Enable it when you are ready.`);
+      : `${j.service || "The plugin"} ${j.kind === "upgrade" ? "upgraded" : "installed"}. If its card is not there yet, the broker finds it within a few seconds, once the plugin answers: refresh. Enable it when you are ready.`);
   } else {
     toast(`The ${j.kind || "job"} failed: ${j.error || "see its log"}`, "err");
   }

@@ -372,3 +372,171 @@ def test_request_helper_uses_the_timeout():
             lambda r: httpx.Response(200, json={"manifests": []})))
     request("http://x", "t", "GET", "/manifests", timeout=7.5, factory=factory)
     assert seen["timeout"] == 7.5
+
+
+# ------------------------------------------------------------ dynamic services (the installer's)
+
+TOKEN_A = "a1" * 32
+TOKEN_B = "b2" * 32
+
+
+def _dyn(service="echo", token=TOKEN_A):
+    return {service: (registry.dynamic_url(service), token)}
+
+
+def test_reserved_services_match_the_installers():
+    """The registry refuses exactly the names the installer refuses."""
+    import sys
+    from pathlib import Path
+    try:
+        from aab_installer.descriptor import RESERVED_SERVICES
+    except ImportError:
+        sys.path.append(str(Path(__file__).resolve().parents[2] / "installer"))
+        from aab_installer.descriptor import RESERVED_SERVICES
+    assert registry.RESERVED_SERVICES == RESERVED_SERVICES
+
+
+@pytest.mark.parametrize("mapping,fragment", [
+    ([("echo", "x")], "not a mapping"),
+    ({"Echo": ("http://plugin-Echo:8090", TOKEN_A)}, "malformed"),
+    ({"e": ("http://plugin-e:8090", TOKEN_A)}, "malformed"),
+    ({"whatsapp": ("http://plugin-whatsapp:8090", TOKEN_A)}, "stack itself uses"),
+    ({"echo": ["http://plugin-echo:8090", TOKEN_A]}, "malformed entry"),
+    ({"echo": ("http://plugin-echo:8091", TOKEN_A)}, "the url is not"),
+    ({"echo": ("http://" + TOKEN_B + "@plugin-echo:8090", TOKEN_A)}, "the url is not"),
+    ({"echo": ("http://plugin-echo:8090", "short")}, "malformed token"),
+    ({"echo": ("http://plugin-echo:8090", TOKEN_A + " x")}, "malformed token"),
+    ({"echo": ("http://plugin-echo:8090", None)}, "malformed token"),
+    ({f"s{i:02d}": (registry.dynamic_url(f"s{i:02d}"), TOKEN_A) for i in range(65)},
+     "more than 64"),
+])
+def test_dynamic_services_are_validated_whole(env, mapping, fragment):
+    reg = get_registry()
+    reg.set_dynamic_services(_dyn())
+    with pytest.raises(ValueError, match=fragment) as e:
+        reg.set_dynamic_services(mapping)
+    # Nothing changed, and the error names no URL and no token.
+    assert reg.dynamic_services() == ["echo"]
+    assert TOKEN_A not in str(e.value) and TOKEN_B not in str(e.value)
+
+
+WHATSAPP_ENV = ("http://plugin-whatsapp:8090", "wa-env-token")
+
+
+def test_before_the_first_answer_env_stands_alone(env, monkeypatch):
+    """No installer answer yet (or no installer at all): every env service,
+    reserved or not, is used as it is."""
+    monkeypatch.setenv("PLUGIN_URL_WHATSAPP", WHATSAPP_ENV[0])
+    monkeypatch.setenv("PLUGIN_TOKEN_WHATSAPP", WHATSAPP_ENV[1])
+    monkeypatch.setenv("PLUGIN_URL_ENVSVC", "http://plugin-envsvc:8090")
+    monkeypatch.setenv("PLUGIN_TOKEN_ENVSVC", "env-token")
+    reg = get_registry()
+    assert reg.services() == {"envsvc": ("http://plugin-envsvc:8090", "env-token"),
+                              "whatsapp": WHATSAPP_ENV}
+    with pytest.raises(ValueError):                               # a refused answer
+        reg.set_dynamic_services({"whatsapp": (registry.dynamic_url("whatsapp"), TOKEN_A)})
+    assert set(reg.services()) == {"envsvc", "whatsapp"}          # is not an answer
+
+
+def test_after_an_answer_the_installer_is_the_authority_for_external_services(
+        env, monkeypatch):
+    """Reserved names (the in-tree services) come from env and are never
+    evicted; any other env service the installer does not list is."""
+    monkeypatch.setenv("PLUGIN_URL_WHATSAPP", WHATSAPP_ENV[0])
+    monkeypatch.setenv("PLUGIN_TOKEN_WHATSAPP", WHATSAPP_ENV[1])
+    monkeypatch.setenv("PLUGIN_URL_ENVSVC", "http://plugin-envsvc:8090")
+    monkeypatch.setenv("PLUGIN_TOKEN_ENVSVC", "env-token")
+    reg = get_registry()
+    change = reg.set_dynamic_services(_dyn())
+    assert change.fresh == _dyn() and change.removed == ("envsvc",)
+    assert TOKEN_A not in repr(change)                            # fresh holds tokens
+    assert reg.services() == {"echo": _dyn()["echo"], "whatsapp": WHATSAPP_ENV}
+    # An empty list: the reserved env service survives it, every time.
+    for _ in range(2):
+        change = reg.set_dynamic_services({})
+        assert reg.services() == {"whatsapp": WHATSAPP_ENV}
+    assert reg.dynamic_services() == []
+    # A full discovery after the answer asks no evicted service.
+    asked = []
+
+    def factory(base_url, headers, timeout):
+        asked.append(base_url)
+        raise httpx.ConnectError("refused")
+
+    reg.discover(client_factory=factory)
+    assert asked == [WHATSAPP_ENV[0]] and reg.pending_services() == ["whatsapp"]
+
+
+def test_the_installers_values_win_for_a_service_it_lists(env, monkeypatch):
+    monkeypatch.setenv("PLUGIN_URL_ECHO", registry.dynamic_url("echo"))
+    monkeypatch.setenv("PLUGIN_TOKEN_ECHO", TOKEN_A)
+    reg = get_registry()
+    assert reg.services()["echo"][1] == TOKEN_A                  # env alone
+    change = reg.set_dynamic_services(_dyn(token=TOKEN_B))
+    assert change.fresh == _dyn(token=TOKEN_B)                   # reached differently now
+    assert reg.services()["echo"][1] == TOKEN_B
+    reg.set_dynamic_services({})
+    assert "echo" not in reg.services()        # not listed: gone, env or not
+    # The same values from both sources: nothing to discover again.
+    reg2 = registry.reset_registry()
+    assert reg2.set_dynamic_services(_dyn(token=TOKEN_A)).fresh == {}
+
+
+def test_eviction_unregisters_at_once_and_forgets_offers_and_retries(external, echo_impl,
+                                                                     tmp_path):
+    pins.set("echo", ECHO_TEXT, by="owner")
+    runtime = serve([echo_impl], TOKEN_A, tmp_path / "s", Fernet.generate_key().decode())
+    reg = get_registry()
+    reg.discover({}, client_factory=runtime_factory(runtime))
+    reg.discover(reg.set_dynamic_services(_dyn()).fresh)
+    assert reg.service_of("echo") == "echo"
+    enable_plugin()
+    reg.offered["ghost"] = {"manifest": {}, "service": "echo", "reason": "stale"}
+    reg._pending["echo"] = _dyn()["echo"]
+    change = reg.set_dynamic_services({})
+    assert change.removed == ("echo",)
+    assert "echo" not in reg.entries() and reg.offered == {} and reg.pending_services() == []
+    assert reg.plugin_rows()["echo"]["enabled"] == 1             # the row is untouched
+
+
+def test_a_partial_discovery_keeps_other_services_pending(vendored_echo, echo_impl, tmp_path):
+    runtime = serve([echo_impl], PLUGIN_TOKEN, tmp_path, Fernet.generate_key().decode())
+    working = runtime_factory(runtime)
+
+    def factory(base_url, headers, timeout):
+        if "down" in base_url:
+            raise httpx.ConnectError("refused")
+        return working(base_url, headers, timeout)
+
+    reg = get_registry()
+    reg.discover({"downsvc": ("http://down", PLUGIN_TOKEN)}, client_factory=factory)
+    assert reg.pending_services() == ["downsvc"]
+    reg.discover({"echosvc": ("http://up", PLUGIN_TOKEN)})       # e.g. a just-installed one
+    assert reg.pending_services() == ["downsvc"] and "echo" in reg.entries()
+
+
+def test_a_pending_service_is_retried_with_its_current_token(external, echo_impl, tmp_path):
+    pins.set("echo", ECHO_TEXT, by="owner")
+    runtime = serve([echo_impl], TOKEN_B, tmp_path / "s", Fernet.generate_key().decode())
+    reg = get_registry()
+    reg.discover({}, client_factory=runtime_factory(runtime))
+    reg.discover(reg.set_dynamic_services(_dyn(token=TOKEN_A)).fresh)  # 401: wrong token
+    assert reg.pending_services() == ["echo"]
+    reg._dynamic = dict(_dyn(token=TOKEN_B))     # the list changed; no discovery yet
+    reg._next_discovery = 0
+    assert reg.service_of("echo") == "echo"      # the lazy retry used TOKEN_B
+
+
+def test_a_service_that_stops_offering_a_plugin_stops_serving_it(external, echo_impl,
+                                                                 tmp_path):
+    pins.set("echo", ECHO_TEXT, by="owner")
+    register_remote(echo_impl, tmp_path)
+    reg = get_registry()
+    assert "echo" in reg.entries()
+    # The service's new container answers, offering nothing (or garbage).
+    for body in ({"manifests": []}, {"manifests": "nope"}):
+        register_remote(echo_impl, tmp_path)
+        assert "echo" in reg.entries()
+        reg.discover({"echosvc": ("http://plugin-echo", PLUGIN_TOKEN)},
+                     client_factory=_mock(lambda r, b=body: httpx.Response(200, json=b)))
+        assert "echo" not in reg.entries()
