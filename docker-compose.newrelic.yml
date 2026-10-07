@@ -82,11 +82,13 @@ services:
       NEW_RELIC_LICENSE_KEY: ${NEW_RELIC_LICENSE_KEY:?set NEW_RELIC_LICENSE_KEY in .env, or NEWRELIC_ENABLED=false (docs/logging.md)}
 
   audit-exporter:
-    # The broker's own image: `aab audit export` reads broker.db directly.
-    build:
-      context: ./broker
-      additional_contexts:
-        repo: .
+    # The broker's own image, as the broker service builds and tags it
+    # (docker-compose.yml): `aab audit export` reads broker.db directly. No
+    # build here, so one `up --build` builds the broker once, and
+    # pull_policy never: compose never fetches an image of this name from a
+    # registry.
+    image: aab-broker
+    pull_policy: never
     restart: unless-stopped
     logging: *fluentd
     command: ["aab", "audit", "export", "--loop"]

@@ -360,8 +360,16 @@ def test_the_audit_exporter_reads_broker_data_read_only_with_no_network():
     assert svc["cap_drop"] == ["ALL"] and svc["security_opt"] == ["no-new-privileges:true"]
     assert svc["healthcheck"] == {"disable": True}
     assert svc["command"] == ["aab", "audit", "export", "--loop"]
-    # The broker's own image, and no secret of anyone's.
-    assert svc["build"] == _compose("docker-compose.yml")["services"]["broker"]["build"]
+    # The broker's own image, the one the broker service builds and tags: no
+    # second build, and never a pull of that name from a registry.
+    broker = _compose("docker-compose.yml")["services"]["broker"]
+    assert broker["image"] == svc["image"] == "aab-broker" and "build" in broker
+    assert "build" not in svc and svc["pull_policy"] == broker["pull_policy"] == "never"
+    builds = [(rel, name) for rel in (*COMPOSE_FILES, RENDERED_OVERLAY, *NEWRELIC_FILES)
+              for name, s in _compose(rel)["services"].items()
+              if s.get("image") == "aab-broker" and "build" in s]
+    assert builds == [("docker-compose.yml", "broker")]
+    # And no secret of anyone's.
     assert set(svc["environment"]) == {"BROKER_DB", "AUDIT_EXPORT_STATE", "AUDIT_EXPORT_INTERVAL",
                                        "AUDIT_EXPORT_HASH_RESOURCES", "LOG_LEVEL", "LOG_FORMAT"}
     assert svc["environment"]["BROKER_DB"] == "/gwdata/broker.db"
@@ -419,33 +427,81 @@ def test_the_two_region_files_differ_only_in_the_endpoint():
         "region-EU.yaml", "region-US.yaml"]
 
 
-def _sidecar_filter() -> re.Pattern:
+def _rule(text: str) -> tuple[str, re.Pattern]:
+    key, pattern = text.split(" ", 1)
+    return key, re.compile(pattern)
+
+
+def _sidecar_shipped(record: dict) -> bool:
+    """Fluent Bit's two grep filters on the sidecar, modelled in Python (the
+    same regex semantics for these patterns): the first keeps a record when
+    any of its rules matches (logical_op or), the second drops a record its
+    exclude rule matches."""
     pipeline = yaml.safe_load(_read("ops/fluent-bit/pipeline.yaml"))["pipeline"]
-    [grep] = [f for f in pipeline["filters"] if f["name"] == "grep"]
-    assert re.match(grep["match_regex"], "aab.aab-whatsapp-sidecar-1")
-    assert not re.match(grep["match_regex"], "aab.aab-broker-1")
-    key, pattern = grep["regex"].split(" ", 1)
-    assert key == "log"
-    return re.compile(pattern)
+    keep, drop = [f for f in pipeline["filters"] if f["name"] == "grep"]
+    for f in (keep, drop):
+        assert re.match(f["match_regex"], "aab.aab-whatsapp-sidecar-1")
+        assert not re.match(f["match_regex"], "aab.aab-broker-1")
+    assert keep["logical_op"] == "or" and "exclude" not in keep
+    assert set(drop) == {"name", "match_regex", "exclude"}
+    kept = any(p.search(record.get(k, "")) for k, p in map(_rule, keep["regex"]))
+    key, pattern = _rule(drop["exclude"])
+    return kept and not pattern.search(record.get(key, ""))
 
 
-@pytest.mark.parametrize("line,shipped", [
-    ("2026/09/24 20:31:35.601156 request method=GET path=/status status=200", True),
-    ("2026/09/24 20:31:36.000001 qr event=code", True),
-    ("20:31:35.601 [WhatsApp INFO] Connected", True),
-    ("█▀▄ ██▀▀ ▄█", False),     # a QR row
-    ("    ██▀▀▄", False),
-    ("==== Scan this QR with WhatsApp (Settings > Linked devices) ====", False),
-    ("(also available as PNG via the broker: GET /v1/admin/plugins/whatsapp/connect/qr.png)",
-     False),
-    ("", False),
+CODE = ("https://wa.me/settings/linked_devices#2@Q1w2E3r4T5y6U7i8O9p0,"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=,BBBBBBBBBBBBBBBBBBBBBBBBBBBB=,CCCC=,1")
+
+
+@pytest.mark.parametrize("source,line,shipped", [
+    # stderr: Go's log package (every sidecar log line) and the Go runtime.
+    ("stderr", "2026/09/24 20:31:35.601156 request method=GET path=/status status=200", True),
+    ("stderr", "2026/09/24 20:31:36.000001 qr event=code", True),
+    ("stderr", "panic: runtime error: invalid memory address or nil pointer dereference", True),
+    ("stderr", "goroutine 1 [running]:", True),
+    ("stderr", "\tmain.run()", True),
+    ("stderr", "fatal error: concurrent map writes", True),
+    ("stderr", "", True),
+    # stdout: whatsmeow's logger, and the QR for the operator.
+    ("stdout", "20:31:35.601 [WhatsApp INFO] Connected", True),
+    ("stdout", "20:31:35.601 [WhatsApp/Recv DEBUG] <iq from='s.whatsapp.net'/>", True),
+    ("stdout", "█▀▄ ██▀▀ ▄█", False),     # a QR row
+    ("stdout", "    ██▀▀▄", False),
+    ("stdout", "==== Scan this QR with WhatsApp (Settings > Linked devices) ====", False),
+    ("stdout", "(also available as PNG via the broker: GET "
+               "/v1/admin/plugins/whatsapp/connect/qr.png)", False),
+    ("stdout", "==== WhatsApp login successful ====", False),
+    ("stdout", "", False),
+    ("stdout", "2026/09/24 20:31:35.601156 not a format the sidecar writes to stdout", False),
+    # The pairing code itself, as whatsmeow logs it at DEBUG, on any stream.
+    ("stdout", f"20:31:35.602 [WhatsApp/QRChannel DEBUG] Emitting QR code {CODE}", False),
+    ("stdout", "20:31:35.602 [WhatsApp/QRChannel DEBUG] Ran out of QR codes", False),
+    ("stderr", f"2026/09/24 20:31:36.000001 something quoted {CODE}", False),
+    ("stderr", "2026/09/24 20:31:36.000001 2@Q1w2E3r4T5y6U7i8O9p0,AAAAAAAAAAAAAAAAAAAA,B", False),
 ])
-def test_the_pairing_qr_never_leaves_the_server(line, shipped):
-    """The sidecar prints the QR for an operator on this server; the shipper
-    keeps only the sidecar's real log lines (an allowlist, so anything new it
-    prints stays local too). Same regex semantics as Fluent Bit's for this
-    pattern."""
-    assert bool(_sidecar_filter().search(line)) is shipped
+def test_the_pairing_qr_never_leaves_the_server_and_crash_output_does(source, line, shipped):
+    """The sidecar prints the QR for an operator on this server, on stdout.
+    The shipper keeps every stderr record (log lines and crash output) and,
+    on stdout, whatsmeow's log lines only (an allowlist, so anything new
+    printed there stays local), and drops whatever carries a pairing code."""
+    assert _sidecar_shipped({"source": source, "log": line}) is shipped
+
+
+def test_the_sidecar_writes_the_qr_to_stdout_and_nothing_to_stderr_by_hand():
+    """What the filter relies on, checked in the Go code: the QR goes to
+    os.Stdout, whatsmeow logs through waLog.Stdout, and no code writes to
+    os.Stderr itself (only Go's log package and runtime do). If the QR moved
+    to stderr, the filter would ship it; this test is where that shows."""
+    sources = {p: p.read_text(encoding="utf-8")
+               for p in (REPO / "sidecars" / "whatsapp").rglob("*.go")
+               if not p.name.endswith("_test.go")}
+    text = "\n".join(sources.values())
+    assert "os.Stderr" not in text
+    assert "log.SetOutput" not in text and "log.New(" not in text
+    calls = re.findall(r"qrterminal\.\w+\(([^)]*)\)", text)
+    assert calls and all(c.rstrip().endswith("os.Stdout") for c in calls), calls
+    loggers = re.findall(r"waLog\.(\w+)\(", text)
+    assert loggers and set(loggers) == {"Stdout"}, loggers
 
 
 def _docker_compose() -> list[str] | None:
@@ -498,3 +554,7 @@ def test_compose_merges_the_whole_stack_as_these_tests_read_it(tmp_path, region)
     assert merged["log-shipper"]["environment"] == {
         LICENSE_KEY: "fake-license-key-for-a-config-test"}
     assert merged["audit-exporter"]["network_mode"] == "none"
+    # One build: the exporter runs the image the broker's build tags.
+    assert merged["audit-exporter"]["image"] == merged["broker"]["image"] == "aab-broker"
+    assert [n for n, s in merged.items() if s.get("image") == "aab-broker" and "build" in s] == [
+        "broker"]

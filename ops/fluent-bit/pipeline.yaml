@@ -36,17 +36,34 @@ pipeline:
       mode: partial_message
 
     # 2. The WhatsApp sidecar prints the pairing QR to stdout, for an
-    #    operator with Docker access on this server. The QR links a phone to
-    #    this broker, so it must never leave the server. Keep only the
-    #    sidecar's real log lines: Go's log format (2026/09/24 20:31:35...)
-    #    and whatsmeow's (20:31:35.601 [Module LEVEL]). Everything else it
-    #    prints (the QR block, the banners around it, anything new) stays
-    #    local, in docker compose logs.
+    #    operator with Docker access on this server: the banners with
+    #    fmt.Println, the QR block with qrterminal to os.Stdout
+    #    (sidecars/whatsapp/internal/wa/client.go). The QR links a phone to
+    #    this broker, so it must never leave the server. The sidecar's other
+    #    output: Go's log package writes every sidecar log line to stderr,
+    #    and so does the Go runtime (a panic, a fatal error, its stack);
+    #    whatsmeow's logger (waLog.Stdout) writes to stdout, as
+    #    "20:31:35.601 [Module LEVEL] ...". So keep every stderr record,
+    #    crash output included, and on stdout only whatsmeow's lines.
+    #    Everything else on stdout (the QR block, the banners around it,
+    #    anything new) stays local, in docker compose logs.
     - name: grep
       match_regex: '^aab\..*whatsapp-sidecar.*$'
-      regex: 'log ^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}|\d{2}:\d{2}:\d{2}\.\d{3} \[)'
+      logical_op: or
+      regex:
+        - 'source ^stderr$'
+        - 'log ^\d{2}:\d{2}:\d{2}\.\d{3} \['
 
-    # 3. A JSON line (LOG_FORMAT=json, and every audit row) becomes
+    # 3. At LOG_LEVEL=DEBUG whatsmeow logs the pairing code itself, on its
+    #    QRChannel logger ("Emitting QR code https://wa.me/settings/
+    #    linked_devices#2@...,..."), in the format step 2 keeps. Drop every
+    #    sidecar record from that logger, and every record that carries a
+    #    pairing code in either shape, from either stream.
+    - name: grep
+      match_regex: '^aab\..*whatsapp-sidecar.*$'
+      exclude: 'log (\[WhatsApp/QRChannel |linked_devices#|\d@[A-Za-z0-9+/=]{16,},[A-Za-z0-9+/=]{16,},)'
+
+    # 4. A JSON line (LOG_FORMAT=json, and every audit row) becomes
     #    attributes New Relic can query: level, logger, service, request_id,
     #    message; or table, id, decision, outcome, hash for the audit record.
     #    A text line does not parse and passes unchanged.
@@ -57,7 +74,7 @@ pipeline:
       reserve_data: on
       preserve_key: on
 
-    # 4. A parsed service line has its own message: drop the raw copy. An
+    # 5. A parsed service line has its own message: drop the raw copy. An
     #    audit row has none, so its raw line stays as the log message.
     - name: modify
       match: "aab.*"
