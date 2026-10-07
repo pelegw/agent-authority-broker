@@ -9,16 +9,25 @@ service is known from two sources, merged by `services()`:
     reconcile_services -> set_dynamic_services), so a plugin installed while
     the broker runs is reached without recreating the broker.
 
-The merge rule: a service the installer lists now uses the installer's URL
-and token (it reads them from .env at each request, so they are fresher than
-an env snapshot: a purge and reinstall mints a new token). A service the
-installer listed and no longer lists is evicted, even if env still names it
-(env drops it at the next deploy's recreate). Every other env service is
-used as it is. The installer can never name a service the stack itself uses
-(RESERVED_SERVICES, refused here as well as in the installer), and its URL
-is only ever `http://plugin-<service>:8090`, so it can never redirect an
-in-tree service or point the broker anywhere else. Eviction drops the
-service's plugin ids at once (agents get 404); its plugins rows stay.
+The merge rule. Until the installer's first successful answer since boot
+(and always when no installer is configured), env stands alone, as without
+an installer. From that answer on, the installer is the authority for every
+external service:
+
+  * a reserved name (RESERVED_SERVICES: the in-tree services) always comes
+    from env and is never evicted; the installer can never list one (refused
+    here as well as in the installer);
+  * a service the installer lists uses the installer's URL and token (it
+    reads them from .env at each request, so they are fresher than an env
+    snapshot: a purge and reinstall mints a new token);
+  * any other env service is evicted: the broker's env still names a plugin
+    removed since this container was created (a `docker restart` keeps the
+    old env) until the next deploy recreates it.
+
+The installer's URL is only ever `http://plugin-<service>:8090`, so it can
+never redirect an in-tree service or point the broker anywhere else.
+Eviction drops the service's plugin ids at once (agents get 404) and its
+pending retry (no warning every 30 s); its plugins rows stay.
 
 Each returned manifest is **pinned** against an
 owner-approved copy: the vendored file at `broker/broker/targets/<id>/
@@ -153,9 +162,9 @@ class Registry:
         self._raw_offers: dict[str, Any] = {}
         self._pending: dict[str, tuple[str, str]] = {}
         # The installer's services (memory only: tokens are never written
-        # anywhere by the broker) and every name it has listed since boot.
+        # anywhere by the broker), and whether it has answered since boot.
         self._dynamic: dict[str, tuple[str, str]] = {}
-        self._listed: set[str] = set()
+        self._synced = False
         self._next_discovery = 0.0
         self._factory: ClientFactory | None = None
         self._anc_cache: dict[tuple[str, str], tuple[float, tuple[str, ...]]] = {}
@@ -296,9 +305,12 @@ class Registry:
     # ---- known services: env plus the installer's ---------------------------------
 
     def _merged(self, env: dict[str, tuple[str, str]]) -> dict[str, tuple[str, str]]:
-        """The merge rule (module docstring): listed now -> the installer's
-        values; listed before, not now -> gone; otherwise env."""
-        out = {s: v for s, v in env.items() if s not in self._listed}
+        """The merge rule (module docstring): before the installer's first
+        answer, env; after it, reserved names from env plus the installer's
+        list, and nothing else."""
+        if not self._synced:
+            return dict(sorted(env.items()))
+        out = {s: v for s, v in env.items() if s in RESERVED_SERVICES}
         out.update(self._dynamic)
         return dict(sorted(out.items()))
 
@@ -315,15 +327,17 @@ class Registry:
     def set_dynamic_services(self, mapping: Any) -> DynamicChange:
         """Replace the installer's services with `mapping` ({service: (url,
         token)}), after a successful fetch. Validated whole first (ValueError,
-        nothing changed). A service it no longer lists is evicted; the
-        services to discover are returned, not discovered here, so the
-        caller decides when the network calls happen."""
+        nothing changed). From then on the merge rule makes the installer
+        the authority for every external service: one it does not list is
+        evicted, env or not. The services to discover are returned, not
+        discovered here, so the caller decides when the network calls
+        happen."""
         new = check_dynamic(mapping)
         with self._lock:
             env = plugin_services()
             before = self._merged(env)
             self._dynamic = new
-            self._listed |= set(new)
+            self._synced = True
             after = self._merged(env)
             removed = tuple(s for s in before if s not in after)
             for service in removed:

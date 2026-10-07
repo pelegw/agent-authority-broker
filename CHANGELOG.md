@@ -79,12 +79,16 @@ lives only in `VERSION`.
     (never the secrets key, never logged). Job lines now also mask every
     `PLUGIN_TOKEN_*` value in `.env`, whatever its shape.
   - The broker's registry merges these dynamic services with the ones in
-    its environment (`Registry.set_dynamic_services`, `services()`). For a
-    service the installer lists, the installer's URL and token win. So a
-    purge and a reinstall between two deploys work with the new token. A
-    service it stopped listing is evicted at once (agents get 404), even if
-    the environment still names it. Every other service comes from the
-    environment.
+    its environment (`Registry.set_dynamic_services`, `services()`). Until
+    the installer first answers after a broker start, the environment
+    stands alone. After that answer, the installer is the authority for
+    every external service. For a service it lists, its URL and token win,
+    so a purge and a reinstall between two deploys work with the new token.
+    Any other environment service is evicted at once (agents get 404), with
+    one INFO line and no retry warnings afterwards. So a `docker restart`
+    after a remove does not bring the plugin back. The reserved names (the
+    in-tree services) always come from the environment and are never
+    evicted.
   - The registry refuses the whole list, and keeps the previous set, when
     the list names a service the stack itself uses (`whatsapp`, `github`,
     `google`, `installer`, ...). It does the same for a URL other than

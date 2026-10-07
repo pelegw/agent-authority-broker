@@ -333,6 +333,50 @@ def test_purge_then_reinstall_without_a_deploy_uses_the_new_token(sync, client, 
     assert TOKEN_A not in caplog.text and TOKEN_B not in caplog.text
 
 
+def test_a_removed_service_the_env_still_names_is_evicted_without_retry_warnings(
+        sync, monkeypatch, caplog):
+    """A `docker restart` after a remove: the broker's env still names echo
+    (with its old token), the container is gone. Once the installer answers
+    without echo, echo is evicted, logged once at INFO, and no 'will retry'
+    warning follows on later rediscoveries or ticks."""
+    caplog.set_level(logging.DEBUG)
+    pin()
+    monkeypatch.setenv("PLUGIN_URL_ECHO", URL)
+    monkeypatch.setenv("PLUGIN_TOKEN_ECHO", TOKEN_A)
+    sync.plugin(None)                                    # removed: nothing answers
+    reg = get_registry()
+    reg.discover()                                       # boot: env only
+    assert reg.pending_services() == ["echo"]
+    caplog.clear()
+    sync.fake.services = []
+    out = plugin_install.reconcile_services()
+    assert out == {"services": [], "discovered": [], "removed": ["echo"]}
+    assert "echo" not in reg.services() and reg.pending_services() == []
+    for _ in range(3):                                   # the 30 s retry and the loop
+        reg._next_discovery = 0
+        reg.entries()
+        plugin_install.services_tick()
+    removed = [r for r in caplog.records if "plugin service removed" in r.getMessage()]
+    assert len(removed) == 1 and removed[0].levelno == logging.INFO
+    assert "service=echo" in removed[0].getMessage()
+    assert "will retry" not in caplog.text
+    assert TOKEN_A not in caplog.text
+
+
+def test_a_reserved_env_service_survives_a_sync_that_does_not_list_it(sync, monkeypatch,
+                                                                      caplog):
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setenv("PLUGIN_URL_WHATSAPP", "http://plugin-whatsapp:8090")
+    monkeypatch.setenv("PLUGIN_TOKEN_WHATSAPP", TOKEN_B)
+    reg = get_registry()
+    sync.fake.services = []
+    for _ in range(2):
+        out = plugin_install.reconcile_services()
+        assert out["removed"] == []
+    assert reg.services() == {"whatsapp": ("http://plugin-whatsapp:8090", TOKEN_B)}
+    assert "plugin service removed" not in caplog.text
+
+
 # ---- boot ----------------------------------------------------------------------------------------
 
 def test_the_lifespan_applies_the_installers_services_at_boot(sync):

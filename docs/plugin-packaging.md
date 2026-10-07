@@ -348,6 +348,21 @@ All of it runs in a background loop, never in a request. If the installer
 is off, down or answers with something malformed, the broker keeps the
 services that it has, and logs the problem once.
 
+The broker merges this list with the plugin services in its environment:
+
+- Until the installer first answers after a broker start, the environment
+  stands alone. The same applies when the installer is off.
+- After that answer, the installer is the authority for every external
+  service. The broker uses the installer's URL and token for each service
+  in the list. These values are fresher than the environment of the broker
+  container: a purge and a reinstall make a new token.
+- The broker drops every other service in its environment, once, with an
+  INFO line. Thus a `docker restart` of the broker after a remove does not
+  bring the removed plugin back, and it causes no retry warnings.
+- The in-tree services (`whatsapp`, `github`, `google` and the other
+  reserved names) always come from the environment. The broker never drops
+  them, and it refuses a list that names one.
+
 One job runs at a time. The state and the log lines of a job live in
 `plugins.d/_installer/jobs/<id>.json`. The log lines never hold a token. The
 file survives restarts of both the installer and the broker. Thus the

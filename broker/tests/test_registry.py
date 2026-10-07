@@ -420,19 +420,51 @@ def test_dynamic_services_are_validated_whole(env, mapping, fragment):
     assert TOKEN_A not in str(e.value) and TOKEN_B not in str(e.value)
 
 
-def test_dynamic_services_merge_with_env(env, monkeypatch):
+WHATSAPP_ENV = ("http://plugin-whatsapp:8090", "wa-env-token")
+
+
+def test_before_the_first_answer_env_stands_alone(env, monkeypatch):
+    """No installer answer yet (or no installer at all): every env service,
+    reserved or not, is used as it is."""
+    monkeypatch.setenv("PLUGIN_URL_WHATSAPP", WHATSAPP_ENV[0])
+    monkeypatch.setenv("PLUGIN_TOKEN_WHATSAPP", WHATSAPP_ENV[1])
+    monkeypatch.setenv("PLUGIN_URL_ENVSVC", "http://plugin-envsvc:8090")
+    monkeypatch.setenv("PLUGIN_TOKEN_ENVSVC", "env-token")
+    reg = get_registry()
+    assert reg.services() == {"envsvc": ("http://plugin-envsvc:8090", "env-token"),
+                              "whatsapp": WHATSAPP_ENV}
+    with pytest.raises(ValueError):                               # a refused answer
+        reg.set_dynamic_services({"whatsapp": (registry.dynamic_url("whatsapp"), TOKEN_A)})
+    assert set(reg.services()) == {"envsvc", "whatsapp"}          # is not an answer
+
+
+def test_after_an_answer_the_installer_is_the_authority_for_external_services(
+        env, monkeypatch):
+    """Reserved names (the in-tree services) come from env and are never
+    evicted; any other env service the installer does not list is."""
+    monkeypatch.setenv("PLUGIN_URL_WHATSAPP", WHATSAPP_ENV[0])
+    monkeypatch.setenv("PLUGIN_TOKEN_WHATSAPP", WHATSAPP_ENV[1])
     monkeypatch.setenv("PLUGIN_URL_ENVSVC", "http://plugin-envsvc:8090")
     monkeypatch.setenv("PLUGIN_TOKEN_ENVSVC", "env-token")
     reg = get_registry()
     change = reg.set_dynamic_services(_dyn())
-    assert change.fresh == _dyn() and change.removed == ()
+    assert change.fresh == _dyn() and change.removed == ("envsvc",)
     assert TOKEN_A not in repr(change)                            # fresh holds tokens
-    assert reg.services() == {"echo": _dyn()["echo"],
-                              "envsvc": ("http://plugin-envsvc:8090", "env-token")}
-    # Removing every dynamic service leaves the env one alone.
-    change = reg.set_dynamic_services({})
-    assert change.removed == ("echo",) and change.fresh == {}
-    assert list(reg.services()) == ["envsvc"]
+    assert reg.services() == {"echo": _dyn()["echo"], "whatsapp": WHATSAPP_ENV}
+    # An empty list: the reserved env service survives it, every time.
+    for _ in range(2):
+        change = reg.set_dynamic_services({})
+        assert reg.services() == {"whatsapp": WHATSAPP_ENV}
+    assert reg.dynamic_services() == []
+    # A full discovery after the answer asks no evicted service.
+    asked = []
+
+    def factory(base_url, headers, timeout):
+        asked.append(base_url)
+        raise httpx.ConnectError("refused")
+
+    reg.discover(client_factory=factory)
+    assert asked == [WHATSAPP_ENV[0]] and reg.pending_services() == ["whatsapp"]
 
 
 def test_the_installers_values_win_for_a_service_it_lists(env, monkeypatch):
@@ -443,20 +475,11 @@ def test_the_installers_values_win_for_a_service_it_lists(env, monkeypatch):
     change = reg.set_dynamic_services(_dyn(token=TOKEN_B))
     assert change.fresh == _dyn(token=TOKEN_B)                   # reached differently now
     assert reg.services()["echo"][1] == TOKEN_B
-    # The same values from both sources: nothing to discover again.
     reg.set_dynamic_services({})
-    assert "echo" not in reg.services()        # listed before, not now: gone, env or not
+    assert "echo" not in reg.services()        # not listed: gone, env or not
+    # The same values from both sources: nothing to discover again.
     reg2 = registry.reset_registry()
     assert reg2.set_dynamic_services(_dyn(token=TOKEN_A)).fresh == {}
-
-
-def test_an_env_service_the_installer_never_listed_is_never_evicted(env, monkeypatch):
-    monkeypatch.setenv("PLUGIN_URL_ECHOSVC", "http://plugin-echo")
-    monkeypatch.setenv("PLUGIN_TOKEN_ECHOSVC", PLUGIN_TOKEN)
-    reg = get_registry()
-    reg.set_dynamic_services(_dyn("other"))
-    reg.set_dynamic_services({})
-    assert "echosvc" in reg.services() and "other" not in reg.services()
 
 
 def test_eviction_unregisters_at_once_and_forgets_offers_and_retries(external, echo_impl,

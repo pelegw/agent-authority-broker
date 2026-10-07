@@ -69,7 +69,9 @@ here instead of holding them.
   disconnects it. The broker reads the plugin's URL and token from the
   installer. The overlay still declares both for the broker, so the next
   full `docker compose up -d` recreates the broker once into the same state.
-  The merge rule: for a service that the installer lists, the installer's
-  URL and token win over the broker's environment. A service that it
-  stopped listing is dropped. Every other service comes from the
-  environment.
+  The merge rule: until the installer first answers after a broker start,
+  the broker's environment stands alone. After that answer, the installer
+  is the authority for every external service. The broker uses the
+  installer's URL and token for each service in the list. It drops any
+  other environment service, except the in-tree services (`whatsapp`,
+  `github`, `google`), which always come from the environment.
