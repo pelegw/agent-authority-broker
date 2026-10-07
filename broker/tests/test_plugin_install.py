@@ -64,6 +64,9 @@ class FakeInstaller:
         self.refs = {"v0.1.0": (V1, echo_text("0.1.0")), "v0.2.0": (V2, echo_text("0.2.0"))}
         self.records: dict[str, dict] = {}
         self.jobs: dict[str, dict] = {}
+        # GET /services items; `raw[path]` answers 200 with that body as is.
+        self.services: list = []
+        self.raw: dict[str, object] = {}
         self.fail: dict[str, tuple[int, str]] = {}
         self.seen: list[dict] = []
         self.descriptor = dict(DESCRIPTOR)
@@ -92,6 +95,8 @@ class FakeInstaller:
             if request.url.path in self.fail:
                 status, code = self.fail[request.url.path]
                 return JSONResponse({"error": f"simulated {code}", "code": code}, status)
+            if request.url.path in self.raw:
+                return JSONResponse(self.raw[request.url.path])
             return await call_next(request)
 
         @app.post("/inspect")
@@ -126,6 +131,10 @@ class FakeInstaller:
         @app.get("/installed")
         def installed():
             return {"items": list(self.records.values())}
+
+        @app.get("/services")
+        def services():
+            return {"items": list(self.services)}
 
         return app
 

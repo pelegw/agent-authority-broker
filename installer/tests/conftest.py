@@ -154,16 +154,22 @@ def project(tmp_path) -> Path:
     return root
 
 
+BROKER_ID = "0123456789abcdef" * 4      # what `compose ps -q broker` prints
+
+
 class FakeDocker:
     """The command runner: records argv, answers `sh scripts/compose-files.sh`
-    the way the script would (base file plus each plugins.d overlay), and
-    succeeds unless told to fail a command containing a given text.
+    the way the script would (base file plus each plugins.d overlay), answers
+    `compose ps -q broker` with BROKER_ID, and succeeds unless told to fail a
+    command containing a given text (`fail[text] = exit code`) or to answer
+    it with a canned (exit code, output) (`answer[text]`).
     `hold(text)` makes that command wait until `release()`."""
 
     def __init__(self, home: Path):
         self.home = home
         self.calls: list[list[str]] = []
         self.fail: dict[str, int] = {}
+        self.answer: dict[str, tuple[int, str]] = {}
         self._held: dict[str, threading.Event] = {}
         self.entered = threading.Event()
 
@@ -185,6 +191,11 @@ class FakeDocker:
         for text, code in self.fail.items():
             if text in line:
                 return Result(code, f"simulated failure of {text}\nError: boom")
+        for text, (code, output) in self.answer.items():
+            if text in line:
+                return Result(code, output)
+        if argv[:2] == ["docker", "compose"] and argv[-3:] == ["ps", "-q", "broker"]:
+            return Result(0, BROKER_ID + "\n")
         return Result(0, "done")
 
     def hold(self, text: str) -> None:

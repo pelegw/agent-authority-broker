@@ -1,8 +1,26 @@
 """The plugin registry: which plugins exist, how to reach them, and the lattice.
 
-Discovery: every plugin service configured in env (PLUGIN_URL_<SERVICE> +
-PLUGIN_TOKEN_<SERVICE>, see config.plugin_services) is asked for
-`GET /manifests`. Each returned manifest is **pinned** against an
+Discovery: every known plugin service is asked for `GET /manifests`. A
+service is known from two sources, merged by `services()`:
+
+  * env: PLUGIN_URL_<SERVICE> + PLUGIN_TOKEN_<SERVICE> (config.plugin_services),
+    fixed when the container was created;
+  * dynamic: the installer's `GET /services` (services/plugin_install.py
+    reconcile_services -> set_dynamic_services), so a plugin installed while
+    the broker runs is reached without recreating the broker.
+
+The merge rule: a service the installer lists now uses the installer's URL
+and token (it reads them from .env at each request, so they are fresher than
+an env snapshot: a purge and reinstall mints a new token). A service the
+installer listed and no longer lists is evicted, even if env still names it
+(env drops it at the next deploy's recreate). Every other env service is
+used as it is. The installer can never name a service the stack itself uses
+(RESERVED_SERVICES, refused here as well as in the installer), and its URL
+is only ever `http://plugin-<service>:8090`, so it can never redirect an
+in-tree service or point the broker anywhere else. Eviction drops the
+service's plugin ids at once (agents get 404); its plugins rows stay.
+
+Each returned manifest is **pinned** against an
 owner-approved copy: the vendored file at `broker/broker/targets/<id>/
 manifest.yaml` for an in-tree plugin, else the owner's pin in the
 `plugin_pins` table (plugins/pins.py) for an external one. In-tree always
@@ -30,9 +48,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -51,6 +71,58 @@ log = logging.getLogger(__name__)
 TARGETS_DIR = Path(__file__).resolve().parents[1] / "targets"
 # A plugin service that was unreachable at boot is retried at most this often.
 _REDISCOVER_SECONDS = 30
+
+# Dynamic services (the installer's list) must have exactly this shape.
+# The names the stack's own services use: installer/aab_installer/descriptor.py
+# RESERVED_SERVICES, kept equal by tests/test_registry.py. The installer
+# never lists one; the registry refuses one anyway.
+RESERVED_SERVICES = frozenset({
+    "broker", "edge", "caddy", "installer", "sidecar", "internal", "default",
+    "whatsapp", "wa", "github", "google", "plugin", "plugins",
+})
+SERVICE_RE = re.compile(r"^[a-z][a-z0-9]{1,31}$")
+PLUGIN_PORT = 8090             # what the plugin runtime serves on (the overlay's URL)
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/=-]{16,256}$")
+MAX_DYNAMIC = 64
+
+
+def dynamic_url(service: str) -> str:
+    """The one URL a dynamic service may have (the installer's overlay)."""
+    return f"http://plugin-{service}:{PLUGIN_PORT}"
+
+
+def check_dynamic(mapping: Any) -> dict[str, tuple[str, str]]:
+    """The installer's services, validated strictly: {service: (url, token)}.
+    Raises ValueError on anything else, naming the service at most (never
+    a URL or a token), so the caller keeps the previous set."""
+    if not isinstance(mapping, dict):
+        raise ValueError("the services are not a mapping")
+    if len(mapping) > MAX_DYNAMIC:
+        raise ValueError(f"more than {MAX_DYNAMIC} services")
+    out: dict[str, tuple[str, str]] = {}
+    for service, value in mapping.items():
+        if not isinstance(service, str) or not SERVICE_RE.match(service):
+            raise ValueError("a service name is malformed")
+        if service in RESERVED_SERVICES:
+            raise ValueError(f"service {service!r} is a name the stack itself uses")
+        if not isinstance(value, tuple) or len(value) != 2:
+            raise ValueError(f"service {service!r}: malformed entry")
+        url, token = value
+        if url != dynamic_url(service):
+            raise ValueError(f"service {service!r}: the url is not {dynamic_url(service)}")
+        if not isinstance(token, str) or not _TOKEN_RE.match(token):
+            raise ValueError(f"service {service!r}: malformed token")
+        out[service] = (url, token)
+    return dict(sorted(out.items()))
+
+
+@dataclass(frozen=True)
+class DynamicChange:
+    """What set_dynamic_services changed. `fresh` are the services to
+    discover now (new, or reached at another URL or with another token);
+    `removed` were evicted. Never logged whole: `fresh` holds tokens."""
+    fresh: dict[str, tuple[str, str]] = field(repr=False)
+    removed: tuple[str, ...]
 
 
 def live_plugin_timeout() -> float:
@@ -80,6 +152,10 @@ class Registry:
         # put it back up for review.
         self._raw_offers: dict[str, Any] = {}
         self._pending: dict[str, tuple[str, str]] = {}
+        # The installer's services (memory only: tokens are never written
+        # anywhere by the broker) and every name it has listed since boot.
+        self._dynamic: dict[str, tuple[str, str]] = {}
+        self._listed: set[str] = set()
         self._next_discovery = 0.0
         self._factory: ClientFactory | None = None
         self._anc_cache: dict[tuple[str, str], tuple[float, tuple[str, ...]]] = {}
@@ -217,16 +293,81 @@ class Registry:
                                                   reason=reason))
             return True
 
+    # ---- known services: env plus the installer's ---------------------------------
+
+    def _merged(self, env: dict[str, tuple[str, str]]) -> dict[str, tuple[str, str]]:
+        """The merge rule (module docstring): listed now -> the installer's
+        values; listed before, not now -> gone; otherwise env."""
+        out = {s: v for s, v in env.items() if s not in self._listed}
+        out.update(self._dynamic)
+        return dict(sorted(out.items()))
+
+    def services(self) -> dict[str, tuple[str, str]]:
+        """{service: (url, token)} for every known plugin service."""
+        with self._lock:
+            return self._merged(plugin_services())
+
+    def dynamic_services(self) -> list[str]:
+        """The names the installer lists now (no URL, no token)."""
+        with self._lock:
+            return sorted(self._dynamic)
+
+    def set_dynamic_services(self, mapping: Any) -> DynamicChange:
+        """Replace the installer's services with `mapping` ({service: (url,
+        token)}), after a successful fetch. Validated whole first (ValueError,
+        nothing changed). A service it no longer lists is evicted; the
+        services to discover are returned, not discovered here, so the
+        caller decides when the network calls happen."""
+        new = check_dynamic(mapping)
+        with self._lock:
+            env = plugin_services()
+            before = self._merged(env)
+            self._dynamic = new
+            self._listed |= set(new)
+            after = self._merged(env)
+            removed = tuple(s for s in before if s not in after)
+            for service in removed:
+                self._evict(service)
+            fresh = {s: v for s, v in after.items() if before.get(s) != v}
+            for service in sorted(set(new) & set(env)):
+                if env[service] != new[service] and service in fresh:
+                    # Which source won and which field differs; never a value.
+                    differs = [n for n, a, b in zip(("url", "token"), env[service],
+                                                    new[service]) if a != b]
+                    log.debug("plugin service set by env and by the installer; the "
+                              "installer's values win %s",
+                              kv(service=service, used="installer", differs=differs))
+            return DynamicChange(fresh, removed)
+
+    def _evict(self, service: str) -> None:
+        """Forget a service: its plugin ids stop being served at once, its
+        offers and pending retry go. Plugins rows and pins are untouched."""
+        gone = sorted(pid for pid, e in self._entries.items() if e.service == service)
+        for pid in gone:
+            self._entries.pop(pid, None)
+            self._raw_offers.pop(pid, None)
+        for pid in [p for p, o in self.offered.items() if o.get("service") == service]:
+            self.offered.pop(pid, None)
+            self.refused.pop(pid, None)
+            self._retry.pop(pid, None)
+        self._pending.pop(service, None)
+        self._anc_cache.clear()          # a cached chain may have come from it
+        log.info("plugin service removed %s", kv(service=service, plugins=gone))
+
     # ---- discovery -------------------------------------------------------------
 
     def discover(self, services: dict[str, tuple[str, str]] | None = None,
                  client_factory: ClientFactory | None = None) -> None:
-        """Fetch and pin every configured service's manifests."""
+        """Fetch and pin the manifests of `services` (default: every known
+        service). Only those services' pending retries are reset."""
         with self._lock:
             if client_factory is not None:
                 self._factory = client_factory
-            todo = plugin_services() if services is None else services
-            self._pending = {}
+            todo = self._merged(plugin_services()) if services is None else services
+            if services is None:
+                self._pending = {}
+            for service in todo:
+                self._pending.pop(service, None)
             # Offers are re-recorded below from what each service offers now.
             for pid in [p for p, o in self.offered.items() if o["service"] in todo]:
                 self.offered.pop(pid, None)
@@ -253,9 +394,11 @@ class Registry:
             log.warning("plugin refused %s", kv(service=service, reason="malformed /manifests"))
             audit("system", "plugin.refused", service,
                   {"service": service, "reason": "malformed /manifests"}, result="denied")
+            self._drop_unoffered(service, set())
             return
         log.info("plugin service discovered %s", kv(
             service=service, plugins=[m.get("id") for m in offered if isinstance(m, dict)]))
+        registered: set[str] = set()
         for m in offered:
             pid = m.get("id") if isinstance(m, dict) else None
             vendored = self._safe_vendored(pid) if isinstance(pid, str) else None
@@ -268,16 +411,53 @@ class Registry:
                 continue
             adapter = RemoteAdapter(service, url, token, vendored, live_plugin_timeout,
                                     self._factory)
-            self.register(adapter, m, vendored)
+            if self.register(adapter, m, vendored):
+                registered.add(vendored.id)
+        self._drop_unoffered(service, registered)
+
+    def _drop_unoffered(self, service: str, registered: set[str]) -> None:
+        """A service's answer is the whole truth about it: a plugin it served
+        before and did not (validly) offer now stops being served. Without
+        this, a plugin restarted under a new container (an upgrade, failed or
+        not, while the broker keeps running) could stay registered under a
+        manifest that no longer matches its offer or its pin; a refused offer
+        is kept in `offered` by _pin for the owner to review."""
+        for pid in sorted(p for p, e in self._entries.items()
+                          if e.service == service and p not in registered):
+            self._entries.pop(pid, None)
+            self._raw_offers.pop(pid, None)
+            self._anc_cache.clear()
+            log.warning("plugin no longer served: its service does not offer it as pinned %s",
+                        kv(plugin=pid, service=service))
 
     def pending_services(self) -> list[str]:
         """Configured services not reached yet (retried on a later call)."""
         with self._lock:
             return sorted(self._pending)
 
+    def discover_named(self, names: Iterable[str]) -> None:
+        """Discover these services now, with their current values (after an
+        install or upgrade job ended: the container is new). Unknown names
+        are skipped."""
+        with self._lock:
+            current = self._merged(plugin_services())
+            todo = {s: current[s] for s in names if s in current}
+            if todo:
+                self.discover(todo)
+
     def _maybe_rediscover(self) -> None:
-        if self._pending and time.monotonic() >= self._next_discovery:
-            self.discover(dict(self._pending))
+        if not (self._pending and time.monotonic() >= self._next_discovery):
+            return
+        with self._lock:
+            # Checked again under the lock: requests that queued behind one
+            # rediscovery must not each run another.
+            if not (self._pending and time.monotonic() >= self._next_discovery):
+                return
+            # A pending service is retried with its CURRENT values (a token
+            # the installer changed since it failed); a service known to
+            # neither source (an explicit discover() call) keeps its own.
+            current = self._merged(plugin_services())
+            self.discover({s: current.get(s, v) for s, v in self._pending.items()})
 
     # ---- reads (each re-reads the plugins table) -----------------------------
 
@@ -339,7 +519,9 @@ class Registry:
         can never let one plugin's folder tree widen another's. Plugin
         failures are not cached and also answer "no ancestry" (fail closed).
         """
-        owners = [e for e in self._entries.values()
+        # A snapshot (one C-level copy): the installer sync may evict a
+        # service from another thread while this iterates.
+        owners = [e for e in list(self._entries.values())
                   if any(n.form == "subtree" and n.resource == kind
                          for n in e.manifest.narrowings)]
         if len(owners) != 1:

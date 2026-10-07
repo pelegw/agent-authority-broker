@@ -18,7 +18,11 @@
 #   * it holds no git credential: the read-only GitHub token for private
 #     plugin repositories is a console setting the broker keeps encrypted
 #     and sends with each inspect, install or upgrade request; git gets it
-#     only through GIT_ASKPASS for github.com, never in a URL, a file or a log.
+#     only through GIT_ASKPASS for github.com, never in a URL, a file or a log;
+#   * it never recreates or restarts the broker: an install connects the
+#     running broker to the plugin's network (docker network connect), a
+#     remove disconnects it, and the broker reads each installed plugin's
+#     URL and token from the installer's GET /services.
 #
 # The checkout is mounted at the SAME path inside (AAB_HOME, default
 # /opt/aab), so compose run in here resolves every relative path in every

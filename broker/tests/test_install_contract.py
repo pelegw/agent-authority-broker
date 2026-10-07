@@ -7,9 +7,12 @@ a local bare git repository (the echo plugin packaged as an external plugin,
 tagged v0.1.0 and v0.2.0, cloned over file://), and a recording stand-in for
 Docker (no daemon needed). Through the broker's own routes: inspect builds
 the review from what the installer read, install pins and the real job runs
-to done (the .env secrets, the rendered overlay, the compose commands), the
-service that comes up is registered against the pin, upgrade re-pins, remove
-unpins and purges, and refusals cross the boundary with their status and code.
+to done (the .env secrets, the rendered overlay, the docker commands, none of
+which recreates the broker), the running broker learns the new service from
+the installer's GET /services and registers it against the pin, upgrade
+re-pins and the new container is discovered again, remove unpins, purges and
+evicts the service, and refusals cross the boundary with their status and
+code.
 """
 
 import os
@@ -46,6 +49,7 @@ from aab_installer.git import Git  # noqa: E402
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
 
 INSTALLER_URL = "http://aab-installer:8070"
+BROKER_ID = "0123456789abcdef" * 4      # the broker container, as `compose ps -q` prints it
 TOKEN = "contract-installer-token-0123456789abcdef0123"
 SOURCE = "github.com/acme/aab-plugin-echo"
 DESCRIPTOR = ("schema: 1\nservice: echo\nplugins: [echo]\n"
@@ -70,7 +74,8 @@ def _write(path: Path, text: str) -> None:
 
 class Docker:
     """Records every docker command; answers scripts/compose-files.sh the way
-    the script would (the base file plus each rendered overlay)."""
+    the script would (the base file plus each rendered overlay), and
+    `compose ps -q broker` with BROKER_ID."""
 
     def __init__(self, home: Path):
         self.home, self.calls = home, []
@@ -83,6 +88,8 @@ class Docker:
                 files += ["-f", f"plugins.d/{f.parent.name}/compose.yml"]
             return Result(0, " ".join(files) + "\n")
         self.calls.append(argv)
+        if argv[:2] == ["docker", "compose"] and argv[-3:] == ["ps", "-q", "broker"]:
+            return Result(0, BROKER_ID + "\n")
         return Result(0, "ok")
 
     def compose(self) -> list[list[str]]:
@@ -163,6 +170,16 @@ def _env_names(home: Path) -> set[str]:
             if line and not line.startswith("#")}
 
 
+def _env_value(home: Path, name: str) -> str:
+    return next(line.split("=", 1)[1] for line in (home / ".env").read_text().splitlines()
+                if line.startswith(f"{name}="))
+
+
+def _never_recreates_the_broker(docker: Docker) -> None:
+    for argv in docker.compose():
+        assert argv == ["ps", "-q", "broker"] or "broker" not in argv, argv
+
+
 def test_install_upgrade_and_remove_through_the_real_installer(client, admin_headers, owner,
                                                                real_installer, echo_impl,
                                                                tmp_path):
@@ -185,7 +202,11 @@ def test_install_upgrade_and_remove_through_the_real_installer(client, admin_hea
                {"source": SOURCE, "ref": "v0.1.0", "commit": v1}, inst)
     assert job["state"] == "done", job
     assert job["kind"] == "install" and job["service"] == "echo" and job["commit"] == v1
-    assert inst.docker.compose() == [["up", "-d", "--build", "plugin-echo"], ["up", "-d", "broker"]]
+    # Built and started; the RUNNING broker joins its network. No restart.
+    assert inst.docker.compose() == [
+        ["up", "-d", "--build", "plugin-echo"], ["ps", "-q", "broker"],
+        ["docker", "network", "connect", "aab_net_echo", BROKER_ID]]
+    _never_recreates_the_broker(inst.docker)
     assert (pins.record("echo")["commit"], pins.record("echo")["pinned_by"]) == (v1, owner.username)
     assert (inst.home / "plugins.d" / "echo" / "compose.yml").is_file()
     assert {"PLUGIN_TOKEN_ECHO", "PLUGIN_SECRETS_KEY_ECHO"} <= _env_names(inst.home)
@@ -194,13 +215,20 @@ def test_install_upgrade_and_remove_through_the_real_installer(client, admin_hea
         "echo", SOURCE, "v0.1.0", v1)
     assert record["plugins"] == ["echo"] and record["volumes"] == ["echo_secrets", "echo_data"]
 
-    # The recreated broker discovers the service against the pin: disabled.
+    # The running broker learns the service from the installer's GET
+    # /services (the token the job wrote to .env) and discovers it against
+    # the pin: disabled. The job route saw "done"; the sync loop's tick
+    # applies it.
     from aab_plugin_runtime import serve
     from cryptography.fernet import Fernet
-    runtime = serve([echo_impl], PLUGIN_TOKEN, tmp_path / "echo-secrets",
+    token = _env_value(inst.home, "PLUGIN_TOKEN_ECHO")
+    runtime = serve([echo_impl], token, tmp_path / "echo-secrets",
                     Fernet.generate_key().decode())
-    get_registry().discover({"echo": ("http://plugin-echo:8090", PLUGIN_TOKEN)},
-                            client_factory=runtime_factory(runtime))
+    get_registry().discover({}, client_factory=runtime_factory(runtime))
+    assert get_registry().services().get("echo") is None
+    plugin_install.services_tick()
+    assert get_registry().dynamic_services() == ["echo"]
+    assert get_registry().services()["echo"] == ("http://plugin-echo:8090", token)
     view = client.get("/v1/admin/plugins/echo", headers=admin_headers).json()
     assert view["service"] == "echo" and view["enabled"] is False
 
@@ -214,18 +242,32 @@ def test_install_upgrade_and_remove_through_the_real_installer(client, admin_hea
                          json={"source": SOURCE, "ref": "v0.2.0"}).json()
     assert review["upgrade"] is True and review["installed"]["commit"] == v1
     assert review["plugins"][0]["diff"]["from_version"] == "0.1.0"
+    inst.docker.calls.clear()
     job = _run(client, admin_headers, "/v1/admin/plugins/echo/upgrade",
                {"source": SOURCE, "ref": "v0.2.0", "commit": v2}, inst)
     assert job["state"] == "done", job
+    assert inst.docker.compose() == [["up", "-d", "--build", "plugin-echo"]]
     assert pins.record("echo")["version"] == "0.2.0" and pins.record("echo")["commit"] == v2
+    # The new container (offering 0.2.0) is discovered again when the job
+    # ends: the registry serves the new pin, still without a broker restart.
+    echo_impl.manifest = {**echo_impl.manifest, "version": "0.2.0"}
+    plugin_install.services_tick()
+    assert get_registry().manifests()["echo"].version == "0.2.0"
 
     # Remove with purge: the installer stops it and deletes its files, volumes
     # and secrets; the broker unpins it and agents lose it at once.
     inst.docker.calls.clear()
     job = _run(client, admin_headers, "/v1/admin/plugins/echo/remove", {"purge": True}, inst)
     assert job["state"] == "done", job
-    assert inst.docker.compose()[0] == ["rm", "-s", "-f", "plugin-echo"]
+    assert inst.docker.compose()[:4] == [
+        ["rm", "-s", "-f", "plugin-echo"], ["ps", "-q", "broker"],
+        ["docker", "network", "disconnect", "aab_net_echo", BROKER_ID],
+        ["docker", "network", "rm", "aab_net_echo"]]
+    _never_recreates_the_broker(inst.docker)
     assert ["docker", "volume", "rm", "aab_echo_secrets"] in inst.docker.calls
+    # The installer no longer lists it: the running broker evicts it.
+    plugin_install.services_tick()
+    assert get_registry().dynamic_services() == [] and "echo" not in get_registry().services()
     assert pins.record("echo") is None
     assert client.get("/v1/admin/plugins/echo", headers=admin_headers).status_code == 404
     assert not (inst.home / "plugins.d" / "echo").exists()

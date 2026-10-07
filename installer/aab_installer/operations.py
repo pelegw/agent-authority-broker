@@ -11,15 +11,26 @@ The installer owns `plugins.d/` on the host (deploy/push.sh never syncs it):
 Install: fetch the reviewed commit into a temporary directory, read the
 package, refuse a service that already exists, move the checkout into place,
 make sure the service's two .env secrets exist, render the overlay, then
-`up -d --build plugin-<service>` and `up -d broker` (the broker is recreated
-with its new environment, without rebuilding it from whatever code the
-checkout holds). Any failure rolls the files back, so a broken overlay can
-never stay in the file set and break every later compose run, deploy
+`up -d --build plugin-<service>` and `docker network connect aab_net_<service>
+<broker container>`. Any failure rolls the files back, so a broken overlay
+can never stay in the file set and break every later compose run, deploy
 included. Upgrade is the same against an installed service (same source,
-same service name) and restores the previous checkout and overlay on
-failure. Remove stops and deletes the container, deletes the directory,
-retires (or with purge deletes) the .env secrets, recreates the broker
-without the service, and with purge deletes its volumes.
+same service name), without the network step (the broker is on the network
+already), and restores the previous checkout and overlay on failure. Remove
+stops and deletes the container, deletes the directory, retires (or with
+purge deletes) the .env secrets, disconnects the broker from the service's
+network and removes it, and with purge deletes its volumes.
+
+Why the broker is never recreated here: recreating it (`up -d broker`, for
+its new environment and network) took the whole broker down for every
+install. Instead the broker joins or leaves the one network at runtime, and
+learns each installed service's URL and token from `GET /services` (app.py),
+not from its environment. The overlay still declares both for the broker, so
+the next full `docker compose up -d` (a deploy) recreates the broker once
+into the same state; that recreate belongs to the deploy, never to an
+install. The network commands are idempotent: "already exists" on connect
+and "is not connected" or "not found" on disconnect count as done, so a
+retried job never fails on its own earlier half.
 
 The authority decisions are the broker's: it pins the manifests the owner
 reviewed before it asks for an install, and it registers a plugin only when
@@ -29,7 +40,9 @@ the service offers exactly those.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -41,14 +54,24 @@ from .descriptor import RESERVED_SERVICES, SERVICE_RE, view
 from .fs import rmtree, write_atomic
 from .git import COMMIT_RE, Git, GitError, allowed, normalize_source, ref_kind
 from .jobs import JobContext
-from .overlay import NEWRELIC_FILE, names, render, render_newrelic, service_dir
+from .logging_setup import kv
+from .overlay import NEWRELIC_FILE, PLUGIN_PORT, names, render, render_newrelic, service_dir
 from .package import read_package
+
+log = logging.getLogger(__name__)
 
 INSTALL_RECORD = "install.json"
 # The files _materialize writes; an upgrade restores exactly these.
 RENDERED = ("compose.yml", NEWRELIC_FILE, INSTALL_RECORD)
 RECORD_KEYS = ("service", "source", "ref", "commit", "plugins", "volumes", "installed_at",
                "updated_at")
+BROKER = "broker"                       # the broker's compose service name
+# What `docker compose ps -q` prints for a container: its id, nothing else.
+CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{12,64}$")
+# The daemon's answer when the network step already holds (lowercased).
+# Matched so a retried job (or one racing a deploy) never fails on it.
+ALREADY_CONNECTED = ("already exists", "already attached", "already connected")
+NOT_CONNECTED = ("is not connected", "not found", "no such network", "no such container")
 
 
 class InstallerError(Exception):
@@ -129,6 +152,36 @@ class Installer:
     def installed(self) -> list[dict]:
         return installed_records(self.settings.plugins_dir)
 
+    def services(self) -> list[dict]:
+        """How the broker reaches each installed service: `{service, url,
+        token}`, the token read from .env (envfile.plugin_token). A service
+        whose record or token is missing is left out, so the broker stops
+        serving it (fail closed) until a later answer lists it again. The
+        URL is the one the overlay gives the broker, built from the
+        validated name alone."""
+        env = self.settings.home / ".env"
+        out = []
+        for rec in self.installed():
+            service = rec.get("service")
+            if (not isinstance(service, str) or not SERVICE_RE.match(service)
+                    or service in RESERVED_SERVICES):
+                continue
+            token = envfile.plugin_token(env, service)
+            if token is None:
+                # The name only: a missing token is the operator's to fix
+                # (scripts/init_secrets.py --rotate PLUGIN_TOKEN_<SERVICE>).
+                log.warning("installed service has no token in .env; not listed %s",
+                            kv(service=service, missing=names(service)["token_env"]))
+                continue
+            out.append({"service": service,
+                        "url": f"http://{names(service)['compose_service']}:{PLUGIN_PORT}",
+                        "token": token})
+        return out
+
+    def known_tokens(self) -> tuple[str, ...]:
+        """Every plugin token in .env, masked in a job's lines whatever its shape."""
+        return envfile.plugin_tokens(self.settings.home / ".env")
+
     # ---- inspect (synchronous) -----------------------------------------------------
 
     def _tmp(self, prefix: str) -> Path:
@@ -153,22 +206,62 @@ class Installer:
     # ---- job steps -------------------------------------------------------------------
 
     def _step(self, ctx: JobContext, argv: list[str], result, must: bool = True,
-              label: str = "") -> bool:
+              label: str = "", done_if: tuple[str, ...] = ()) -> bool:
+        """Log a command and its outcome. `done_if`: output phrases that
+        mean the step's goal already holds (an idempotent retry)."""
         ctx.log("$ " + " ".join(argv))
         for line in tail(result.output):
             ctx.log("  " + line)
         ctx.log(f"exit {result.returncode}")
+        if result.returncode != 0 and done_if and any(
+                phrase in result.output.lower() for phrase in done_if):
+            ctx.log("already so: nothing to do")
+            return True
         if result.returncode != 0 and must:
             raise ComposeError(f"{label or argv[0]} failed (exit {result.returncode})")
         return result.returncode == 0
 
-    def _up(self, ctx: JobContext, service: str) -> None:
+    def _start(self, ctx: JobContext, service: str) -> None:
         n = names(service)
         self._step(ctx, *self.compose.compose("up", "-d", "--build", n["compose_service"]),
                    label=f"building and starting {n['compose_service']}")
-        # Recreated for its new environment and network; never rebuilt here.
-        self._step(ctx, *self.compose.compose("up", "-d", "broker"),
-                   label="recreating the broker")
+
+    def _broker_container(self, ctx: JobContext) -> str:
+        """The running broker container's id, from compose itself (never a
+        name typed here, so another project's broker is never touched)."""
+        argv, result = self.compose.compose("ps", "-q", BROKER, timeout=120)
+        self._step(ctx, argv, result, label="finding the broker container")
+        # Output interleaves stderr: keep only lines that are a container id.
+        ids = [line.strip() for line in result.output.splitlines()
+               if CONTAINER_ID_RE.match(line.strip())]
+        if len(ids) != 1:
+            raise ComposeError("the broker container is not running" if not ids
+                               else "more than one broker container is running")
+        return ids[0]
+
+    def _connect_broker(self, ctx: JobContext, service: str) -> None:
+        """Put the running broker on the service's network: it can reach the
+        plugin from now on, and nothing about the broker restarts."""
+        network = f"{PROJECT}_{names(service)['network']}"
+        container = self._broker_container(ctx)
+        self._step(ctx, *self.compose.docker("network", "connect", network, container),
+                   label=f"connecting the broker to {network}", done_if=ALREADY_CONNECTED)
+
+    def _detach(self, ctx: JobContext, service: str) -> None:
+        """Best effort: take the broker off the service's network, then
+        remove the network. Neither can undo anything already done, so a
+        failure is logged and the job goes on (a leftover network is inert:
+        no plugin is on it)."""
+        network = f"{PROJECT}_{names(service)['network']}"
+        try:
+            container = self._broker_container(ctx)
+        except ComposeError as exc:
+            ctx.log(f"skipped disconnecting the broker: {exc}")
+        else:
+            self._step(ctx, *self.compose.docker("network", "disconnect", network, container),
+                       must=False, done_if=NOT_CONNECTED)
+        self._step(ctx, *self.compose.docker("network", "rm", network), must=False,
+                   done_if=NOT_CONNECTED)
 
     def _fetch(self, ctx: JobContext, tmp: Path, source: str, ref: str, commit: str,
                token: str = ""):
@@ -225,13 +318,15 @@ class Installer:
             os.replace(tmp / "src", svc_dir / "src")
             try:
                 self._materialize(ctx, pkg, source, ref, commit)
-                self._up(ctx, service)
+                self._start(ctx, service)
+                self._connect_broker(ctx, service)
             except BaseException:
                 ctx.log("install failed; rolling back")
                 if (svc_dir / "compose.yml").exists():
                     self._best_effort(ctx, "rm", "-s", "-f", names(service)["compose_service"])
                 rmtree(svc_dir)
-                self._best_effort(ctx, "up", "-d", "broker")
+                # The network goes with the plugin; the broker stays up.
+                self._detach(ctx, service)
                 raise
             ctx.log(f"installed {service} from {source}@{ref}")
         finally:
@@ -256,7 +351,8 @@ class Installer:
             os.replace(tmp / "src", svc_dir / "src")
             try:
                 self._materialize(ctx, pkg, source, ref, commit, previous.get("installed_at"))
-                self._up(ctx, service)
+                # Same network, same URL and token: the broker needs nothing.
+                self._start(ctx, service)
             except BaseException:
                 ctx.log("upgrade failed; restoring the previous version's files")
                 rmtree(svc_dir / "src")
@@ -268,7 +364,7 @@ class Installer:
                         # New in this upgrade (newrelic.yml for an install
                         # made before it existed): gone again, as before.
                         (svc_dir / name).unlink(missing_ok=True)
-                self._best_effort(ctx, "up", "-d", names(service)["compose_service"], "broker")
+                self._best_effort(ctx, "up", "-d", names(service)["compose_service"])
                 raise
             ctx.log(f"upgraded {service} to {source}@{ref}")
         finally:
@@ -291,10 +387,8 @@ class Installer:
         else:
             kept = envfile.retire(env, service)
             ctx.log(".env: retired (commented, kept) " + (", ".join(kept) or "nothing"))
-        self._step(ctx, *self.compose.compose("up", "-d", "broker"),
-                   label="recreating the broker")
-        self._step(ctx, *self.compose.docker("network", "rm", f"{PROJECT}_{n['network']}"),
-                   must=False)
+        # The broker leaves the network (it keeps running), then the network goes.
+        self._detach(ctx, service)
         if purge:
             for volume in rec.get("volumes") or []:
                 if isinstance(volume, str) and volume.startswith(f"{service}_"):

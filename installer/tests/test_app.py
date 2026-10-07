@@ -1,9 +1,11 @@
 """The installer API end to end, without Docker: the token guard, the source
 allowlist and ref rules, inspect against a local bare repository, the
-install, upgrade and remove jobs (the exact compose commands they run, the
-files they leave, the .env secrets, rollback on failure, one job at a time),
-and the GitHub token a request may carry (to git through askpass only, kept
-nowhere, a malformed one refused unseen)."""
+install, upgrade and remove jobs (the exact docker commands they run, never
+one that recreates the broker, the network steps idempotent, the files they
+leave, the .env secrets, rollback on failure, one job at a time), the
+services the broker reaches (`GET /services`: URLs and tokens, guarded,
+never logged), and the GitHub token a request may carry (to git through
+askpass only, kept nowhere, a malformed one refused unseen)."""
 
 import json
 import os
@@ -17,8 +19,20 @@ from aab_installer import envfile, overlay
 from aab_installer.app import create_app
 from aab_installer.descriptor import parse
 
-from .conftest import (ECHO_DESCRIPTOR, ECHO_MANIFEST, SOURCE, TOKEN, RepoBuilder, echo_package,
-                       local_git, make_settings, run_job)
+from .conftest import (BROKER_ID, ECHO_DESCRIPTOR, ECHO_MANIFEST, SOURCE, TOKEN, RepoBuilder,
+                       echo_package, local_git, make_settings, run_job)
+
+CONNECT = ["docker", "network", "connect", "aab_net_echo", BROKER_ID]
+DISCONNECT = ["docker", "network", "disconnect", "aab_net_echo", BROKER_ID]
+NETWORK_RM = ["docker", "network", "rm", "aab_net_echo"]
+FIND_BROKER = ["compose", "ps", "-q", "broker"]
+
+
+def never_recreates_the_broker(fake_docker) -> None:
+    """No command the installer ran could recreate or restart the broker."""
+    for argv in fake_docker.commands():
+        if argv[:1] == ["compose"]:
+            assert argv == FIND_BROKER or "broker" not in argv, argv
 
 
 def env_values(project) -> dict[str, str]:
@@ -45,7 +59,8 @@ def install(client, echo_repo, ref="v0.1.0", commit=None):
 
 @pytest.mark.parametrize("method,path", [("POST", "/inspect"), ("POST", "/install"),
                                          ("POST", "/upgrade"), ("POST", "/remove"),
-                                         ("GET", "/jobs/" + "0" * 32), ("GET", "/installed")])
+                                         ("GET", "/jobs/" + "0" * 32), ("GET", "/installed"),
+                                         ("GET", "/services")])
 def test_every_route_but_health_needs_the_token(app, method, path):
     anon = TestClient(app, raise_server_exceptions=False)
     r = anon.request(method, path, json={})
@@ -195,10 +210,13 @@ def test_install_runs_the_expected_commands_and_leaves_the_expected_files(client
     assert job["state"] == "done", job
     assert (job["kind"], job["service"], job["source"], job["ref"], job["commit"]) == (
         "install", "echo", SOURCE, "v0.1.0", echo_repo.v1)
+    # The plugin is built and started, and the RUNNING broker joins its
+    # network: nothing recreates or restarts the broker.
     assert fake_docker.commands() == [["compose", "up", "-d", "--build", "plugin-echo"],
-                                      ["compose", "up", "-d", "broker"]]
+                                      FIND_BROKER, CONNECT]
+    never_recreates_the_broker(fake_docker)
     # Every compose run is against the checkout, with the new overlay in the set.
-    for argv in fake_docker.calls:
+    for argv in fake_docker.calls[:2]:
         assert argv[:4] == ["docker", "compose", "--project-directory", str(project)]
         assert "plugins.d/echo/compose.yml" in argv
     svc = project / "plugins.d" / "echo"
@@ -243,9 +261,10 @@ def test_a_failed_build_rolls_everything_back(client, project, fake_docker, echo
     assert job["state"] == "failed" and "plugin-echo failed (exit 1)" in job["error"]
     assert fake_docker.commands() == [["compose", "up", "-d", "--build", "plugin-echo"],
                                       ["compose", "rm", "-s", "-f", "plugin-echo"],
-                                      ["compose", "up", "-d", "broker"]]
-    # The broken overlay is out of the file set before the broker is touched.
-    assert "plugins.d/echo/compose.yml" not in fake_docker.calls[-1]
+                                      FIND_BROKER, DISCONNECT, NETWORK_RM]
+    never_recreates_the_broker(fake_docker)
+    # The broken overlay is out of the file set before any later compose run.
+    assert "plugins.d/echo/compose.yml" not in fake_docker.calls[2]
     assert not (project / "plugins.d" / "echo").exists()
     assert client.get("/installed").json() == {"items": []}
     assert any("simulated failure" in line for line in job["log"])
@@ -291,8 +310,8 @@ def test_upgrade_moves_to_the_new_commit(client, project, fake_docker, echo_repo
     job = run_job(client, "/upgrade", {"service": "echo", "source": SOURCE, "ref": "v0.2.0",
                                        "commit": echo_repo.v2})
     assert job["state"] == "done", job
-    assert fake_docker.commands() == [["compose", "up", "-d", "--build", "plugin-echo"],
-                                      ["compose", "up", "-d", "broker"]]
+    # Same network, URL and token: the broker needs no command at all.
+    assert fake_docker.commands() == [["compose", "up", "-d", "--build", "plugin-echo"]]
     [item] = client.get("/installed").json()["items"]
     assert (item["ref"], item["commit"], item["installed_at"]) == (
         "v0.2.0", echo_repo.v2, installed_at)
@@ -364,9 +383,10 @@ def test_remove_keeps_volumes_and_retires_the_secrets(client, project, fake_dock
     assert job["state"] == "done", job
     assert (job["kind"], job["service"], job["purge"]) == ("remove", "echo", False)
     assert fake_docker.commands() == [["compose", "rm", "-s", "-f", "plugin-echo"],
-                                      ["compose", "up", "-d", "broker"],
-                                      ["docker", "network", "rm", "aab_net_echo"]]
-    # Stopped while its overlay was in the set; the broker recreated without it.
+                                      FIND_BROKER, DISCONNECT, NETWORK_RM]
+    never_recreates_the_broker(fake_docker)
+    # Stopped while its overlay was in the set; the broker leaves the network
+    # while it keeps running, then the network goes.
     assert "plugins.d/echo/compose.yml" in fake_docker.calls[0]
     assert "plugins.d/echo/compose.yml" not in fake_docker.calls[1]
     assert not (project / "plugins.d" / "echo").exists()
@@ -383,7 +403,7 @@ def test_remove_with_purge_deletes_volumes_and_secrets(client, project, fake_doc
     fake_docker.calls.clear()
     job = run_job(client, "/remove", {"service": "echo", "purge": True})
     assert job["state"] == "done", job
-    assert fake_docker.commands()[3:] == [["docker", "volume", "rm", "aab_echo_secrets"],
+    assert fake_docker.commands()[4:] == [["docker", "volume", "rm", "aab_echo_secrets"],
                                           ["docker", "volume", "rm", "aab_echo_data"]]
     assert "PLUGIN_TOKEN_ECHO" not in (project / ".env").read_text()
 
@@ -520,3 +540,145 @@ def test_a_git_token_is_not_accepted_where_no_clone_happens(client, echo_repo):
     install(client, echo_repo)
     r = client.post("/remove", json={"service": "echo", "git_token": PLANTED})
     assert r.status_code == 400 and PLANTED not in r.text
+
+
+# ---- the broker's network, joined and left at runtime --------------------------------------
+
+ALREADY = (1, "Error response from daemon: endpoint with name aab-broker-1 already exists in "
+              "network aab_net_echo")
+
+
+def test_a_retried_connect_that_already_holds_is_done(client, project, fake_docker, echo_repo):
+    """`network connect` is idempotent: "already exists" means the broker is
+    on the network, which is the step's goal."""
+    fake_docker.answer["network connect"] = ALREADY
+    job = install(client, echo_repo)
+    assert job["state"] == "done", job
+    assert any("already so: nothing to do" in line for line in job["log"])
+    assert (project / "plugins.d" / "echo" / "compose.yml").exists()
+
+
+def test_a_failed_connect_rolls_the_install_back(client, project, fake_docker, echo_repo):
+    fake_docker.answer["network connect"] = (1, "Error response from daemon: boom")
+    job = install(client, echo_repo)
+    assert job["state"] == "failed" and "connecting the broker to aab_net_echo" in job["error"]
+    assert fake_docker.commands()[-5:] == [CONNECT, ["compose", "rm", "-s", "-f", "plugin-echo"],
+                                           FIND_BROKER, DISCONNECT, NETWORK_RM]
+    never_recreates_the_broker(fake_docker)
+    assert not (project / "plugins.d" / "echo").exists()
+    assert client.get("/installed").json() == {"items": []}
+
+
+@pytest.mark.parametrize("output", ["", "WARN[0000] something\n",
+                                    f"{BROKER_ID}\n{'fedcba9876543210' * 4}\n"])
+def test_install_needs_exactly_one_running_broker(client, project, fake_docker, echo_repo,
+                                                  output):
+    """No broker container (or two) is a failed install, rolled back: the
+    plugin would be unreachable. A warning line is never taken for an id."""
+    fake_docker.answer["ps -q broker"] = (0, output)
+    job = install(client, echo_repo)
+    assert job["state"] == "failed" and "broker container" in job["error"]
+    assert not any(argv[:3] == ["docker", "network", "connect"] for argv in fake_docker.calls)
+    assert not (project / "plugins.d" / "echo").exists()
+
+
+@pytest.mark.parametrize("answer", [
+    (1, f"Error response from daemon: container {BROKER_ID} is not connected to network "
+        "aab_net_echo"),
+    (1, "Error response from daemon: network aab_net_echo not found"),
+])
+def test_remove_when_the_broker_already_left_the_network(client, project, fake_docker,
+                                                         echo_repo, answer):
+    install(client, echo_repo)
+    fake_docker.answer["network disconnect"] = answer
+    job = run_job(client, "/remove", {"service": "echo"})
+    assert job["state"] == "done", job
+    assert any("already so: nothing to do" in line for line in job["log"])
+    assert fake_docker.commands()[-1] == NETWORK_RM
+
+
+def test_remove_without_a_running_broker_still_removes_the_network(client, project,
+                                                                    fake_docker, echo_repo):
+    install(client, echo_repo)
+    fake_docker.calls.clear()
+    fake_docker.answer["ps -q broker"] = (0, "")
+    job = run_job(client, "/remove", {"service": "echo"})
+    assert job["state"] == "done", job
+    assert any("skipped disconnecting the broker" in line for line in job["log"])
+    assert fake_docker.commands() == [["compose", "rm", "-s", "-f", "plugin-echo"],
+                                      FIND_BROKER, NETWORK_RM]
+    assert not (project / "plugins.d" / "echo").exists()
+
+
+# ---- GET /services: how the broker reaches each installed service --------------------------
+
+def test_services_lists_each_installed_service_with_its_token(client, project, echo_repo):
+    assert client.get("/services").json() == {"items": []}
+    install(client, echo_repo)
+    token = env_values(project)["PLUGIN_TOKEN_ECHO"]
+    assert client.get("/services").json() == {"items": [
+        {"service": "echo", "url": "http://plugin-echo:8090", "token": token}]}
+    # The secret-store key is never handed out: the broker has no use for it.
+    assert env_values(project)["PLUGIN_SECRETS_KEY_ECHO"] not in client.get("/services").text
+    run_job(client, "/remove", {"service": "echo"})
+    assert client.get("/services").json() == {"items": []}
+
+
+def test_services_reads_the_token_live_from_env(client, project, echo_repo):
+    """A purge and a reinstall mint a new token; /services answers the new
+    one at once (the broker's own environment would still hold the old)."""
+    install(client, echo_repo)
+    old = env_values(project)["PLUGIN_TOKEN_ECHO"]
+    run_job(client, "/remove", {"service": "echo", "purge": True})
+    install(client, echo_repo)
+    new = env_values(project)["PLUGIN_TOKEN_ECHO"]
+    assert new != old
+    assert [i["token"] for i in client.get("/services").json()["items"]] == [new]
+
+
+def test_a_service_without_a_token_is_left_out_and_named(client, project, echo_repo, caplog):
+    import logging
+    caplog.set_level(logging.DEBUG)
+    install(client, echo_repo)
+    token = env_values(project)["PLUGIN_TOKEN_ECHO"]
+    envfile.retire(project / ".env", "echo")
+    assert client.get("/services").json() == {"items": []}
+    assert "installed service has no token in .env" in caplog.text
+    assert "PLUGIN_TOKEN_ECHO" in caplog.text and token not in caplog.text
+
+
+def test_services_skips_directories_that_are_not_installed_services(client, project, echo_repo):
+    install(client, echo_repo)
+    plugins = project / "plugins.d"
+    (plugins / "half").mkdir()                                    # no install.json
+    (plugins / "github").mkdir()                                  # a reserved name
+    (plugins / "github" / "install.json").write_text(json.dumps({"service": "github"}))
+    (plugins / "other").mkdir()                                   # a record naming another
+    (plugins / "other" / "install.json").write_text(json.dumps({"service": "Bad Name"}))
+    assert [i["service"] for i in client.get("/services").json()["items"]] == ["echo"]
+
+
+def test_services_never_reaches_a_log_line(client, project, echo_repo, caplog):
+    import logging
+    caplog.set_level(logging.DEBUG)
+    install(client, echo_repo)
+    r = client.get("/services")
+    assert r.status_code == 200
+    for secret in secrets_of(project):
+        assert secret not in caplog.text
+
+
+def test_a_job_masks_every_plugin_token_whatever_its_shape(project, remote, fake_docker,
+                                                           echo_repo):
+    """A hand-written plugin token (not 64-hex) printed by a command is
+    masked in the job's lines like a generated one."""
+    hand = "Hand-Written-plugin-token_42"
+    with (project / ".env").open("a", encoding="utf-8") as f:
+        f.write(f"PLUGIN_TOKEN_OTHER={hand}\n")
+    fake_docker.answer["--build plugin-echo"] = (0, f"building with {hand}")
+    app = create_app(make_settings(project), git=local_git(remote), runner=fake_docker)
+    c = TestClient(app, headers={"X-Installer-Token": TOKEN})
+    job = run_job(c, "/install", {"source": SOURCE, "ref": "v0.1.0", "commit": echo_repo.v1})
+    assert job["state"] == "done", job
+    assert hand not in json.dumps(job)
+    assert any("building with <redacted>" in line for line in job["log"])

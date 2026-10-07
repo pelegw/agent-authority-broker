@@ -1,13 +1,13 @@
 """Install, upgrade and remove run as jobs: one at a time, persisted, with a capped log.
 
-Every mutation is asynchronous because it recreates the broker (its
-environment changes), which is the process the console is polling through:
-the broker answers `POST /install` with a job id and polls `GET /jobs/<id>`
-across its own restart. So job state lives on disk,
-`plugins.d/_installer/jobs/<id>.json`, written atomically after every
-change, and survives an installer restart (a job that was queued or running
-when the installer stopped is marked failed on the next start: whatever it
-was doing did not finish under supervision).
+Every mutation is asynchronous because an image build can take minutes: the
+broker answers `POST /install` with a job id, and the console (and the
+broker itself) polls `GET /jobs/<id>`. No job restarts the broker; job state
+still lives on disk, `plugins.d/_installer/jobs/<id>.json`, written
+atomically after every change, so it survives an installer restart and a
+broker restart alike (a job that was queued or running when the installer
+stopped is marked failed on the next start: whatever it was doing did not
+finish under supervision).
 
 One worker thread runs jobs in order, and `submit` refuses while one is
 queued or running: two compose runs against one project never interleave.
@@ -15,10 +15,11 @@ queued or running: two compose runs against one project never interleave.
 Log lines are for the owner: steps, commands (argv carries no secret), exit
 codes and a short, redacted tail of command output. Never a token: every line
 passes the shared redaction backstop, 64-hex runs (the shape of every
-plugin token) are masked, at the cost of image digests, and so is every
-value the store was told is secret, whatever its shape: INSTALLER_TOKEN for
-every job, and a job's own secrets (the GitHub token its request carried,
-`submit(..., mask=...)`) for that job. A job's secrets live in memory only,
+plugin token) are masked, at the cost of image digests (and container ids,
+which the network step prints), and so is every value the store was told is
+secret, whatever its shape: INSTALLER_TOKEN for every job, and a job's own
+secrets (the GitHub token its request carried, and every plugin token in
+.env when it was submitted, `submit(..., mask=...)`) for that job. A job's secrets live in memory only,
 beside its work, and are dropped when it finishes: the job record never
 holds them, and a job is never re-run after a restart, so nothing needs them
 later.
