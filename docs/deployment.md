@@ -29,7 +29,7 @@ console setting with its bounds.
 | Service | Image / build | Networks | Published port | Volumes |
 |---|---|---|---|---|
 | `edge` (public overlay only) | `caddy:2-alpine` | `edge_net` | `443` | `caddy_data`, `edge/Caddyfile` (ro), `edge/certs` (ro) |
-| `broker` | `./broker` | `edge_net`, `net_whatsapp`, `net_github`, `net_google`; `net_installer` with the installer; `net_<service>` per installed plugin | `127.0.0.1:${BROKER_PORT:-8080}` in the base file only; none in public mode | `broker_data` |
+| `broker` | `./broker`, tagged `aab-broker` | `edge_net`, `net_whatsapp`, `net_github`, `net_google`; `net_installer` with the installer; `net_<service>` per installed plugin | `127.0.0.1:${BROKER_PORT:-8080}` in the base file only; none in public mode | `broker_data` |
 | `plugin-whatsapp` | `./plugins/whatsapp` | `net_whatsapp`, `wa_internal` | none | `wa_data` (ro), `whatsapp_secrets` |
 | `whatsapp-sidecar` | `./sidecars/whatsapp` | `wa_internal` | none | `wa_data` (rw), `wa_session` (rw, this service only) |
 | `plugin-github` | `./plugins/github` | `net_github` | none | `github_secrets`, `${GITHUB_APP_KEY_DIR}` bind at `/run/secrets/github` (ro) |
@@ -37,7 +37,7 @@ console setting with its bounds.
 | `aab-installer` (installer overlay only) | `./installer` | `net_installer` | none | `/var/run/docker.sock`, the checkout `${AAB_HOME}` at the same path |
 | `plugin-<service>` (each installed external plugin) | `./plugins.d/<service>/src` (the plugin's own Dockerfile) | `net_<service>` | none | `<service>_secrets`, the `<service>_*` volumes its descriptor declares |
 | `log-shipper` (New Relic overlay only) | `fluent/fluent-bit` (pinned version) | `net_logs` | `127.0.0.1:24224` (the Docker daemon's log driver) | `ops/fluent-bit` (ro) |
-| `audit-exporter` (New Relic overlay only) | `./broker` (the broker image) | none (`network_mode: none`) | none | `broker_data` (ro), `audit_export_state` |
+| `audit-exporter` (New Relic overlay only) | `aab-broker` (the broker's image; no build of its own) | none (`network_mode: none`) | none | `broker_data` (ro), `audit_export_state` |
 
 - `edge_net` carries edge ↔ broker only, so a compromised edge cannot reach any
   plugin's `/perform`.
@@ -459,10 +459,22 @@ Then run `$C up -d --build`, with `C` from
 - **What leaves the server.** Every log line, and every row of the two audit
   tables with all its columns. They carry identifiers (resource ids, key
   names, usernames, client IPs) but no secret, params, message text, note or
-  label. `AUDIT_EXPORT_HASH_RESOURCES=true` hashes the resource ids in the
-  audit export, not in the log lines.
-- **What never leaves.** The WhatsApp pairing QR (the shipper drops it), the
-  shipper's own log, every other table, and every secret.
+  label. The WhatsApp sidecar's crash output leaves too.
+- **Typed text in the audit export.** The export always replaces the values
+  of the `audit_log.detail` keys `reason`, `note`, `label`, `message` and
+  `text` with `redacted:sha256:<16 hex>`. The owner's reason for hiding a
+  resource is such text. A `detail` that is not a JSON object is replaced
+  whole.
+- **Hashed ids.** `AUDIT_EXPORT_HASH_RESOURCES=true` also hashes the
+  resource ids in the audit export, not in the log lines.
+- **What never leaves.** The WhatsApp pairing QR and its code (the shipper
+  drops them), the shipper's own log, every other table, and every secret.
+- **Plugins installed earlier.** A plugin installed before the installer
+  wrote `plugins.d/<service>/newrelic.yml` keeps its logs local. Write the
+  file once per such service, with the installer's own template:
+  `$C exec aab-installer python -m aab_installer.render_newrelic <service>`
+  (or `--all`). Then set `C` again and run `$C up -d plugin-<service>`.
+  `docs/logging.md` > What the overlay adds has the steps.
 - **Retention.** New Relic keeps logs for a limited time: 30 days on the
   free tier at the time of writing. `broker.db` stays the record. Back it up.
 - **A shipper outage blocks nothing.** The services log with

@@ -163,7 +163,10 @@ It changes one thing: the plugin's logging goes to the New Relic log shipper,
 like the logging of every other service. `scripts/compose-files.sh` loads it
 only when `NEWRELIC_ENABLED=true` (`docs/logging.md`). The installer builds
 it from the service name alone. Its golden file is
-`installer/tests/golden/finance.newrelic.yml`.
+`installer/tests/golden/finance.newrelic.yml`. A plugin installed before
+the installer wrote this file gets it once from
+`python -m aab_installer.render_newrelic <service>`, through the same
+template (`docs/logging.md`, What the overlay adds).
 
 ## The base image
 

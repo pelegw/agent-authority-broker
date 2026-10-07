@@ -372,9 +372,29 @@ three services get their override from a file of their own:
 
 `scripts/compose-files.sh` adds these files after all other files, and only
 together with the file that defines the service. The installer writes
-`newrelic.yml` on every install and upgrade, whatever the setting. A plugin
-installed before this change has no such file. Its logs stay local until
-its next upgrade.
+`newrelic.yml` on every install and upgrade, whatever the setting.
+
+**A plugin installed before the installer wrote `newrelic.yml`** has no such
+file. Its logs stay local until its next upgrade. To ship them now, write
+the file once for each such service. The command uses the installer's own
+template, so a later upgrade writes the same bytes:
+
+```bash
+C="docker compose $(scripts/compose-files.sh)"
+$C exec aab-installer python -m aab_installer.render_newrelic <service>
+C="docker compose $(scripts/compose-files.sh)"
+$C up -d plugin-<service>
+```
+
+- Set `C` again after the command. Only then does the file set name the new
+  file.
+- To write the file for every installed plugin, use `--all` in place of
+  `<service>`. Then run `$C up -d`.
+- The command writes `plugins.d/<service>/newrelic.yml` and nothing else. It
+  refuses a service that is not installed.
+- The `exec` line needs the installer to run (`INSTALLER_ENABLED=true`). If
+  it is off, use this line in its place:
+  `docker compose -f docker-compose.yml -f docker-compose.installer.yml run --rm --no-deps aab-installer python -m aab_installer.render_newrelic <service>`.
 
 ### Enabling it
 
@@ -446,21 +466,44 @@ Relic output is named `nrlogs`.
 
 ### What leaves the server
 
-- Every log line of every service, after the four steps of
+- Every log line of every service, after the five steps of
   `ops/fluent-bit/pipeline.yaml` (below). The lines carry no secret, params,
   message text, note or label ([Never logged](#never-logged-and-the-backstop)).
   But they do carry identifiers: resource ids (a WhatsApp chat id holds a
   phone number), key names, usernames and client IPs.
-- Every row of `decisions` and `audit_log`, with every column. A decision row
-  holds `params_hash`, never the params. `audit_log.detail` can quote
+- Every row of `decisions` and `audit_log`, with every column, except the
+  typed text in `audit_log.detail` (below). A decision row holds
+  `params_hash`, never the params. `audit_log.detail` can quote
   identifiers, for example a hidden resource, a Telegram chat id or the
   resources of a capability.
 
-With `AUDIT_EXPORT_HASH_RESOURCES=true`, the audit export replaces these
-values with `sha256:<first 16 hex digits>`:
+Typed text in `audit_log.detail` never leaves. The audit export always
+replaces the value of these keys, at any depth and in any letter case, with
+`redacted:sha256:<first 16 hex digits>`:
+
+- `reason`. Today `hidden.add` records the owner's reason for hiding a
+  resource under it. The key decides, not the action, so the reason codes of
+  `action.denied` and `plugin.refused` are replaced too.
+- `note`, `label`, `message` and `text`. No action records them today. They
+  are reserved, so a future action that records typed text under one of
+  them cannot ship it by mistake.
+
+A `detail` that is not a JSON object is replaced whole. The other keys
+stay as stored: ids, counts, flags, the names of config fields, scopes. An
+empty or null value stays empty or null. `AUDIT_EXPORT_HASH_RESOURCES`
+does not change any of this. Two notes:
+
+- Equal texts give equal markers, so they can still be counted. The hash
+  has no key: somebody who guesses a short text can confirm the guess.
+- Key names and usernames are identifiers, not typed text in this sense.
+  They leave in clear, in `decisions.key_name`, `audit_log.actor`, `detail`
+  and the log lines. Do not put private words in a key name.
+
+With `AUDIT_EXPORT_HASH_RESOURCES=true`, the audit export also replaces
+these values with `sha256:<first 16 hex digits>`:
 
 - The `resource` column of both tables.
-- Every string inside `audit_log.detail`. Keys and numbers stay.
+- Every other string inside `audit_log.detail`. Keys and numbers stay.
 
 Equal values still give equal hashes, so counts and groups still work. Two
 limits apply:
@@ -473,11 +516,15 @@ limits apply:
 ### What never leaves the server
 
 - The WhatsApp pairing QR. The sidecar prints it to stdout for an operator
-  on this server, and the QR can link a phone to this broker. The shipper
-  keeps only the sidecar's real log lines: Go's format
-  (`2026/09/24 20:31:35.601156 ...`) and whatsmeow's
-  (`20:31:35.601 [WhatsApp INFO] ...`). The QR block, the banners and
-  anything else the sidecar prints stay in `docker compose logs`.
+  on this server (`sidecars/whatsapp/internal/wa/client.go`), and the QR can
+  link a phone to this broker. The sidecar's log lines and any crash output
+  go to stderr. The shipper keeps everything from stderr. From stdout it
+  keeps whatsmeow's log lines only (`20:31:35.601 [WhatsApp INFO] ...`).
+  The QR block, the banners and anything else on stdout stay in
+  `docker compose logs`.
+- The pairing code in a log line. At `LOG_LEVEL=DEBUG`, whatsmeow logs the
+  code itself on its `QRChannel` logger. The shipper drops every line of
+  that logger, and every sidecar line that carries a pairing code.
 - The shipper's own log.
 - Any table but `decisions` and `audit_log`. The exporter never reads
   `actions` (params, notes, labels) or `plugin_secrets`.
@@ -486,17 +533,23 @@ limits apply:
 Keep `LOG_LEVEL=INFO` while shipping. `DEBUG` adds lines meant for local
 diagnosis.
 
+The sidecar's crash output does leave the server, on purpose: a Go panic
+writes its message and its stack to stderr, and the shipper keeps them.
+
 ### The shipper's pipeline
 
-`ops/fluent-bit/pipeline.yaml` changes each record in four steps:
+`ops/fluent-bit/pipeline.yaml` changes each record in five steps:
 
 1. Docker splits a line longer than 16 KB into parts. The `multiline` filter
    joins them, so a large audit row still parses as one JSON object.
-2. The `grep` filter drops every line of `whatsapp-sidecar` that is not a
-   log line (above).
-3. The `parser` filter turns each JSON line into attributes. A text line
+2. The first `grep` filter keeps a `whatsapp-sidecar` record only if it
+   came from stderr, or if it is a whatsmeow log line on stdout (above).
+3. The second `grep` filter drops every `whatsapp-sidecar` record of
+   whatsmeow's `QRChannel` logger, and every record that carries a pairing
+   code.
+4. The `parser` filter turns each JSON line into attributes. A text line
    does not parse and passes unchanged.
-4. A parsed service line has its own `message`, so the `modify` filter drops
+5. A parsed service line has its own `message`, so the `modify` filter drops
    the raw copy. An audit row has no `message`, so its raw line stays as the
    log message.
 
@@ -513,7 +566,9 @@ it did not print before as one JSON line:
 ```
 
 - `service` is always `audit`. `table` is `decisions` or `audit_log`. The
-  other keys are the columns of the row, with their stored values.
+  other keys are the columns of the row, with their stored values. The one
+  exception is the typed text in `audit_log.detail`
+  ([What leaves the server](#what-leaves-the-server)).
 - The JSON columns (`grant_chain`, `enforced_where`, `detail`) stay JSON
   text, as stored. The hash chain covers their parsed values
   (`broker/broker/decisions.py`), so parse them to recompute a hash.
@@ -535,14 +590,22 @@ How it reads `broker.db`:
 Where it resumes:
 
 - A cursor file in the volume `audit_export_state` holds, per table, the
-  last exported id and a digest of that row. It cannot live in
-  `app_config`, because the exporter cannot write `broker.db`.
+  last exported id and a digest of that row's identity columns. These are
+  `id` and `hash` for `decisions`, and `id`, `ts`, `actor` and `action` for
+  `audit_log`. The cursor cannot live in `app_config`, because the exporter
+  cannot write `broker.db`.
+- An upgrade that adds a column (`db._MIGRATIONS`) does not change the
+  digest. The export continues after the cursor. The new column appears in
+  the next rows.
+- A cursor from the first release holds a digest of every column. The
+  exporter still accepts it for an unchanged row, and rewrites it in the
+  new form.
 - The exporter prints a batch of up to 500 rows, then moves the cursor. A
   crash between the two prints that batch again. Thus a row can arrive
   twice, but never not at all. `table`, `id` and `hash` identify a repeat.
-- If the row under the cursor is gone or changed, `broker.db` was replaced
-  or restored. The exporter logs a warning and exports that table again from
-  the start.
+- If the row under the cursor is gone, or an identity column changed,
+  `broker.db` was replaced or restored. The exporter logs a warning and
+  exports that table again from the start.
 - A missing, empty or malformed `broker.db` exports nothing and moves
   nothing.
 
@@ -555,8 +618,23 @@ $C run --rm audit-exporter aab audit export --reset
 $C start audit-exporter
 ```
 
+With `--loop`, `--reset` stays in force until a run succeeds. A first run
+that fails, for example because the broker is not up yet, does not use it.
+
 Without Docker, the same command reads any copy of `broker.db`:
 `aab audit export --db broker.db --state cursor.json`.
+
+Its settings:
+
+- `aab audit export` reads `AUDIT_EXPORT_STATE`, `AUDIT_EXPORT_INTERVAL`
+  (default 3600, at least 1) and `AUDIT_EXPORT_HASH_RESOURCES` (default
+  `false`) as settings (`broker/broker/config.py`).
+- The flags `--state`, `--interval` and `--hash-resources` override them.
+- A value it cannot read stops it before it reads anything. It names the
+  variable, never the value.
+- On `docker stop` it exits within about a second, or when the current run
+  ends. Its signal handler only sets a flag, and the loop looks at the flag
+  every second.
 
 ### Outages and delivery
 
@@ -674,4 +752,7 @@ characters in its log, as it always has. This is the pairing path that needs
 no console (`docs/plugins/whatsapp.md`). A code is valid for tens of seconds.
 It has no value after a device pairs. Also, a person needs Docker access on
 the server to read a container's log. The sidecar's log lines record the
-event (`qr event=code`, `qr served`), never the code.
+event (`qr event=code`, `qr served`), never the code. The QR goes to
+stdout and the log lines to stderr. Thus the New Relic shipper keeps the log
+lines and drops the QR
+([What never leaves the server](#what-never-leaves-the-server)).

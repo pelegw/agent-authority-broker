@@ -92,7 +92,7 @@ turn shipping on or point it elsewhere.
 | `NEWRELIC_ENABLED` | `scripts/compose-files.sh` | Loads the overlay at all. Off (`false`) by default; exactly `true` turns it on. |
 | `NEW_RELIC_REGION` | compose | `US` or `EU`: picks the shipper's configuration file, and with it the endpoint. |
 | `NEW_RELIC_LICENSE_KEY` | `log-shipper` only | The ingest key. A third-party credential, kept here by exception (below). |
-| `AUDIT_EXPORT_INTERVAL` | the audit exporter | Seconds between two exports (default 3600). |
+| `AUDIT_EXPORT_INTERVAL` | the audit exporter | Seconds between two exports (default 3600, at least 1). An unreadable value stops the exporter. |
 | `AUDIT_EXPORT_HASH_RESOURCES` | the audit exporter | `true` replaces each resource id in the audit export with a sha256 prefix. An unreadable value stops the exporter, so it never guesses "off". |
 
 **The exception: `NEW_RELIC_LICENSE_KEY`.** The rule for third-party
