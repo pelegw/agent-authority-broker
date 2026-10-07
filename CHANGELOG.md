@@ -63,6 +63,50 @@ lives only in `VERSION`.
     The console's file-only list names them.
 
 ### Changed
+- **Installing, upgrading and removing an external plugin no longer
+  restarts the broker.** The plugin's own container is still created or
+  recreated.
+  - The installer's install job runs `up -d --build plugin-<service>`, then
+    `docker network connect aab_net_<service> <broker container>` (the
+    container from `docker compose ps -q broker`) instead of
+    `up -d broker`. The remove job runs `docker network disconnect` before
+    `docker network rm`. Upgrade runs no broker command. Both network
+    commands are idempotent ("already exists", "is not connected" and "not
+    found" count as done). A failed install rolls the network back too.
+  - New installer route `GET /services` (token-guarded):
+    `{"items": [{"service", "url": "http://plugin-<service>:8090", "token"}]}`
+    for every installed service, the token read from `.env` at each request
+    (never the secrets key, never logged). Job lines now also mask every
+    `PLUGIN_TOKEN_*` value in `.env`, whatever its shape.
+  - The broker's registry merges these dynamic services with the ones in
+    its environment (`Registry.set_dynamic_services`, `services()`). For a
+    service the installer lists, the installer's URL and token win. So a
+    purge and a reinstall between two deploys work with the new token. A
+    service it stopped listing is evicted at once (agents get 404), even if
+    the environment still names it. Every other service comes from the
+    environment.
+  - The registry refuses the whole list, and keeps the previous set, when
+    the list names a service the stack itself uses (`whatsapp`, `github`,
+    `google`, `installer`, ...). It does the same for a URL other than
+    `http://plugin-<service>:8090` and for a malformed token.
+  - `services/plugin_install.py`: `reconcile_services()` applies the list at
+    boot, after the environment's discovery. It applies it again when a job
+    ends, seen through the console's job route or the broker's own polling
+    of its jobs. It also runs every 60 s. All of it runs in a lifespan
+    background loop (`inst-` request ids), never in a request.
+  - After an install or upgrade, the broker discovers the service again. It
+    retries every 2 s while the container starts. An installer that is off,
+    down or answering garbage changes nothing and is logged once.
+  - Discovery is now authoritative per service: a plugin that a service no
+    longer offers as pinned stops being served. So a failed upgrade's
+    restored container is not served under the moved pin until the owner
+    pins it again, as after a restart. A partial discovery no longer resets
+    the retries of other unreachable services.
+  - The compose overlays still give the broker `net_<service>`,
+    `PLUGIN_URL_<SERVICE>` and `PLUGIN_TOKEN_<SERVICE>`, so the next full
+    `docker compose up -d` (a deploy) recreates the broker once into the
+    same state. The console's job panel no longer says that the broker is
+    being recreated.
 - The broker holds one idle database connection while it runs
   (`db.hold_open()`), so `broker.db-wal` and `-shm` always exist. A reader on
   a read-only mount (the audit exporter) cannot create them, and SQLite

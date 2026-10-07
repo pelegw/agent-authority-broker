@@ -614,7 +614,11 @@ console              broker                 installer                 Docker
   |                    |<-- job id -------------| add tokens to .env    |
   |<-- job panel ------|                        | render compose.yml    |
   |   (polls)          |                        |-- compose up --build->|
-  |                    |  (broker restarts with the new env)            |
+  |                    |                        |-- network connect --->|
+  |                    |  (the broker keeps running; it joins the net)  |
+  |                    |-- GET /jobs/{id}: done |                       |
+  |                    |-- GET /services ------>|                       |
+  |                    |<-- url, token ---------|                       |
   |                    |-- discover /manifests ----------> plugin ------|
   |<-- card appears ---|  pin matches: registered                       |
   |-- Enable --------->|                                                |
@@ -628,14 +632,20 @@ What each step does:
    the commit. The owner's name is in the audit log.
 4. **Install** inspects the source again. If the ref now points to a
    different commit, the broker rejects the install. The job clones that
-   exact commit.
-5. **Discovery** compares the running plugin's manifest with the pin. The
+   exact commit. It starts the plugin and connects the running broker to the
+   plugin's network. The broker does not restart.
+5. **Services**: when the job ends, the broker asks the installer for the
+   URL and the token of each installed plugin (`GET /services`).
+6. **Discovery** compares the running plugin's manifest with the pin. The
    broker rejects a mismatch and shows it as "offered, awaiting review".
 
 An upgrade does the same flow again with a new ref. The review shows the
-differences.
-Remove stops the container, deletes the overlay and removes the network.
+differences. When the job ends, the broker discovers the new container.
+Remove stops the container, deletes the overlay, disconnects the broker from
+the network and removes the network. The broker then forgets the plugin.
 The volumes and the two `.env` secrets stay unless the owner chooses purge.
+The next deploy recreates the broker once with the same state, from the
+overlay. No install, upgrade or remove does.
 
 ### 11.1 What the installer is
 
@@ -650,6 +660,7 @@ equal to root on the host. These limits apply:
 | Only a tag `vN.N.N` or a 40-hex commit as ref. | the installer |
 | The overlay comes from the descriptor, never from the repository. | the installer |
 | One job at a time. The log never holds a token. | the installer |
+| It never recreates the broker. It only connects the broker to a plugin's network, or disconnects it. | the installer |
 | Off by default. | `INSTALLER_ENABLED=false` |
 | Private repositories need a read-only GitHub token. The broker stores it encrypted. The installer keeps no copy. | the console: **+ Add plugin**, **GitHub token for private plugin repositories** |
 | The base image must be in the daemon's image store. | `docker login ghcr.io`, then `docker pull` on the host |

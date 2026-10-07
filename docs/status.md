@@ -11,6 +11,12 @@ here instead of holding them.
   server. From the console, it installed the echo fixture from a public
   repository and the finance plugin from a private one. Then it removed and
   purged them.
+- **Install and remove without a broker restart.** Under Docker on a laptop,
+  the echo fixture was installed and removed with the same broker container
+  id and start time. The broker joined and left `aab_net_echo`. An agent
+  call answered 200 after the install and 404 after the remove. A
+  `docker restart` of the broker kept the network and found echo again. A
+  later `up -d` recreated the broker once into the same state.
 - **The images and the local stack.** The images build, and the stack runs
   as uid 10001 with only the broker published. `plugin-whatsapp` reads the
   sidecar's WAL-mode archive through its read-only mount. A stand-in writer
@@ -22,6 +28,10 @@ here instead of holding them.
 
 ## Not verified
 
+- **Install without a broker restart on the production server, and an
+  upgrade end to end.** The public echo fixture has one tag, so the laptop
+  run did no upgrade. The tests cover the upgrade with the real installer
+  and a recording Docker.
 - **Shipping to New Relic.** Nobody has sent data to a real New Relic
   account yet: it needs the owner's license key. These parts were checked
   locally under Docker:
@@ -53,7 +63,13 @@ here instead of holding them.
   budget to a key.
 - **Extra MCP hostnames apply at the next broker start.** Every other console
   setting applies on the next request.
-- **The broker restarts on each plugin install, upgrade and remove.** The
-  installer recreates the broker container because the plugin's network and
-  the broker's environment are compose-level settings. The job panel polls
-  through the restart. A restart-free design is a known follow-up.
+- **The next deploy recreates the broker once after a plugin install or
+  remove.** An install, upgrade or remove never restarts the broker. The
+  installer connects the running broker to the plugin's network, or
+  disconnects it. The broker reads the plugin's URL and token from the
+  installer. The overlay still declares both for the broker, so the next
+  full `docker compose up -d` recreates the broker once into the same state.
+  The merge rule: for a service that the installer lists, the installer's
+  URL and token win over the broker's environment. A service that it
+  stopped listing is dropped. Every other service comes from the
+  environment.

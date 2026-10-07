@@ -288,7 +288,9 @@ renders itself (`docs/plugin-packaging.md`).
    install and upgrade; git gets it only through `GIT_ASKPASS`, for
    `github.com` only. Then `github.com/pelegw/aab-plugin-finance` and
    `v0.1.0`, Inspect, read the review, Install. The job panel follows the
-   build and the broker's restart; the card appears disabled; enable it.
+   build; the broker keeps running (the installer connects it to the
+   plugin's network); the card appears disabled; enable it. The next
+   `deploy/push.sh` recreates the broker once into the same state.
 
 Upgrade and remove are on the plugin's card (`docs/console.md`). Installed
 plugins live in `/opt/aab/plugins.d/` (the installer's; `deploy/push.sh`

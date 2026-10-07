@@ -74,9 +74,10 @@ It has no JSON mode.
 
 - **Every HTTP request** gets an id. It is the caller's `X-Request-Id` when
   that is well formed (`[A-Za-z0-9._-]{1,128}`), else a fresh
-  32-hex-character id. The broker rejects ids that start with `sched-` or
-  `tg-` and generates one instead. Those prefixes belong to its own
-  background jobs, so no caller can make its calls look like the scheduler's.
+  32-hex-character id. The broker rejects ids that start with `sched-`,
+  `tg-` or `inst-` and generates one instead. Those prefixes belong to its
+  own background jobs, so no caller can make its calls look like the
+  scheduler's.
   The `X-Request-Id` response header echoes the id, so an agent can quote it.
 - **The decision record uses it**: `engine.new_request_id()` returns the
   current request's id. So the `request_id` of a decision row is the id on
@@ -94,6 +95,9 @@ It has no JSON mode.
     per-delivery line names its tick.
   - Each Telegram update runs under a `tg-<hex>` id. A tap's approval, the
     delivery it triggers and the decision rows all carry it.
+  - Each tick of the installer sync runs under an `inst-<hex>` id. It sends
+    the id to the installer, so its `GET /services` and `GET /jobs` lines
+    carry it too.
   - A console approval runs under the id of the console request.
 
 To follow one call:
@@ -238,11 +242,19 @@ Every line goes through the same redaction backstop. Then two more
 replacements apply:
 
 - Every run of 64 hex digits becomes `<hex64>`. That is the shape of every
-  plugin token. The cost is that image digests become `<hex64>` too.
+  plugin token. The cost is that image digests and the broker's container
+  id (in `docker network connect`) become `<hex64>` too.
 - Every secret value the job received becomes `<redacted>`, whatever its
-  shape. That is `INSTALLER_TOKEN` and the GitHub token its request carried.
+  shape. That is `INSTALLER_TOKEN`, every `PLUGIN_TOKEN_<SERVICE>` in `.env`
+  when the job was asked for, and the GitHub token its request carried.
   The installer holds that token in memory for that job only and never saves
   it.
+
+The installer's `GET /services` answer carries each installed service's
+`PLUGIN_TOKEN_<SERVICE>`. No log line on either side carries it: the
+installer's access line has the path only, and the broker logs service
+names only. A sync problem (an installer that is down, or an answer the
+broker refuses) is logged once, with its reason, not on every tick.
 
 A line has at most 500 characters, and a job at most 300 lines. The log keeps
 the first 20 and the last 280 lines. git's own output never gets into the log.
