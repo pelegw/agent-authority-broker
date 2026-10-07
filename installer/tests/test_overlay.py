@@ -143,7 +143,7 @@ def test_the_overlay_only_points_at_the_services_own_directory():
 
 def test_the_example_renders_exactly_the_golden_newrelic_override():
     d = descriptor.parse(FINANCE)
-    assert overlay.render_newrelic(d) == GOLDEN_NEWRELIC.read_bytes().decode("utf-8")
+    assert overlay.render_newrelic(d.service) == GOLDEN_NEWRELIC.read_bytes().decode("utf-8")
 
 
 @pytest.mark.parametrize("text", VARIANTS, ids=["finance", "minimal", "full"])
@@ -152,7 +152,7 @@ def test_the_newrelic_override_changes_the_plugins_logging_and_nothing_else(text
     own), one key (logging), the shipper's fluentd block. No network, volume,
     port, environment or interpolation can come in through it."""
     d = descriptor.parse(text)
-    out = overlay.render_newrelic(d)
+    out = overlay.render_newrelic(d.service)
     doc = yaml.safe_load(out)
     n = overlay.names(d.service)
     assert doc == {"services": {n["compose_service"]: {"logging": {

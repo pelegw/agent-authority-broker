@@ -206,8 +206,7 @@ def test_install_runs_the_expected_commands_and_leaves_the_expected_files(client
     assert (svc / "compose.yml").read_text(encoding="utf-8") == overlay.render(
         parse(ECHO_DESCRIPTOR), "plugins.d/echo")
     # Written whatever NEWRELIC_ENABLED says: compose-files.sh decides.
-    assert (svc / "newrelic.yml").read_text(encoding="utf-8") == overlay.render_newrelic(
-        parse(ECHO_DESCRIPTOR))
+    assert (svc / "newrelic.yml").read_text(encoding="utf-8") == overlay.render_newrelic("echo")
     record = json.loads((svc / "install.json").read_text(encoding="utf-8"))
     assert (record["service"], record["source"], record["ref"], record["commit"]) == (
         "echo", SOURCE, "v0.1.0", echo_repo.v1)
@@ -328,8 +327,7 @@ def test_an_upgrade_adds_the_newrelic_override_to_an_older_install(client, proje
     job = run_job(client, "/upgrade", {"service": "echo", "source": SOURCE, "ref": "v0.2.0",
                                        "commit": echo_repo.v2})
     assert job["state"] == "done", job
-    assert (svc / "newrelic.yml").read_text(encoding="utf-8") == overlay.render_newrelic(
-        parse(ECHO_DESCRIPTOR))
+    assert (svc / "newrelic.yml").read_text(encoding="utf-8") == overlay.render_newrelic("echo")
 
 
 def test_upgrade_needs_an_installed_service_from_the_same_source(client, echo_repo):

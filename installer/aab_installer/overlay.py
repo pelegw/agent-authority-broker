@@ -27,7 +27,9 @@ scripts/compose-files.sh loads it only when NEWRELIC_ENABLED=true, after
 docker-compose.newrelic.yml, which cannot name an installed plugin itself (a
 compose override may not mention a service no loaded file defines). It is
 written on every install and upgrade whatever the setting, so turning New
-Relic on or off never needs a re-render.
+Relic on or off never needs a re-render. A plugin installed before the
+installer wrote it gets it once from `python -m aab_installer.render_newrelic`
+(render_newrelic.py), through this same function.
 
 Relative paths in an overlay resolve against the project directory (the
 gateway checkout), not against the overlay's own directory, which is why the
@@ -141,9 +143,11 @@ def newrelic_document(service: str) -> dict:
     return {"services": {names(service)["compose_service"]: {"logging": FLUENTD_LOGGING}}}
 
 
-def render_newrelic(d: Descriptor) -> str:
+def render_newrelic(service: str) -> str:
     """The YAML for `plugins.d/<service>/newrelic.yml`. Built from the
-    validated service name alone: nothing from the repository reaches it."""
-    body = yaml.safe_dump(newrelic_document(d.service), sort_keys=False,
+    validated service name alone: nothing from the repository reaches it.
+    The installer writes it on install and upgrade; render_newrelic.py
+    writes the same bytes for a plugin installed before that."""
+    body = yaml.safe_dump(newrelic_document(service), sort_keys=False,
                           default_flow_style=False, width=1000, allow_unicode=False)
-    return NEWRELIC_HEADER.format(service=d.service) + body
+    return NEWRELIC_HEADER.format(service=service) + body

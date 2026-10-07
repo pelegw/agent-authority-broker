@@ -67,6 +67,31 @@ def valid_service(service: object) -> str:
     return service
 
 
+# The record readers are plain functions as well as Installer methods, for
+# render_newrelic's command line: building an Installer clears the temporary
+# clones of a job that may be running.
+
+def read_record(plugins_dir: Path, service: str) -> dict | None:
+    """`service`'s install record, or None when it is not installed."""
+    path = plugins_dir / service / INSTALL_RECORD
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        return None
+    return {k: data.get(k) for k in RECORD_KEYS} if isinstance(data, dict) else None
+
+
+def installed_records(plugins_dir: Path) -> list[dict]:
+    out = []
+    if plugins_dir.is_dir():
+        for d in sorted(plugins_dir.iterdir()):
+            if d.is_dir() and SERVICE_RE.match(d.name):
+                rec = read_record(plugins_dir, d.name)
+                if rec:
+                    out.append(rec)
+    return out
+
+
 class Installer:
     def __init__(self, settings: Settings, git: Git, compose: Compose,
                  env_runner: envfile.Runner | None = None):
@@ -99,23 +124,10 @@ class Installer:
     # ---- the installed record ------------------------------------------------------
 
     def record(self, service: str) -> dict | None:
-        path = self.settings.plugins_dir / service / INSTALL_RECORD
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, NotADirectoryError, ValueError):
-            return None
-        return {k: data.get(k) for k in RECORD_KEYS} if isinstance(data, dict) else None
+        return read_record(self.settings.plugins_dir, service)
 
     def installed(self) -> list[dict]:
-        out = []
-        base = self.settings.plugins_dir
-        if base.is_dir():
-            for d in sorted(base.iterdir()):
-                if d.is_dir() and SERVICE_RE.match(d.name):
-                    rec = self.record(d.name)
-                    if rec:
-                        out.append(rec)
-        return out
+        return installed_records(self.settings.plugins_dir)
 
     # ---- inspect (synchronous) -----------------------------------------------------
 
@@ -182,7 +194,7 @@ class Installer:
         write_atomic(svc_dir / "compose.yml", render(d, service_dir(d.service)).encode("utf-8"))
         ctx.log(f"rendered {service_dir(d.service)}/compose.yml")
         # Always written; compose-files.sh decides whether it is loaded.
-        write_atomic(svc_dir / NEWRELIC_FILE, render_newrelic(d).encode("utf-8"))
+        write_atomic(svc_dir / NEWRELIC_FILE, render_newrelic(d.service).encode("utf-8"))
         now = int(time.time())
         record = {"service": d.service, "source": source, "ref": ref, "commit": commit,
                   "plugins": list(d.plugins),
